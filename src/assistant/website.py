@@ -27,65 +27,88 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None) -> 
     today = today or date.today()
     ident = profile.get("identity", {})
     e = html.escape
+    name = ident.get("name", "")
+    photo = ident.get("photo") or (
+        f"https://github.com/{ident['github']}.png" if ident.get("github") else ""
+    )
 
     def actives(section):
         return [x for x in profile.get(section, []) if x.get("status", "active") == "active"]
 
+    link_pills = [
+        f"<a class='pill' href='{e(link)}'>{e(link.split('//')[-1].rstrip('/'))}</a>"
+        for link in ident.get("links", []) if link
+    ]
+    if ident.get("emails"):
+        link_pills.append(f"<a class='pill' href='mailto:{e(ident['emails'][0])}'>✉ email</a>")
+
+    skills = actives("skills")
+    experience = profile.get("experience", [])
+    education = profile.get("education", [])
+    projects = actives("projects")
+    anchors = [("skills", "Skills", skills), ("experience", "Experience", experience),
+               ("education", "Education", education), ("projects", "Projects", projects),
+               ("todos", "Todos", True)]
+
     parts = [
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>",
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
-        f"<title>{e(ident.get('name', ''))}</title>",
-        "<link rel='stylesheet' href='agent-site.css'></head><body><main>",
-        # ── header / personal info ──
-        f"<header><h1>{e(ident.get('name', ''))}</h1>",
-        f"<p class='sub'>{e(' · '.join(ident.get('affiliations', [])))}</p>",
-        "<p class='links'>"
-        + " · ".join(
-            f"<a href='{e(link)}'>{e(link.split('//')[-1].rstrip('/'))}</a>"
-            for link in ident.get("links", []) if link
-        )
-        + (f" · <a href='mailto:{e(ident['emails'][0])}'>email</a>" if ident.get("emails") else "")
-        + "</p></header>",
+        f"<meta property='og:title' content='{e(name)}'>",
+        f"<meta property='og:image' content='{e(photo)}'>",
+        f"<title>{e(name)}</title>",
+        "<link rel='icon' href='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 "
+        "viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>'>",
+        "<link rel='preconnect' href='https://fonts.googleapis.com'>",
+        "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap'"
+        " rel='stylesheet'>",
+        "<link rel='stylesheet' href='agent-site.css'></head><body>",
+        # ── hero overlay: photo + personal info ──
+        "<header class='hero'><div class='hero-inner'>",
+        (f"<img class='avatar' src='{e(photo)}' alt='{e(name)}'>" if photo else ""),
+        f"<h1>{e(name)}</h1>",
+        f"<p class='tagline'>{e(' · '.join(ident.get('affiliations', [])))}</p>",
+        f"<nav class='pills'>{''.join(link_pills)}</nav>",
+        "<nav class='anchors'>"
+        + "".join(f"<a href='#{a_id}'>{a_label}</a>" for a_id, a_label, has in anchors if has)
+        + "</nav>",
+        "</div></header><main>",
     ]
 
-    skills = actives("skills")
     if skills:
-        parts.append("<section><h2>Skills</h2><p class='chips'>"
+        parts.append("<section id='skills' class='card'><h2>Skills</h2><p class='chips'>"
                      + "".join(f"<span class='chip'>{e(s['name'])}</span>" for s in skills)
                      + "</p></section>")
 
-    experience = profile.get("experience", [])
     if experience:
-        parts.append("<section><h2>Experience</h2><ul class='timeline'>")
+        parts.append("<section id='experience' class='card'><h2>Experience</h2><ul class='timeline'>")
         for job in experience:
             period = job.get("period", {})
             when = f"{period.get('start', '')} – {period.get('end') or 'present'}"
-            parts.append(f"<li><b>{e(str(job.get('title', '')))}</b>, "
-                         f"{e(str(job.get('org', '')))} <span class='when'>({e(when)})</span>")
+            parts.append(f"<li><div class='t-head'><b>{e(str(job.get('title', '')))}</b>"
+                         f" · {e(str(job.get('org', '')))}"
+                         f"<span class='when'>{e(when)}</span></div>")
             for h in job.get("highlights", []):
-                parts.append(f"<br><span class='hl'>· {e(str(h))}</span>")
+                parts.append(f"<div class='hl'>{e(str(h))}</div>")
             parts.append("</li>")
         parts.append("</ul></section>")
 
-    education = profile.get("education", [])
     if education:
-        parts.append("<section><h2>Education</h2><ul>")
+        parts.append("<section id='education' class='card'><h2>Education</h2><ul class='timeline'>")
         for school in education:
-            parts.append(f"<li><b>{e(str(school.get('school', '')))}</b> — "
-                         f"{e(str(school.get('degree', '')))} {e(str(school.get('period', '')))}</li>")
+            parts.append(f"<li><div class='t-head'><b>{e(str(school.get('school', '')))}</b>"
+                         f" · {e(str(school.get('degree', '')))}"
+                         f"<span class='when'>{e(str(school.get('period', '')))}</span></div></li>")
         parts.append("</ul></section>")
 
-    projects = actives("projects")
     if projects:
-        parts.append("<section><h2>Projects</h2><ul class='projects'>")
+        parts.append("<section id='projects' class='card'><h2>Projects</h2><div class='grid'>")
         for p in projects:
-            link = next(iter(p.get("evidence", [])), None)
-            name = f"<a href='{e(link)}'>{e(p['name'])}</a>" if link and str(link).startswith("http") else e(p["name"])
-            parts.append(f"<li><b>{name}</b> <span class='when'>({e(p.get('role', ''))})</span>")
-            for h in p.get("highlights", []):
-                parts.append(f"<br><span class='hl'>· {e(str(h))}</span>")
-            parts.append("</li>")
-        parts.append("</ul></section>")
+            link = next((str(l) for l in p.get("evidence", []) if str(l).startswith("http")), None)
+            title = f"<a href='{e(link)}'>{e(p['name'])}</a>" if link else e(p["name"])
+            highlights = "".join(f"<div class='hl'>{e(str(h))}</div>" for h in p.get("highlights", []))
+            parts.append(f"<div class='proj'><h3>{title}</h3>"
+                         f"<span class='role'>{e(p.get('role', ''))}</span>{highlights}</div>")
+        parts.append("</div></section>")
 
     parts.append(_render_calendar(todos, today))
     parts.append(
@@ -110,7 +133,7 @@ def _render_calendar(todos: list[dict], today: date) -> str:
         else:
             unscheduled.append(todo)
 
-    parts = [f"<section><h2>Todo Calendar — {today.strftime('%B %Y')}</h2><table class='cal'>",
+    parts = [f"<section id='todos' class='card'><h2>Todo Calendar — {today.strftime('%B %Y')}</h2><table class='cal'>",
              "<tr>" + "".join(f"<th>{d}</th>" for d in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")) + "</tr>"]
     for week in _calendar.Calendar().monthdayscalendar(today.year, today.month):
         parts.append("<tr>")
@@ -143,18 +166,77 @@ def _render_calendar(todos: list[dict], today: date) -> str:
     return "".join(parts)
 
 
-_CSS = """body{font-family:-apple-system,'Segoe UI',sans-serif;color:#1f2937;margin:0;background:#fafafa}
-main{max-width:780px;margin:0 auto;padding:32px 20px}
-header h1{margin-bottom:0}.sub{color:#6b7280;margin-top:4px}
-section{margin-top:28px}h2{border-bottom:2px solid #e5e7eb;padding-bottom:6px}
-.chip{display:inline-block;background:#eef2ff;border-radius:12px;padding:2px 10px;margin:2px;font-size:14px}
-.when{color:#9ca3af;font-size:13px}.hl{color:#4b5563;font-size:14px}
-ul.projects li,ul.timeline li{margin-bottom:10px}
-table.cal{border-collapse:collapse;width:100%}
-.cal th,.cal td{border:1px solid #e5e7eb;vertical-align:top;padding:4px;height:52px;width:14%;font-size:13px}
-.cal td.off{background:#f3f4f6}.cal td.today{background:#fef9c3}
-.cal .todo{background:#fee2e2;border-radius:4px;padding:1px 4px;margin-top:2px;font-size:11px}
-footer{margin-top:40px;color:#9ca3af;font-size:12px}
+_CSS = """*{box-sizing:border-box}
+body{font-family:'Inter',-apple-system,'Segoe UI',sans-serif;color:#1e293b;margin:0;
+  background:#f1f5f9}
+a{color:#4f46e5;text-decoration:none}a:hover{text-decoration:underline}
+
+/* ── hero overlay ── */
+.hero{background:linear-gradient(135deg,#0f172a 0%,#312e81 55%,#6d28d9 100%);
+  color:#fff;padding:72px 20px 96px;text-align:center;position:relative;overflow:hidden}
+.hero::after{content:'';position:absolute;inset:auto 0 -1px 0;height:70px;
+  background:#f1f5f9;clip-path:ellipse(75% 100% at 50% 100%)}
+.hero-inner{position:relative;z-index:1;max-width:820px;margin:0 auto}
+.avatar{width:148px;height:148px;border-radius:50%;object-fit:cover;
+  border:4px solid rgba(255,255,255,.85);box-shadow:0 0 0 8px rgba(255,255,255,.12),
+  0 18px 40px rgba(0,0,0,.45)}
+.hero h1{font-size:2.6rem;font-weight:800;margin:18px 0 4px;letter-spacing:-.02em}
+.tagline{color:#c7d2fe;font-size:1.05rem;margin:0 0 18px}
+.pills{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-bottom:22px}
+.pill{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.28);color:#fff;
+  border-radius:999px;padding:6px 16px;font-size:.9rem;backdrop-filter:blur(4px);
+  transition:background .2s}
+.pill:hover{background:rgba(255,255,255,.25);text-decoration:none}
+.anchors{display:flex;gap:22px;justify-content:center;flex-wrap:wrap}
+.anchors a{color:#e0e7ff;font-weight:600;font-size:.92rem;text-transform:uppercase;
+  letter-spacing:.08em}
+
+/* ── content cards ── */
+main{max-width:860px;margin:-48px auto 0;padding:0 20px 40px;position:relative;z-index:2}
+.card{background:#fff;border-radius:18px;box-shadow:0 8px 28px rgba(15,23,42,.08);
+  padding:28px 30px;margin-bottom:26px}
+h2{margin:0 0 16px;font-size:1.35rem;letter-spacing:-.01em}
+h2::after{content:'';display:block;width:44px;height:4px;border-radius:2px;margin-top:8px;
+  background:linear-gradient(90deg,#6366f1,#a855f7)}
+.chips{margin:0}.chip{display:inline-block;background:linear-gradient(135deg,#eef2ff,#f5f3ff);
+  border:1px solid #e0e7ff;color:#4338ca;border-radius:999px;padding:5px 14px;margin:3px;
+  font-size:.9rem;font-weight:600}
+.when{color:#94a3b8;font-size:.85rem;float:right}
+.hl{color:#475569;font-size:.92rem;margin-top:4px;padding-left:14px;position:relative}
+.hl::before{content:'›';position:absolute;left:0;color:#a855f7;font-weight:700}
+
+/* timeline */
+ul.timeline{list-style:none;margin:0;padding:0 0 0 22px;border-left:2px solid #e0e7ff}
+ul.timeline li{margin-bottom:18px;position:relative;padding-left:16px}
+ul.timeline li::before{content:'';position:absolute;left:-28px;top:6px;width:10px;height:10px;
+  border-radius:50%;background:#6366f1;box-shadow:0 0 0 4px #eef2ff}
+.t-head{font-size:1rem}
+
+/* project grid */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px}
+.proj{border:1px solid #e2e8f0;border-radius:14px;padding:16px 18px;
+  transition:transform .18s,box-shadow .18s;background:linear-gradient(180deg,#fff,#fafaff)}
+.proj:hover{transform:translateY(-4px);box-shadow:0 12px 26px rgba(79,70,229,.14)}
+.proj h3{margin:0 0 2px;font-size:1.02rem}
+.role{color:#94a3b8;font-size:.82rem;text-transform:uppercase;letter-spacing:.06em}
+
+/* calendar + todos */
+table.cal{border-collapse:collapse;width:100%;margin-top:6px}
+.cal th{color:#64748b;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;
+  padding-bottom:6px}
+.cal td{border:1px solid #eef2f7;vertical-align:top;padding:5px;height:56px;width:14%;
+  font-size:.82rem;border-radius:4px}
+.cal td.off{background:#f8fafc}
+.cal td.today{background:linear-gradient(135deg,#fef9c3,#fef3c7);outline:2px solid #f59e0b}
+.cal .todo{background:linear-gradient(135deg,#fee2e2,#fce7f3);border-left:3px solid #ef4444;
+  border-radius:5px;padding:2px 5px;margin-top:3px;font-size:.72rem}
+ul.todos{list-style:none;padding:0;margin:0}
+ul.todos li{border:1px solid #e2e8f0;border-left:4px solid #ef4444;border-radius:10px;
+  padding:10px 14px;margin-bottom:8px;background:#fff}
+footer{text-align:center;color:#94a3b8;font-size:.8rem;margin-top:36px}
+
+@media (max-width:600px){.hero h1{font-size:2rem}.when{float:none;display:block}
+main{margin-top:-36px}.card{padding:20px 18px}}
 """
 
 
