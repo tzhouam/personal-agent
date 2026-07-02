@@ -5,6 +5,7 @@ from email.mime.text import MIMEText
 import httpx
 
 from ..config import Settings
+from ..utils import ref_label
 
 _PRIORITY_META = {
     "red": ("🔴 Action needed", "#c0392b"),
@@ -26,15 +27,19 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
         added_today = set(todos.get("added", []))
         parts.append(f"<h3>✅ Todos ({len(open_todos)} open)</h3><ul style='margin-top:4px'>")
         for todo in open_todos:
-            title = html.escape(todo.get("title", ""))
-            if todo.get("url"):
-                title = f"<a href='{todo['url']}'>{title}</a>"
+            title = f"<b>{html.escape(todo.get('title', ''))}</b>"
+            label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
+                              todo.get("type", ""))
+            if label:  # short bracketed link, summary stays plain text
+                title = f"<a href='{todo['url']}'>[{label}]</a>: {title}"
+            elif todo.get("url"):
+                title = f"<a href='{todo['url']}'>[link]</a>: {title}"
             badge = (" <b style='color:#c0392b'>NEW</b>" if todo.get("id") in added_today else "")
             due = f" · due {html.escape(str(todo['due']))}" if todo.get("due") else ""
             detail = (f"<br><span style='color:#6b7280;font-size:13px'>{html.escape(todo['detail'])}</span>"
                       if todo.get("detail") else "")
             parts.append(
-                f"<li style='margin-bottom:6px'>[<code>{todo.get('id')}</code>] <b>{title}</b>{badge}"
+                f"<li style='margin-bottom:6px'>[<code>{todo.get('id')}</code>] {title}{badge}"
                 f"<span style='color:#9ca3af'> ({todo.get('source', '')}, since {todo.get('created', '')}{due})"
                 f"</span>{detail}</li>"
             )
@@ -58,8 +63,11 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
             action_html = (
                 f" <em style='color:{color}'>→ {html.escape(action)}</em>" if action else ""
             )
+            ref = ref_label(item.get("url"), item.get("title", ""), item.get("type", ""))
+            link = f"<a href='{url}'>[{ref or item.get('type') or 'link'}]</a>"
             parts.append(
-                f"<li style='margin-bottom:6px'><a href='{url}'>{repo}</a>: {summary}{action_html}</li>"
+                f"<li style='margin-bottom:6px'>{link} "
+                f"<span style='color:#6b7280'>{repo}</span>: {summary}{action_html}</li>"
             )
         parts.append("</ul>")
 

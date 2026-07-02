@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 
 from .config import Settings
+from .utils import ref_label
 
 _API = "https://api.github.com"
 
@@ -129,8 +130,12 @@ def _render_calendar(todos: list[dict], today: date) -> str:
         parts.append("<h3>Open todos</h3><ul class='todos'>")
         for todo in unscheduled:
             title = e(todo["title"])
-            if todo.get("url"):
-                title = f"<a href='{e(todo['url'])}'>{title}</a>"
+            label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
+                              todo.get("type", ""))
+            if label:  # short bracketed link; the summary stays plain text
+                title = f"<a href='{e(todo['url'])}'>[{e(label)}]</a>: {title}"
+            elif todo.get("url"):
+                title = f"<a href='{e(todo['url'])}'>[link]</a>: {title}"
             parts.append(f"<li>{title} <span class='when'>({e(todo.get('source', ''))}, "
                          f"since {e(todo.get('created', ''))})</span></li>")
         parts.append("</ul>")

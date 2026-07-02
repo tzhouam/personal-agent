@@ -17,6 +17,7 @@ def update_todos(store: TodoStore, digest: dict, resume: dict) -> dict:
             title=item.get("todo") or long_summary,
             detail=long_summary if item.get("todo") else "",
             url=item.get("url"),
+            type=item.get("type", ""),
             source="github",
             priority="red",
             action=item.get("action"),

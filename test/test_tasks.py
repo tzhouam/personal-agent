@@ -54,6 +54,18 @@ def test_curator_decay(tmp_path):
     assert profile["projects"][0]["status"] == "active"  # 45d < 60d project window
 
 
+def test_ref_label():
+    from assistant.utils import ref_label
+
+    assert ref_label("https://github.com/o/r/pull/4803") == "PR #4803"
+    assert ref_label("https://github.com/o/r/issues/7") == "Issue #7"
+    assert ref_label("https://github.com/o/r/issues/7", title="[RFC]: audio pipeline") == "RFC #7"
+    assert ref_label("https://arxiv.org/abs/2501.1") == "Paper"
+    assert ref_label("https://github.com/o/r/releases") == "Release"
+    assert ref_label("https://example.com/x") is None
+    assert ref_label(None) is None
+
+
 def test_parse_json_variants():
     assert _parse_json('{"a": 1}') == {"a": 1}
     assert _parse_json('Here you go:\n```json\n[1, 2]\n```') == [1, 2]
