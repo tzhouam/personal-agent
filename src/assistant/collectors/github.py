@@ -156,6 +156,57 @@ class GitHubCollector:
             "raw": {"number": item.get("number")},
         }
 
+    # ── per-item context & completion state (feeds the todo store) ──
+    def fetch_item_context(self, html_url: str | None) -> str:
+        """Rich one-line context for a PR/issue: author, size, age, body snippet."""
+        parts = _split_item_url(html_url)
+        if not parts:
+            return ""
+        owner, repo, kind, number = parts
+        if kind == "pull":
+            resp = self.client.get(f"{API}/repos/{owner}/{repo}/pulls/{number}")
+            resp.raise_for_status()
+            d = resp.json()
+            body = " ".join((d.get("body") or "").split())[:300]
+            ctx = (f"PR by {d.get('user', {}).get('login', '?')} · "
+                   f"{d.get('changed_files', '?')} files "
+                   f"(+{d.get('additions', '?')}/−{d.get('deletions', '?')}) · "
+                   f"opened {str(d.get('created_at', ''))[:10]}")
+        else:
+            resp = self.client.get(f"{API}/repos/{owner}/{repo}/issues/{number}")
+            resp.raise_for_status()
+            d = resp.json()
+            body = " ".join((d.get("body") or "").split())[:300]
+            ctx = (f"Issue by {d.get('user', {}).get('login', '?')} · "
+                   f"{d.get('comments', 0)} comments · "
+                   f"opened {str(d.get('created_at', ''))[:10]}")
+        return f"{ctx}. {body}" if body else ctx
+
+    def check_finished(self, html_url: str | None) -> tuple[bool, str]:
+        """Is the task behind this URL done? Merged/closed items are done; a
+        review-request is also done once the owner has submitted a review."""
+        parts = _split_item_url(html_url)
+        if not parts:
+            return False, ""
+        owner, repo, kind, number = parts
+        if kind == "pull":
+            resp = self.client.get(f"{API}/repos/{owner}/{repo}/pulls/{number}")
+            resp.raise_for_status()
+            d = resp.json()
+            if d.get("merged"):
+                return True, "PR merged"
+            if d.get("state") == "closed":
+                return True, "PR closed"
+            reviews = self.client.get(f"{API}/repos/{owner}/{repo}/pulls/{number}/reviews")
+            reviews.raise_for_status()
+            if any((rv.get("user") or {}).get("login", "").lower() == self.user.lower()
+                   for rv in reviews.json()):
+                return True, "you reviewed it"
+            return False, ""
+        resp = self.client.get(f"{API}/repos/{owner}/{repo}/issues/{number}")
+        resp.raise_for_status()
+        return (resp.json().get("state") == "closed", "issue closed")
+
     # ── notifications (feeds the digest task) ───────────────────────
     def fetch_notifications(self, since: datetime) -> list[dict]:
         notifications = []
@@ -201,6 +252,11 @@ class GitHubCollector:
         )
         resp.raise_for_status()
         return resp.json()
+
+
+def _split_item_url(html_url: str | None) -> tuple[str, str, str, str] | None:
+    match = re.search(r"github\.com/([^/]+)/([^/]+)/(pull|issues)/(\d+)", html_url or "")
+    return match.groups() if match else None
 
 
 def _api_to_html_url(api_url: str | None) -> str | None:

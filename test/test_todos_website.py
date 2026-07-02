@@ -27,24 +27,47 @@ def test_reading_list_is_separate_store(tmp_path):
     assert todos.path.name == "todos.yaml" and reading.path.name == "reading_list.yaml"
 
 
+class FakeGitHub:
+    """Deterministic stand-in for context enrichment + completion monitoring."""
+
+    def __init__(self):
+        self.finished_urls = {}
+
+    def fetch_item_context(self, url):
+        return "PR by alice · 3 files (+40/−5) · opened 2026-07-01. Fixes the scheduler race."
+
+    def check_finished(self, url):
+        return self.finished_urls.get(url, (False, ""))
+
+
 def test_update_todos_from_digest_and_resume(tmp_path):
     store = TodoStore(tmp_path)
+    github = FakeGitHub()
     digest = {"sections": {"red": [
         {"id": "1", "url": "https://github.com/o/r/pull/5",
          "summary": "You were requested to review a PR that fixes the scheduler.",
          "todo": "Review scheduler fix PR", "action": "review"},
     ], "yellow": [], "white": []}}
-    result = update_todos(store, digest, {"status": "pending_approval"})
+    result = update_todos(store, digest, {"status": "pending_approval"}, github=github)
     assert result["open_count"] == 2  # review todo + resume-approval todo
     review = next(t for t in result["open"] if t.get("source") == "github")
     assert review["title"] == "Review scheduler fix PR"  # short label as the title
     assert review["detail"].startswith("You were requested")  # long sentence kept
+    assert "PR by alice · 3 files (+40/−5)" in review["detail"]  # enriched context
 
     # resume approved → its todo auto-closes; review todo not duplicated
-    result = update_todos(store, digest, {"status": "no_change"})
+    result = update_todos(store, digest, {"status": "no_change"}, github=github)
     assert result["open_count"] == 1
     assert result["open"][0]["url"] == "https://github.com/o/r/pull/5"
     assert not result["added"]
+
+    # monitor pass: PR merged → todo auto-closes and is reported
+    github.finished_urls["https://github.com/o/r/pull/5"] = (True, "PR merged")
+    result = update_todos(store, {"sections": {"red": []}}, {"status": "no_change"},
+                          github=github)
+    assert result["open_count"] == 0
+    assert result["closed"] == [{"id": "t1", "title": "Review scheduler fix PR",
+                                 "reason": "PR merged"}]
 
 
 PROFILE = {

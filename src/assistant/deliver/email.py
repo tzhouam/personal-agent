@@ -45,6 +45,12 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
             )
         parts.append("</ul><p style='font-size:12px;color:#9ca3af'>"
                      "close with <code>assistant todo done &lt;id&gt;</code></p>")
+    closed_today = todos.get("closed", [])
+    if closed_today:
+        parts.append("<p style='color:#6b7280;font-size:13px'>☑️ Auto-completed: "
+                     + " · ".join(f"<s>{html.escape(c['title'])}</s> ({html.escape(c['reason'])})"
+                                  for c in closed_today)
+                     + "</p>")
 
     sections = digest.get("sections", {})
     if not any(sections.values()):

@@ -123,12 +123,18 @@ def build_graph(deps: Deps):
 
     def node_todos(state: AssistantState) -> dict:
         try:
-            todos = update_todos(deps.todos, state.get("digest", {}), state.get("resume", {}))
-            log.info("todos: %d open (%d added today)", todos["open_count"], len(todos["added"]))
+            from .collectors.github import GitHubCollector
+
+            github = GitHubCollector(settings) if settings.github_token else None
+            todos = update_todos(deps.todos, state.get("digest", {}),
+                                 state.get("resume", {}), github=github)
+            log.info("todos: %d open (%d added, %d auto-closed)", todos["open_count"],
+                     len(todos["added"]), len(todos.get("closed", [])))
             errors = []
         except Exception as exc:
             log.exception("todo update failed")
-            todos, errors = {"added": [], "open": [], "open_count": 0}, [f"todos: {exc}"]
+            todos, errors = ({"added": [], "closed": [], "open": [], "open_count": 0},
+                             [f"todos: {exc}"])
         deps.save_artifact("todos.json", todos)
         _advance("research")
         return {"todos": todos, "phase": "research", "errors": errors}
