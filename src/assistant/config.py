@@ -56,9 +56,9 @@ class Settings(BaseSettings):
     # Resume sync (M4) — Overleaf git-bridge URL (or any git remote); empty = disabled
     resume_remote_url: str = ""
 
-    # Personal website — "owner/name" GitHub Pages repo; updates go via PR branch
+    # Personal website — "owner/name" GitHub Pages repo; the agent pushes the
+    # rendered site directly to the default branch (owner's choice, 2026-07-02)
     website_repo: str = ""
-    website_branch: str = "agent/site-update"
 
     # Research digest
     sources_file: Path = _REPO_ROOT / "config" / "sources.yaml"

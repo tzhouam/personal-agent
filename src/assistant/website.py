@@ -1,9 +1,9 @@
-"""Personal website generator + PR-based publisher.
+"""Personal website generator + publisher.
 
 The site is a DETERMINISTIC render of profile.yaml + todos — no LLM in the
-loop, so nothing fabricated can reach a public page. Publishing goes through a
-PR branch on the owner's github.io repo (never a direct push to the default
-branch): the owner merges to go live.
+loop, so nothing fabricated can reach a public page. Publishing pushes
+directly to the repo's default branch (owner's explicit choice, 2026-07-02 —
+was PR-gated before); remote edits are rebased in first, never force-pushed.
 """
 
 import base64
@@ -158,7 +158,7 @@ footer{margin-top:40px;color:#9ca3af;font-size:12px}
 """
 
 
-# ── publishing (PR branch, never direct push) ────────────────────────
+# ── publishing (direct push to the default branch) ───────────────────
 def _auth_flag(settings: Settings) -> list[str]:
     basic = base64.b64encode(f"{settings.github_user}:{settings.github_token}".encode()).decode()
     return ["-c", f"http.https://github.com/.extraheader=Authorization: Basic {basic}"]
@@ -190,7 +190,7 @@ def sync_website(settings: Settings, profile: dict, todos: list[dict]) -> dict:
         _git(workdir, settings, "config", "user.email", f"{settings.github_user}@users.noreply.github.com")
 
     _git(workdir, settings, "fetch", "-q", "origin")
-    _git(workdir, settings, "checkout", "-q", "-B", settings.website_branch,
+    _git(workdir, settings, "checkout", "-q", "-B", default_branch,
          f"origin/{default_branch}")
 
     for filename, content in render_site(profile, todos).items():
@@ -202,24 +202,14 @@ def sync_website(settings: Settings, profile: dict, todos: list[dict]) -> dict:
     _git(workdir, settings, "add", "-A")
     _git(workdir, settings, "commit", "-q", "-m",
          f"agent: site update {date.today().isoformat()}")
-    _git(workdir, settings, "push", "-q", "-f", "origin", settings.website_branch)
-
-    # ensure exactly one open PR for the branch
-    owner = settings.website_repo.split("/")[0]
-    prs = api.get(f"{_API}/repos/{settings.website_repo}/pulls",
-                  params={"head": f"{owner}:{settings.website_branch}", "state": "open"})
-    prs.raise_for_status()
-    if prs.json():
-        pr_url = prs.json()[0]["html_url"]
-    else:
-        created = api.post(
-            f"{_API}/repos/{settings.website_repo}/pulls",
-            json={"title": "agent: personal site update",
-                  "head": settings.website_branch, "base": default_branch,
-                  "body": "Automated site refresh from the personal-agent profile "
-                          "(info, experience, projects, todo calendar). Review and merge to publish.\n\n"
-                          "🤖 Generated with [Claude Code](https://claude.com/claude-code)"},
-        )
-        created.raise_for_status()
-        pr_url = created.json()["html_url"]
-    return {"status": "pr_updated", "pr_url": pr_url}
+    # remote may have moved (owner edits online) — rebase in, never force-push
+    pull = _git(workdir, settings, "pull", "--rebase", "-q", "origin", default_branch,
+                check=False)
+    if pull.returncode != 0:
+        _git(workdir, settings, "rebase", "--abort", check=False)
+        return {"status": "failed",
+                "note": f"remote {default_branch} has conflicting edits: {pull.stderr[-300:]}"}
+    _git(workdir, settings, "push", "-q", "origin", default_branch)
+    sha = _git(workdir, settings, "rev-parse", "--short", "HEAD").stdout.strip()
+    return {"status": "pushed", "commit": sha,
+            "url": f"https://{settings.website_repo.split('/', 1)[1]}"}

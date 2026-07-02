@@ -112,10 +112,10 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
             + ", ".join(html.escape(k) for k in failed_sources) + "</p>"
         )
 
-    if website.get("status") == "pr_updated":
+    if website.get("status") == "pushed":
         parts.append(
-            f"<p>🌐 Personal site refreshed — <a href='{website.get('pr_url', '#')}'>"
-            "review &amp; merge the PR</a> to publish.</p>"
+            f"<p>🌐 <a href='https://{html.escape(website.get('url', '').removeprefix('https://'))}'>"
+            f"Personal site</a> updated (commit <code>{html.escape(website.get('commit', ''))}</code>).</p>"
         )
     elif website.get("status") == "failed":
         parts.append(
