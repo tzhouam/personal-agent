@@ -16,10 +16,14 @@ from .tasks.curate import curate
 from .tasks.github_digest import build_digest
 from .tasks.profile_update import update_profile
 from .tasks.resume import sync_resume
+from .tasks.todos import update_todos
+from .todo_store import ReadingList, TodoStore
+from .website import sync_website
 
 log = logging.getLogger("assistant")
 
-_PHASES = ["collect", "profile", "resume", "digest", "research", "deliver", "curate"]
+_PHASES = ["collect", "profile", "resume", "digest", "todos", "research",
+           "website", "deliver", "curate"]
 
 
 class Deps:
@@ -28,6 +32,8 @@ class Deps:
         self.llm = LLM(settings)
         self.events = EventsStore(settings.events_db)
         self.profile = ProfileStore(settings.profile_dir)
+        self.todos = TodoStore(settings.profile_dir)
+        self.reading = ReadingList(settings.profile_dir)
         self.run_dir = settings.runs_dir / run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -112,8 +118,20 @@ def build_graph(deps: Deps):
             errors = [f"digest: {exc}"]
         digest["suppressed_seen"] = len(notifications) - len(fresh)
         deps.save_artifact("digest.json", digest)
+        _advance("todos")
+        return {"digest": digest, "phase": "todos", "errors": errors}
+
+    def node_todos(state: AssistantState) -> dict:
+        try:
+            todos = update_todos(deps.todos, state.get("digest", {}), state.get("resume", {}))
+            log.info("todos: %d open (%d added today)", todos["open_count"], len(todos["added"]))
+            errors = []
+        except Exception as exc:
+            log.exception("todo update failed")
+            todos, errors = {"added": [], "open": [], "open_count": 0}, [f"todos: {exc}"]
+        deps.save_artifact("todos.json", todos)
         _advance("research")
-        return {"digest": digest, "phase": "research", "errors": errors}
+        return {"todos": todos, "phase": "research", "errors": errors}
 
     def node_research(state: AssistantState) -> dict:
         try:
@@ -124,27 +142,50 @@ def build_graph(deps: Deps):
             research = {"papers": [], "industry": [], "chinese": [],
                         "source_health": {}, "seen_ids": []}
             errors = [f"research: {exc}"]
+        for paper in research.get("papers", []):  # papers accumulate as the reading list
+            deps.reading.upsert(paper["seen_id"], title=paper["title"], url=paper["url"],
+                                source="arxiv", why=paper.get("why", ""))
+        reading = deps.reading.open_items()
         deps.save_artifact("research.json", research)
+        deps.save_artifact("reading.json", reading)
+        _advance("website")
+        return {"research": research, "reading": reading, "phase": "website", "errors": errors}
+
+    def node_website(state: AssistantState) -> dict:
+        try:
+            website = sync_website(settings, deps.profile.load(),
+                                   (state.get("todos") or {}).get("open", []))
+            log.info("website: %s %s", website.get("status"), website.get("pr_url", ""))
+            errors = []
+        except Exception as exc:
+            log.exception("website sync failed")
+            website, errors = {"status": "failed", "note": str(exc)}, [f"website: {exc}"]
+        deps.save_artifact("website.json", website)
         _advance("deliver")
-        return {"research": research, "phase": "deliver", "errors": errors}
+        return {"website": website, "phase": "deliver", "errors": errors}
 
     def node_deliver(state: AssistantState) -> dict:
         run_date = datetime.now().strftime("%Y-%m-%d")
         digest = state.get("digest", {})
         research = state.get("research", {})
         resume = state.get("resume", {})
+        todos = state.get("todos", {})
+        reading = state.get("reading", [])
+        website = state.get("website", {})
         stats = {
             "run": state["run_id"],
             "observations": len(state.get("observations", [])),
             "notifications": digest.get("total", 0),
             "seen-suppressed": digest.get("suppressed_seen", 0),
-            "papers": len(research.get("papers", [])),
+            "todos open": todos.get("open_count", 0),
+            "reading backlog": len(reading),
             "profile ops": len(state.get("profile_ops", [])),
+            "website": website.get("status", "?"),
         }
         if state.get("errors"):
             stats["errors"] = "; ".join(str(e) for e in state["errors"])[:300]
-        html_body = render_html(run_date, digest, research, resume,
-                                state.get("profile_diff", ""),
+        html_body = render_html(run_date, digest, research, resume, todos, reading,
+                                website, state.get("profile_diff", ""),
                                 state.get("profile_ops", []), stats)
         digest_path = deps.run_dir / "digest.html"
         digest_path.write_text(html_body)
@@ -187,8 +228,8 @@ def build_graph(deps: Deps):
         return {"curated": curated, "phase": "done", "errors": errors}
 
     nodes = {"collect": node_collect, "profile": node_profile, "resume": node_resume,
-             "digest": node_digest, "research": node_research, "deliver": node_deliver,
-             "curate": node_curate}
+             "digest": node_digest, "todos": node_todos, "research": node_research,
+             "website": node_website, "deliver": node_deliver, "curate": node_curate}
     graph = StateGraph(AssistantState)
     for phase in _PHASES:
         graph.add_node(phase, nodes[phase])
@@ -225,10 +266,16 @@ def run(settings: Settings, dry_run: bool = False, resume: bool = False) -> int:
         saved = deps.load_artifact("profile_update.json") or {}
         initial["profile_diff"] = saved.get("profile_diff", "")
         initial["profile_ops"] = saved.get("profile_ops", [])
-        if start_phase in ("deliver", "curate"):
+        if start_phase in ("todos", "research", "website", "deliver", "curate"):
             initial["digest"] = deps.load_artifact("digest.json") or {}
-            initial["research"] = deps.load_artifact("research.json") or {}
             initial["resume"] = deps.load_artifact("resume.json") or {}
+        if start_phase in ("research", "website", "deliver", "curate"):
+            initial["todos"] = deps.load_artifact("todos.json") or {}
+        if start_phase in ("website", "deliver", "curate"):
+            initial["research"] = deps.load_artifact("research.json") or {}
+            initial["reading"] = deps.load_artifact("reading.json") or []
+        if start_phase in ("deliver", "curate"):
+            initial["website"] = deps.load_artifact("website.json") or {}
 
     try:
         final = build_graph(deps).invoke(initial)

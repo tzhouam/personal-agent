@@ -78,6 +78,50 @@ def cmd_show(settings: Settings) -> int:
     return 0
 
 
+def cmd_todo(settings: Settings, args) -> int:
+    from .todo_store import TodoStore
+
+    store = TodoStore(settings.profile_dir)
+    if args.action == "list":
+        for item in store.open_items():
+            due = f" due:{item['due']}" if item.get("due") else ""
+            print(f"[{item['id']}] {item['title']} ({item.get('source', '')}, "
+                  f"since {item.get('created', '')}{due})")
+        return 0
+    if args.action == "add":
+        if not args.value:
+            print("usage: assistant todo add \"<title>\" [--due YYYY-MM-DD]")
+            return 1
+        item = store.upsert(f"manual:{args.value}", title=args.value, source="manual",
+                            priority="yellow", **({"due": args.due} if args.due else {}))
+        print(f"added [{item['id']}]" if item else "already tracked (open item with same title)")
+        return 0
+    if args.action == "done":
+        if store.mark_done(args.value or ""):
+            print(f"{args.value} done")
+            return 0
+        print(f"no open todo with id {args.value!r}")
+        return 1
+    return 1
+
+
+def cmd_reading(settings: Settings, args) -> int:
+    from .todo_store import ReadingList
+
+    store = ReadingList(settings.profile_dir)
+    if args.action == "list":
+        for item in store.open_items():
+            print(f"[{item['id']}] {item['title']}  {item.get('url', '')}")
+        return 0
+    if args.action == "done":
+        if store.mark_done(args.value or ""):
+            print(f"{args.value} marked read")
+            return 0
+        print(f"no unread item with id {args.value!r}")
+        return 1
+    return 1
+
+
 def cmd_enrich_profile(settings: Settings) -> int:
     """One-shot backfill: read the owner's full authored PR/issue/RFC history
     and fold it into the profile in batches."""
@@ -167,6 +211,15 @@ def main() -> None:
     sub.add_parser("resume-status", help="show any resume update pending approval")
     sub.add_parser("approve-resume", help="push the pending resume update to the remote")
 
+    todo_p = sub.add_parser("todo", help="manage todos: list / add / done")
+    todo_p.add_argument("action", choices=["list", "add", "done"])
+    todo_p.add_argument("value", nargs="?", help="title for add, id (t3) for done")
+    todo_p.add_argument("--due", help="due date YYYY-MM-DD (add only)")
+
+    reading_p = sub.add_parser("reading", help="manage the reading list: list / done")
+    reading_p.add_argument("action", choices=["list", "done"])
+    reading_p.add_argument("value", nargs="?", help="id (r3) for done")
+
     args = parser.parse_args()
     settings = Settings()
 
@@ -190,6 +243,10 @@ def main() -> None:
         from .tasks.resume import approve_resume
 
         sys.exit(approve_resume(settings))
+    elif args.command == "todo":
+        sys.exit(cmd_todo(settings, args))
+    elif args.command == "reading":
+        sys.exit(cmd_reading(settings, args))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,9 @@ class AssistantState(TypedDict, total=False):
     digest: dict
     research: dict
     resume: dict
+    todos: dict
+    reading: list[dict]
+    website: dict
     curated: dict
     email_sent: bool
     digest_path: str

@@ -14,11 +14,32 @@ _PRIORITY_META = {
 
 
 def render_html(run_date: str, digest: dict, research: dict, resume: dict,
+                todos: dict, reading: list[dict], website: dict,
                 profile_diff: str, profile_ops: list[dict], stats: dict) -> str:
     parts = [
         "<div style='font-family:-apple-system,Segoe UI,sans-serif;max-width:720px;margin:auto;color:#1f2937'>",
         f"<h2 style='border-bottom:2px solid #e5e7eb;padding-bottom:8px'>Daily digest — {run_date}</h2>",
     ]
+
+    open_todos = todos.get("open", [])
+    if open_todos:
+        added_today = set(todos.get("added", []))
+        parts.append(f"<h3>✅ Todos ({len(open_todos)} open)</h3><ul style='margin-top:4px'>")
+        for todo in open_todos:
+            title = html.escape(todo.get("title", ""))
+            if todo.get("url"):
+                title = f"<a href='{todo['url']}'>{title}</a>"
+            badge = (" <b style='color:#c0392b'>NEW</b>" if todo.get("id") in added_today else "")
+            due = f" · due {html.escape(str(todo['due']))}" if todo.get("due") else ""
+            detail = (f"<br><span style='color:#6b7280;font-size:13px'>{html.escape(todo['detail'])}</span>"
+                      if todo.get("detail") else "")
+            parts.append(
+                f"<li style='margin-bottom:6px'>[<code>{todo.get('id')}</code>] <b>{title}</b>{badge}"
+                f"<span style='color:#9ca3af'> ({todo.get('source', '')}, since {todo.get('created', '')}{due})"
+                f"</span>{detail}</li>"
+            )
+        parts.append("</ul><p style='font-size:12px;color:#9ca3af'>"
+                     "close with <code>assistant todo done &lt;id&gt;</code></p>")
 
     sections = digest.get("sections", {})
     if not any(sections.values()):
@@ -42,18 +63,25 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
             )
         parts.append("</ul>")
 
-    papers = research.get("papers", [])
-    if papers:
-        parts.append(f"<h3>📄 Papers ({len(papers)})</h3>")
-        for p in papers:
-            why = (
-                f"<br><em style='color:#4b5563'>Why: {html.escape(p.get('why', ''))}</em>"
-                if p.get("why") else ""
-            )
+    if reading:
+        new_paper_summaries = {p.get("seen_id"): p for p in research.get("papers", [])}
+        parts.append(f"<h3>📚 Reading list ({len(reading)} unread)</h3>")
+        for item in reading[:15]:
+            paper = new_paper_summaries.get(item.get("key"))
+            badge = " <b style='color:#c0392b'>NEW</b>" if paper else ""
+            body = ""
+            if paper:  # today's additions carry their full summary
+                body = f"<br>{html.escape(paper.get('summary', ''))}"
+            if item.get("why"):
+                body += f"<br><em style='color:#4b5563'>Why: {html.escape(item['why'])}</em>"
             parts.append(
-                f"<p style='margin:8px 0'><a href='{p.get('url', '#')}'><b>{html.escape(p.get('title', ''))}</b></a><br>"
-                f"{html.escape(p.get('summary', ''))}{why}</p>"
+                f"<p style='margin:8px 0'>[<code>{item.get('id')}</code>] "
+                f"<a href='{item.get('url', '#')}'><b>{html.escape(item.get('title', ''))}</b></a>"
+                f"{badge}{body}</p>"
             )
+        if len(reading) > 15:
+            parts.append(f"<p style='color:#9ca3af;font-size:12px'>…and {len(reading) - 15} more; "
+                         "mark read with <code>assistant reading done &lt;id&gt;</code></p>")
     for key, label in (("industry", "🌐 Industry"), ("chinese", "🇨🇳 中文媒体")):
         items = research.get(key, [])
         if not items:
@@ -74,6 +102,16 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
         parts.append(
             "<p style='font-size:12px;color:#b7791f'>⚠️ sources not fetched today: "
             + ", ".join(html.escape(k) for k in failed_sources) + "</p>"
+        )
+
+    if website.get("status") == "pr_updated":
+        parts.append(
+            f"<p>🌐 Personal site refreshed — <a href='{website.get('pr_url', '#')}'>"
+            "review &amp; merge the PR</a> to publish.</p>"
+        )
+    elif website.get("status") == "failed":
+        parts.append(
+            f"<p style='color:#c0392b'>🌐 Website sync failed: {html.escape(website.get('note', ''))}</p>"
         )
 
     if resume.get("status") == "pending_approval":

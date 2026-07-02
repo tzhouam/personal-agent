@@ -32,7 +32,8 @@ Use the owner profile to judge relevance (their repos and projects matter more).
 
 Respond with ONLY a JSON array:
 [{"id": "<notification id>", "priority": "red|yellow|white",
-  "summary": "<one sentence>", "action": "<short suggested action or null>"}]
+  "summary": "<one sentence>", "action": "<short suggested action or null>",
+  "todo": "<short imperative label, max 8 words, e.g. 'Review GGUF plugin migration PR'>"}]
 Include every notification id you were given exactly once."""
 
 
@@ -74,6 +75,7 @@ def build_digest(llm: LLM, profile: dict, notifications: list[dict], activity: l
                 **n,
                 "summary": (item or {}).get("summary") or f"[{n['reason']}] {n['title']}",
                 "action": (item or {}).get("action"),
+                "todo": (item or {}).get("todo"),
             }
         )
 
