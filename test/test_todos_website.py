@@ -66,6 +66,7 @@ def test_render_site_sections_and_calendar():
     today = date(2026, 7, 2)
     todos = [
         {"id": "t1", "title": "Review scheduler PR", "source": "github",
+         "url": "https://github.com/o/r/pull/5", "detail": "You were asked to review the scheduler fix.",
          "created": "2026-07-01", "due": "2026-07-15", "status": "open"},
         {"id": "t2", "title": "No due date", "source": "manual",
          "created": "2026-07-01", "status": "open"},
@@ -78,8 +79,13 @@ def test_render_site_sections_and_calendar():
     assert "vllm-omni" in page and "rebase automation" in page  # projects
     assert "Python" in page and "Matlab" not in page        # dormant skill hidden
     assert "July 2026" in page
-    assert "Review scheduler PR"[:40] in page               # due todo on the calendar
-    assert "No due date" in page                            # unscheduled list
+    # calendar: due-dated todo on its due day (red), undated todo on created day
+    assert page.count("Review scheduler PR"[:40]) == 2      # calendar chip + list entry
+    assert "class='todo due'" in page                       # due chip styled distinctly
+    assert page.count("No due date") == 2                   # created-date chip + list entry
+    # list entries carry the short link label and the description
+    assert "[PR #5]</a>" in page
+    assert "You were asked to review the scheduler fix." in page
     assert "agent-site.css" in files
 
 

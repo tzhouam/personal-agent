@@ -118,20 +118,21 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None) -> 
     return {"index.html": "".join(parts), "agent-site.css": _CSS}
 
 
+def _parse_day(value) -> date | None:
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date() if value else None
+    except ValueError:
+        return None
+
+
 def _render_calendar(todos: list[dict], today: date) -> str:
     e = html.escape
+    # every todo lands on the calendar: due date if set, else its created date
     by_day: dict[int, list[dict]] = {}
-    unscheduled = []
     for todo in todos:
-        due = todo.get("due")
-        try:
-            due_date = datetime.strptime(str(due), "%Y-%m-%d").date() if due else None
-        except ValueError:
-            due_date = None
-        if due_date and due_date.year == today.year and due_date.month == today.month:
-            by_day.setdefault(due_date.day, []).append(todo)
-        else:
-            unscheduled.append(todo)
+        anchor = _parse_day(todo.get("due")) or _parse_day(todo.get("created"))
+        if anchor and anchor.year == today.year and anchor.month == today.month:
+            by_day.setdefault(anchor.day, []).append(todo)
 
     parts = [f"<section id='todos' class='card'><h2>Todo Calendar — {today.strftime('%B %Y')}</h2><table class='cal'>",
              "<tr>" + "".join(f"<th>{d}</th>" for d in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")) + "</tr>"]
@@ -144,23 +145,27 @@ def _render_calendar(todos: list[dict], today: date) -> str:
             classes = "today" if day == today.day else ""
             cell = f"<b>{day}</b>"
             for todo in by_day.get(day, []):
-                cell += f"<div class='todo'>{e(todo['title'][:40])}</div>"
+                kind = "todo due" if todo.get("due") else "todo"
+                cell += f"<div class='{kind}' title='{e(todo.get('detail', ''))}'>{e(todo['title'][:40])}</div>"
             parts.append(f"<td class='{classes}'>{cell}</td>")
         parts.append("</tr>")
     parts.append("</table>")
 
-    if unscheduled:
+    if todos:
         parts.append("<h3>Open todos</h3><ul class='todos'>")
-        for todo in unscheduled:
-            title = e(todo["title"])
+        for todo in todos:
+            title = f"<b>{e(todo['title'])}</b>"
             label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
                               todo.get("type", ""))
             if label:  # short bracketed link; the summary stays plain text
                 title = f"<a href='{e(todo['url'])}'>[{e(label)}]</a>: {title}"
             elif todo.get("url"):
                 title = f"<a href='{e(todo['url'])}'>[link]</a>: {title}"
+            due = f" · due {e(str(todo['due']))}" if todo.get("due") else ""
+            detail = (f"<div class='t-detail'>{e(todo['detail'])}</div>"
+                      if todo.get("detail") else "")
             parts.append(f"<li>{title} <span class='when'>({e(todo.get('source', ''))}, "
-                         f"since {e(todo.get('created', ''))})</span></li>")
+                         f"since {e(todo.get('created', ''))}{due})</span>{detail}</li>")
         parts.append("</ul>")
     parts.append("</section>")
     return "".join(parts)
@@ -228,11 +233,13 @@ table.cal{border-collapse:collapse;width:100%;margin-top:6px}
   font-size:.82rem;border-radius:4px}
 .cal td.off{background:#f8fafc}
 .cal td.today{background:linear-gradient(135deg,#fef9c3,#fef3c7);outline:2px solid #f59e0b}
-.cal .todo{background:linear-gradient(135deg,#fee2e2,#fce7f3);border-left:3px solid #ef4444;
+.cal .todo{background:linear-gradient(135deg,#e0e7ff,#ede9fe);border-left:3px solid #6366f1;
   border-radius:5px;padding:2px 5px;margin-top:3px;font-size:.72rem}
+.cal .todo.due{background:linear-gradient(135deg,#fee2e2,#fce7f3);border-left-color:#ef4444}
 ul.todos{list-style:none;padding:0;margin:0}
 ul.todos li{border:1px solid #e2e8f0;border-left:4px solid #ef4444;border-radius:10px;
   padding:10px 14px;margin-bottom:8px;background:#fff}
+.t-detail{color:#64748b;font-size:.86rem;margin-top:4px}
 footer{text-align:center;color:#94a3b8;font-size:.8rem;margin-top:36px}
 
 @media (max-width:600px){.hero h1{font-size:2rem}.when{float:none;display:block}
