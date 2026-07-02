@@ -216,10 +216,14 @@ def render_summary(profile: dict, max_items: int = 8) -> str:
         return ", ".join(str(e.get(key)) for e in items[:max_items])
 
     ident = profile.get("identity", {})
-    return (
+    avoid = profile.get("preferences", {}).get("avoid_topics", [])
+    summary = (
         f"Owner: {ident.get('name')} (github: {ident.get('github')}), "
         f"affiliations: {', '.join(ident.get('affiliations', []) or ['?'])}\n"
         f"Skills: {actives('skills', 'name') or '(none yet)'}\n"
         f"Interests: {actives('interests', 'topic') or '(none yet)'}\n"
         f"Projects: {actives('projects', 'name') or '(none yet)'}"
     )
+    if avoid:
+        summary += f"\nExplicitly NOT interested in (exclude from digests): {', '.join(avoid)}"
+    return summary

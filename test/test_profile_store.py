@@ -93,3 +93,11 @@ def test_render_summary_skips_dormant(tmp_path):
     profile = base_profile()
     profile["skills"][0]["status"] = "dormant"
     assert "Python" not in render_summary(profile)
+
+
+def test_render_summary_includes_avoid_topics():
+    profile = base_profile()
+    profile["preferences"] = {"avoid_topics": ["medical imaging"]}
+    summary = render_summary(profile)
+    assert "NOT interested" in summary and "medical imaging" in summary
+    assert "NOT interested" not in render_summary(base_profile())

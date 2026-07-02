@@ -78,6 +78,34 @@ def cmd_show(settings: Settings) -> int:
     return 0
 
 
+def cmd_enrich_profile(settings: Settings) -> int:
+    """One-shot backfill: read the owner's full authored PR/issue/RFC history
+    and fold it into the profile in batches."""
+    from .collectors.github import GitHubCollector
+    from .llm import LLM
+    from .tasks.profile_update import update_profile
+
+    gh = GitHubCollector(settings)
+    llm = LLM(settings)
+    store = ProfileStore(settings.profile_dir)
+    if not store.exists():
+        print("no profile yet — run `assistant bootstrap` first")
+        return 1
+
+    items = gh.fetch_authored_items(since=None, max_items=200)
+    print(f"fetched {len(items)} authored PRs/issues/RFCs")
+    total_ops = 0
+    batch_size = 60  # keep each LLM pass well under the observation cap
+    for start in range(0, len(items), batch_size):
+        result = update_profile(llm, store, items[start:start + batch_size])
+        total_ops += len(result["profile_ops"])
+        print(f"batch {start // batch_size + 1}: {len(result['profile_ops'])} ops applied"
+              + (f" — {result['notes']}" if result.get("notes") else ""))
+    print(f"done: {total_ops} ops total. Review with `assistant show-profile` or "
+          f"`git -C {settings.profile_dir} log -p`")
+    return 0
+
+
 def cmd_resume_init(settings: Settings) -> int:
     """Clone the Overleaf project (git bridge / any remote) or init an empty repo."""
     import subprocess
@@ -134,6 +162,7 @@ def main() -> None:
     sub.add_parser("bootstrap", help="seed the profile from GitHub (first run only)")
     sub.add_parser("show-profile", help="print a summary of the current profile")
     sub.add_parser("send-test-email", help="verify email delivery")
+    sub.add_parser("enrich-profile", help="backfill the profile from all authored PRs/issues/RFCs")
     sub.add_parser("resume-init", help="clone/init the resume repo (Overleaf git bridge)")
     sub.add_parser("resume-status", help="show any resume update pending approval")
     sub.add_parser("approve-resume", help="push the pending resume update to the remote")
@@ -151,6 +180,8 @@ def main() -> None:
         sys.exit(cmd_show(settings))
     elif args.command == "send-test-email":
         sys.exit(cmd_test_email(settings))
+    elif args.command == "enrich-profile":
+        sys.exit(cmd_enrich_profile(settings))
     elif args.command == "resume-init":
         sys.exit(cmd_resume_init(settings))
     elif args.command == "resume-status":

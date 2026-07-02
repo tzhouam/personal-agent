@@ -43,6 +43,13 @@ class LLM:
         if system:
             kwargs["system"] = system
         resp = self.client.messages.create(**kwargs)
+        if resp.stop_reason == "max_tokens":
+            import logging
+
+            logging.getLogger("assistant").warning(
+                "LLM response truncated at max_tokens=%s — raise the budget for this call",
+                kwargs["max_tokens"],
+            )
         return "".join(b.text for b in resp.content if b.type == "text")
 
     def complete_json(self, prompt: str, system: str | None = None, **kw):

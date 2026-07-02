@@ -46,6 +46,35 @@ def test_merged_pr_event(settings):
     assert obs["url"] == "https://github.com/o/r/pull/1"
 
 
+def test_authored_item_rfc_and_pr_detection(settings):
+    collector = GitHubCollector(settings)
+    rfc = collector._issue_to_observation(
+        {"title": "[RFC]: Modular audio pipeline", "state": "open", "number": 7,
+         "repository_url": "https://api.github.com/repos/vllm-project/vllm-omni",
+         "body": "## Motivation\r\nUnify  talker interfaces.",
+         "html_url": "https://github.com/vllm-project/vllm-omni/issues/7", "labels": []},
+    )
+    assert rfc["kind"] == "rfc"
+    assert rfc["title"].startswith("RFC [open] in vllm-project/vllm-omni: [RFC]: Modular audio pipeline")
+    assert "Unify talker interfaces." in rfc["title"]  # body snippet, whitespace collapsed
+
+    pr = collector._issue_to_observation(
+        {"title": "Fix scheduler", "state": "closed", "number": 8,
+         "repository_url": "https://api.github.com/repos/o/r", "body": None,
+         "html_url": "https://github.com/o/r/pull/8", "labels": [],
+         "pull_request": {}},
+    )
+    assert pr["kind"] == "pr_authored" and pr["title"] == "PR [closed] in o/r: Fix scheduler"
+
+    issue = collector._issue_to_observation(
+        {"title": "Bug report", "state": "open", "number": 9,
+         "repository_url": "https://api.github.com/repos/o/r", "body": "",
+         "html_url": "https://github.com/o/r/issues/9",
+         "labels": [{"name": "rfc"}]},
+    )
+    assert issue["kind"] == "rfc"  # label-based detection
+
+
 def _make_history(path, rows):
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT)")

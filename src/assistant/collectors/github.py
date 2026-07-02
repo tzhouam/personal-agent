@@ -39,7 +39,8 @@ class GitHubCollector:
 
     # ── activity events → observations ──────────────────────────────
     def collect(self, since: datetime) -> list[dict]:
-        observations = []
+        # authored PRs/issues/RFCs first — their bodies carry the profile signal
+        observations = self.fetch_authored_items(since=since)
         for page in range(1, 4):  # events API caps at ~300 recent events anyway
             resp = self.client.get(
                 f"{API}/users/{self.user}/events", params={"per_page": 100, "page": page}
@@ -107,6 +108,52 @@ class GitHubCollector:
             "url": url,
             "entities": [repo],
             "raw": {"type": event.get("type"), "id": event.get("id")},
+        }
+
+    # ── authored PRs / issues / RFCs (rich profile signal) ──────────
+    def fetch_authored_items(self, since: datetime | None = None,
+                             max_items: int = 100) -> list[dict]:
+        """Search-API sweep of everything the owner authored — PR and RFC bodies
+        carry far more profile signal than bare push events. since=None means
+        full history (used by `assistant enrich-profile`)."""
+        query = f"author:{self.user}"
+        if since is not None:
+            query += f" updated:>={since.date().isoformat()}"
+        items: list[dict] = []
+        for page in range(1, 4):
+            if len(items) >= max_items:
+                break
+            resp = self.client.get(
+                f"{API}/search/issues",
+                params={"q": query, "sort": "updated", "order": "desc",
+                        "per_page": 100, "page": page},
+            )
+            resp.raise_for_status()
+            batch = resp.json().get("items", [])
+            if not batch:
+                break
+            items.extend(self._issue_to_observation(item) for item in batch)
+        return items[:max_items]
+
+    def _issue_to_observation(self, item: dict) -> dict:
+        is_pr = "pull_request" in item
+        title = item.get("title", "")
+        is_rfc = "rfc" in title.lower() or any(
+            "rfc" in (label.get("name", "").lower()) for label in item.get("labels", [])
+        )
+        kind = "rfc" if is_rfc else ("pr_authored" if is_pr else "issue_authored")
+        label = "RFC" if is_rfc else ("PR" if is_pr else "Issue")
+        repo = item.get("repository_url", "").replace("https://api.github.com/repos/", "")
+        snippet = " ".join((item.get("body") or "").split())[:400]
+        return {
+            "source": "github",
+            "ts": item.get("updated_at", ""),
+            "kind": kind,
+            "title": (f"{label} [{item.get('state', '?')}] in {repo}: {title}"
+                      + (f" — {snippet}" if snippet else ""))[:600],
+            "url": item.get("html_url"),
+            "entities": [repo],
+            "raw": {"number": item.get("number")},
         }
 
     # ── notifications (feeds the digest task) ───────────────────────

@@ -25,6 +25,8 @@ Rules:
 - Every claim must be grounded in the observations shown — never invent.
 - Prefer bump_last_seen / add_evidence on existing entries over creating new ones.
 - New skills/interests only when observations show sustained or significant engagement, not a single visit.
+- Respect preferences.avoid_topics: never add or reactivate skills/interests/projects in those
+  areas; entries already dormant stay dormant unless strong fresh evidence contradicts it.
 - At most 15 ops. Empty ops list is a valid answer for an uneventful day."""
 
 
@@ -47,7 +49,7 @@ def update_profile(llm: LLM, store: ProfileStore, observations: list[dict]) -> d
         + ("\n".join(obs_lines) or "(no activity observed)")
     )
 
-    result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=3000)
+    result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=8000)
     ops = result.get("ops", []) if isinstance(result, dict) else []
 
     profile, applied, rejected = store.apply_ops(profile, ops, today=today)
