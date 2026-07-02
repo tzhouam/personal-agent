@@ -1,0 +1,41 @@
+# Follow list for the research digest. Owner-editable.
+# lang: zh → items are summarized in Chinese and shown in the 中文媒体 section.
+# Set `enabled: false` to keep an entry without fetching it.
+sources:
+  # ── English: companies & labs ───────────────────────────────────
+  - name: OpenAI Blog
+    url: https://openai.com/blog/rss.xml
+    lang: en
+  - name: Google DeepMind Blog
+    url: https://deepmind.google/blog/rss.xml
+    lang: en
+  - name: Hugging Face Blog
+    url: https://huggingface.co/blog/feed.xml
+    lang: en
+  - name: vLLM Releases
+    url: https://github.com/vllm-project/vllm/releases.atom
+    lang: en
+  - name: BAIR Blog
+    url: https://bair.berkeley.edu/blog/feed.xml
+    lang: en
+  - name: Simon Willison
+    url: https://simonwillison.net/atom/everything/
+    lang: en
+
+  # ── 中文 AI 媒体 ─────────────────────────────────────────────────
+  - name: 量子位
+    url: https://www.qbitai.com/feed
+    lang: zh
+  # 机器之心's /rss endpoint now redirects to an HTML SPA (verified 2026-07-02)
+  # and the public rsshub.app instance is Cloudflare-blocked. Point at a
+  # self-hosted RSSHub (route /jiqizhixin/daily) and enable:
+  - name: 机器之心
+    url: https://rsshub.example.com/jiqizhixin/daily
+    lang: zh
+    enabled: false
+  # 新智元 publishes on WeChat 公众号 only — needs a RSSHub instance.
+  # Point this at your own RSSHub deployment and enable it:
+  - name: 新智元
+    url: https://rsshub.app/wechat/mp/msgalbum/MzI3MTA0MTk1MA==
+    lang: zh
+    enabled: false

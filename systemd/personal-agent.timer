@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily 07:00 HKT run of the personal self-assistant agent
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 Asia/Hong_Kong
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

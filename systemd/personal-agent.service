@@ -1,0 +1,11 @@
+[Unit]
+Description=Personal self-assistant agent daily run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/rebase/personal-agent
+# retry once as a resume if the first attempt died mid-run
+ExecStart=/bin/sh -c '/rebase/.venv/bin/assistant run || /rebase/.venv/bin/assistant run --resume'
+TimeoutStartSec=1800

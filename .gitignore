@@ -1,0 +1,14 @@
+# secrets — never commit
+.env
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# local artifacts
+nohup.out
+*.log
