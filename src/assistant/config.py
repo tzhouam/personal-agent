@@ -56,6 +56,19 @@ class Settings(BaseSettings):
     # Resume sync (M4) — Overleaf git-bridge URL (or any git remote); empty = disabled
     resume_remote_url: str = ""
 
+    # Chat listener (`assistant chat-listen`) — the owner messages the agent and
+    # gets a reply on the same channel. Email works out of the box (same IMAP/SMTP
+    # creds); WeCom (企业微信 → WeChat plugin) needs an app + public callback URL.
+    chat_poll_seconds: int = 60
+    chat_subject_prefix: str = "agent"  # email subject must start with this
+    wecom_corp_id: str = ""
+    wecom_secret: str = ""
+    wecom_agent_id: int = 0
+    wecom_owner_userid: str = ""   # only this WeCom member may command the agent
+    wecom_token: str = ""          # callback (receive) settings from the app's API page
+    wecom_aes_key: str = ""        # 43-char EncodingAESKey
+    wecom_callback_port: int = 8329
+
     # Personal website — "owner/name" GitHub Pages repo; the agent pushes the
     # rendered site directly to the default branch (owner's choice, 2026-07-02)
     website_repo: str = ""

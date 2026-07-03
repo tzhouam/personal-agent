@@ -220,6 +220,13 @@ def main() -> None:
     reading_p.add_argument("action", choices=["list", "done"])
     reading_p.add_argument("value", nargs="?", help="id (r3) for done")
 
+    chat_p = sub.add_parser("chat-listen",
+                            help="answer owner messages from email/WeCom (foreground loop)")
+    chat_p.add_argument("--once", action="store_true", help="single poll cycle, then exit")
+
+    ask_p = sub.add_parser("ask", help="ask the chat agent one question locally")
+    ask_p.add_argument("text", help="the message, quoted")
+
     args = parser.parse_args()
     settings = Settings()
 
@@ -247,6 +254,15 @@ def main() -> None:
         sys.exit(cmd_todo(settings, args))
     elif args.command == "reading":
         sys.exit(cmd_reading(settings, args))
+    elif args.command == "chat-listen":
+        from .chat.service import run_listener
+
+        sys.exit(run_listener(settings, once=args.once))
+    elif args.command == "ask":
+        from .chat.agent import handle_message
+
+        print(handle_message(args.text, settings))
+        sys.exit(0)
 
 
 if __name__ == "__main__":

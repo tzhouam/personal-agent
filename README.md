@@ -42,6 +42,28 @@ Data lives in `~/.personal-agent/`:
 - `runs/<run_id>/` — per-run artifacts (observations, digest JSON/HTML) used by `--resume`.
 - `state.json` — phase marker (named phase = phase to re-enter).
 
+## Chat with the agent
+
+A background listener answers messages from the owner and can execute typed
+actions (add/close todos, mark reading done, trigger a digest run):
+
+```bash
+assistant ask "what's due this week?"     # one-off, local
+assistant chat-listen                     # foreground loop; nohup for background:
+nohup assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &
+```
+
+- **Email (works out of the box)**: mail the digest mailbox from one of your
+  own addresses with a subject starting `agent` — e.g. "agent: add a todo to
+  review X, due Friday". The reply comes back by email. Non-owner senders and
+  other subjects are ignored; a UID watermark prevents replays.
+- **WeChat via WeCom (企业微信)**: register a free WeCom org + self-built app,
+  enable the WeChat plugin (我→设置→插件→企业微信, scan QR) — the agent then
+  messages you *inside WeChat*. Set `WECOM_CORP_ID/SECRET/AGENT_ID/OWNER_USERID`
+  for push; receiving your replies additionally needs the app's callback URL
+  publicly routed to this machine (`WECOM_TOKEN`/`WECOM_AES_KEY`, port 8329 —
+  a tunnel or small VPS). See `.env.template`.
+
 ## Schedule (daily 07:00 HKT)
 
 On a systemd host:
