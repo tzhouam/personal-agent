@@ -5,7 +5,7 @@ trigger: systemctl says "offline"/fails, crontab is missing, or an agent-launche
 modules: [ops]
 status: active
 created_at: 2026-07-02
-last_used_at: 2026-07-02
+last_used_at: 2026-07-03
 run_count: 0
 ---
 
@@ -30,6 +30,16 @@ run_count: 0
 4. Credential test calls: exercise the credential through the application's own
    code path (SDK with base_url from the owner's .env) instead of a raw curl
    with the key pasted into the command line.
+5. Full daemon set (as of 2026-07-03) — everything dies with the container;
+   bring it all back with:
+   ```bash
+   nohup /rebase/personal-agent/scheduler.sh >/dev/null 2>&1 &                          # daily digest, 07:00 HKT
+   nohup /rebase/.venv/bin/assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &   # email chat listener
+   nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &      # WeChat gateway
+   ```
+   The gateway process is titled `openclaw` (not "openclaw gateway"):
+   restart it with `pkill -x openclaw` + the third line. Details:
+   `doc/WECHAT_OPENCLAW.md` and the `wechat-openclaw-bridge` skill.
 
 ## Verification
 `bash scheduler.sh` (foreground) logs "scheduler started"; a second copy exits

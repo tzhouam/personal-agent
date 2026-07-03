@@ -61,12 +61,17 @@ nohup assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &
   plus `users:read` + `users:read.email` to skip setting `SLACK_OWNER_ID`),
   put the `xoxb-` token in `SLACK_BOT_TOKEN`, then just DM the bot. Polling
   only — no public URL needed, so it works from this container as-is.
-- **WeChat via WeCom (企业微信)**: register a free WeCom org + self-built app,
-  enable the WeChat plugin (我→设置→插件→企业微信, scan QR) — the agent then
-  messages you *inside WeChat*. Set `WECOM_CORP_ID/SECRET/AGENT_ID/OWNER_USERID`
-  for push; receiving your replies additionally needs the app's callback URL
-  publicly routed to this machine (`WECOM_TOKEN`/`WECOM_AES_KEY`, port 8329 —
-  a tunnel or small VPS). See `.env.template`.
+- **WeChat via OpenClaw (live)**: Tencent's official
+  `@tencent-weixin/openclaw-weixin` plugin runs in an OpenClaw Gateway on this
+  machine; its agent delegates data questions to `assistant ask`. Setup,
+  restart runbook, and troubleshooting: [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md).
+- **WeChat via WeCom (企业微信, alternative)**: register a free WeCom org +
+  self-built app, enable the WeChat plugin (我→设置→插件→企业微信, scan QR) —
+  the agent then messages you *inside WeChat*. Set
+  `WECOM_CORP_ID/SECRET/AGENT_ID/OWNER_USERID` for push; receiving your replies
+  additionally needs the app's callback URL publicly routed to this machine
+  (`WECOM_TOKEN`/`WECOM_AES_KEY`, port 8329 — a tunnel or small VPS). See
+  `.env.template`.
 
 ## Schedule (daily 07:00 HKT)
 
@@ -84,6 +89,21 @@ In this container (PID 1 is tini — no systemd/cron), use the fallback loop sch
 nohup /rebase/personal-agent/scheduler.sh >/dev/null 2>&1 &
 # logs: ~/.personal-agent/scheduler.log · stop: kill $(cat ~/.personal-agent/scheduler.pid)
 ```
+
+### Restart runbook (after a container restart)
+
+All daemons die with the container. Bring everything back:
+
+```bash
+nohup /rebase/personal-agent/scheduler.sh >/dev/null 2>&1 &                          # daily digest, 07:00 HKT
+nohup /rebase/.venv/bin/assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &   # email chat listener
+nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &      # WeChat gateway (OpenClaw)
+# restart just the gateway (process is titled `openclaw`): pkill -x openclaw, then re-run the third line
+```
+
+Logs if anything acts up: `/tmp/openclaw/openclaw-<date>.log` (gateway),
+`~/.personal-agent/chat.log` (email listener), `~/.personal-agent/scheduler.log`
+(daily runs).
 
 ## Architecture (M1 slice)
 
