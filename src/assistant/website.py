@@ -4,6 +4,11 @@ The site is a DETERMINISTIC render of profile.yaml + todos — no LLM in the
 loop, so nothing fabricated can reach a public page. Publishing pushes
 directly to the repo's default branch (owner's explicit choice, 2026-07-02 —
 was PR-gated before); remote edits are rebased in first, never force-pushed.
+
+Todo pin/done buttons are client-side only (localStorage keyed by todo id):
+the page has no backend, so "done" hides the item in that browser without
+touching todos.yaml — the store is still closed by the agent's monitor pass
+or `assistant todo done`.
 """
 
 import base64
@@ -61,7 +66,8 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None) -> 
         "<link rel='preconnect' href='https://fonts.googleapis.com'>",
         "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap'"
         " rel='stylesheet'>",
-        "<link rel='stylesheet' href='agent-site.css'></head><body>",
+        "<link rel='stylesheet' href='agent-site.css'>",
+        "<script src='agent-site.js' defer></script></head><body>",
         # ── hero overlay: photo + personal info ──
         "<header class='hero'><div class='hero-inner'>",
         (f"<img class='avatar' src='{e(photo)}' alt='{e(name)}'>" if photo else ""),
@@ -115,7 +121,7 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None) -> 
         f"<footer>Maintained automatically by personal-agent · updated {today.isoformat()}</footer>"
         "</main></body></html>"
     )
-    return {"index.html": "".join(parts), "agent-site.css": _CSS}
+    return {"index.html": "".join(parts), "agent-site.css": _CSS, "agent-site.js": _JS}
 
 
 def _parse_day(value) -> date | None:
@@ -146,14 +152,15 @@ def _render_calendar(todos: list[dict], today: date) -> str:
             cell = f"<b>{day}</b>"
             for todo in by_day.get(day, []):
                 kind = "todo due" if todo.get("due") else "todo"
-                cell += f"<div class='{kind}' title='{e(todo.get('detail', ''))}'>{e(todo['title'][:40])}</div>"
+                cell += (f"<div class='{kind}' data-tid='{e(str(todo.get('id', '')))}'"
+                         f" title='{e(todo.get('detail', ''))}'>{e(todo['title'][:40])}</div>")
             parts.append(f"<td class='{classes}'>{cell}</td>")
         parts.append("</tr>")
     parts.append("</table>")
 
     if todos:
         parts.append("<h3>Open todos</h3><ul class='todos'>")
-        for todo in todos:
+        for idx, todo in enumerate(todos):
             title = f"<b>{e(todo['title'])}</b>"
             label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
                               todo.get("type", ""))
@@ -164,9 +171,16 @@ def _render_calendar(todos: list[dict], today: date) -> str:
             due = f" · due {e(str(todo['due']))}" if todo.get("due") else ""
             detail = (f"<div class='t-detail'>{e(todo['detail'])}</div>"
                       if todo.get("detail") else "")
-            parts.append(f"<li>{title} <span class='when'>({e(todo.get('source', ''))}, "
+            actions = ("<span class='t-actions'>"
+                       "<button class='b-pin' title='Pin to the top of the list'>📌 Pin</button>"
+                       "<button class='b-done' title='Mark done — hide on this page'>✓ Done</button>"
+                       "</span>")
+            parts.append(f"<li data-tid='{e(str(todo.get('id', '')))}' data-idx='{idx}'>"
+                         f"{actions}{title} <span class='when'>({e(todo.get('source', ''))}, "
                          f"since {e(todo.get('created', ''))}{due})</span>{detail}</li>")
         parts.append("</ul>")
+        parts.append("<div id='todo-hidden-bar'><span></span> — "
+                     "<button id='todo-show-hidden'>show</button></div>")
     parts.append("</section>")
     return "".join(parts)
 
@@ -239,11 +253,95 @@ table.cal{border-collapse:collapse;width:100%;margin-top:6px}
 ul.todos{list-style:none;padding:0;margin:0}
 ul.todos li{border:1px solid #e2e8f0;border-left:4px solid #ef4444;border-radius:10px;
   padding:10px 14px;margin-bottom:8px;background:#fff}
+ul.todos .when{float:none;display:inline}
 .t-detail{color:#64748b;font-size:.86rem;margin-top:4px}
+
+/* pin / done controls (state lives in this browser's localStorage) */
+.t-actions{float:right;display:flex;gap:6px;margin:-2px 0 4px 10px}
+.t-actions button,#todo-show-hidden{border:1px solid #e2e8f0;background:#f8fafc;
+  border-radius:8px;cursor:pointer;font:inherit;font-size:.78rem;padding:2px 10px;
+  color:#64748b;white-space:nowrap;transition:background .15s,color .15s}
+.t-actions button:hover,#todo-show-hidden:hover{background:#eef2ff;color:#4338ca}
+ul.todos li.pinned{border-left-color:#f59e0b;
+  background:linear-gradient(135deg,#fffbeb,#fff)}
+ul.todos li.pinned .b-pin{background:#fef3c7;border-color:#fcd34d;color:#92400e}
+ul.todos li.done-item{display:none}
+body.show-hidden ul.todos li.done-item{display:block;opacity:.55}
+.cal .todo.done-chip{display:none}
+#todo-hidden-bar{display:none;color:#94a3b8;font-size:.85rem;margin-top:10px}
 footer{text-align:center;color:#94a3b8;font-size:.8rem;margin-top:36px}
 
 @media (max-width:600px){.hero h1{font-size:2rem}.when{float:none;display:block}
 main{margin-top:-36px}.card{padding:20px 18px}.grid{grid-template-columns:1fr}}
+"""
+
+
+_JS = """(function () {
+  var DONE = 'agent-todos-done', PIN = 'agent-todos-pinned';
+  function load(k) { try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch (e) { return []; } }
+  function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+  function toggle(k, id) {
+    var v = load(k), i = v.indexOf(id);
+    if (i < 0) v.push(id); else v.splice(i, 1);
+    save(k, v);
+  }
+
+  function apply() {
+    var done = load(DONE), pinned = load(PIN);
+    // calendar chips of done todos disappear too
+    document.querySelectorAll('.cal [data-tid]').forEach(function (el) {
+      el.classList.toggle('done-chip', done.indexOf(el.dataset.tid) >= 0);
+    });
+    var list = document.querySelector('ul.todos');
+    if (!list) return;
+    var items = Array.prototype.slice.call(list.querySelectorAll('li[data-tid]'));
+    // pinned first (keeping their relative order), the rest in rendered order
+    items.sort(function (a, b) {
+      var pa = pinned.indexOf(a.dataset.tid) >= 0 ? 0 : 1;
+      var pb = pinned.indexOf(b.dataset.tid) >= 0 ? 0 : 1;
+      return pa - pb || (+a.dataset.idx) - (+b.dataset.idx);
+    }).forEach(function (li) { list.appendChild(li); });
+
+    var hidden = 0;
+    items.forEach(function (li) {
+      var id = li.dataset.tid;
+      var isDone = done.indexOf(id) >= 0, isPin = pinned.indexOf(id) >= 0;
+      if (isDone) hidden++;
+      li.classList.toggle('done-item', isDone);
+      li.classList.toggle('pinned', isPin);
+      var pb = li.querySelector('.b-pin'), db = li.querySelector('.b-done');
+      if (pb) pb.textContent = isPin ? '\\ud83d\\udccc Unpin' : '\\ud83d\\udccc Pin';
+      if (db) db.textContent = isDone ? '\\u21a9 Restore' : '\\u2713 Done';
+    });
+    var bar = document.getElementById('todo-hidden-bar');
+    if (bar) {
+      bar.style.display = hidden ? 'block' : 'none';
+      bar.querySelector('span').textContent =
+        hidden + ' done todo' + (hidden === 1 ? '' : 's') + ' hidden';
+    }
+  }
+
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target.closest ? ev.target.closest('button') : null;
+    if (!btn) return;
+    if (btn.id === 'todo-show-hidden') {
+      var shown = document.body.classList.toggle('show-hidden');
+      btn.textContent = shown ? 'hide' : 'show';
+      return;
+    }
+    var li = btn.closest('li[data-tid]');
+    if (!li) return;
+    if (btn.classList.contains('b-pin')) toggle(PIN, li.dataset.tid);
+    else if (btn.classList.contains('b-done')) toggle(DONE, li.dataset.tid);
+    else return;
+    apply();
+  });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply);
+  } else {
+    apply();
+  }
+})();
 """
 
 
