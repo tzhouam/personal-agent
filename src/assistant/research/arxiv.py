@@ -1,12 +1,29 @@
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 API = "https://export.arxiv.org/api/query"
 _NS = {"atom": "http://www.w3.org/2005/Atom"}
+# arXiv API etiquette: one request every 3 seconds; it rate-limits whole runs
+# with 429s otherwise (observed 2026-07-03: an entire run got 0 papers).
+_QUERY_SPACING_SECONDS = 3.0
 
 
+def _retryable(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (429, 500, 502, 503)
+    return isinstance(exc, httpx.TransportError)
+
+
+@retry(
+    retry=retry_if_exception(_retryable),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=5, max=60),
+    reraise=True,
+)
 def search(query: str, max_results: int = 30, timeout: int = 30) -> list[dict]:
     resp = httpx.get(
         API,
@@ -49,7 +66,9 @@ def fetch_recent(queries: list[str], lookback_days: int, max_per_query: int) -> 
     """Run all queries, dedupe by id, keep only papers submitted in the window."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     by_id: dict[str, dict] = {}
-    for query in queries:
+    for i, query in enumerate(queries):
+        if i:
+            time.sleep(_QUERY_SPACING_SECONDS)
         # AND of words, not exact phrase — phrase queries return almost nothing
         # in a one-week window; the relevance scorer downstream does the precision
         terms = " AND ".join(f"all:{w}" for w in query.split())

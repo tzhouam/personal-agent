@@ -70,3 +70,17 @@ def test_parse_json_variants():
     assert _parse_json('{"a": 1}') == {"a": 1}
     assert _parse_json('Here you go:\n```json\n[1, 2]\n```') == [1, 2]
     assert _parse_json('prefix {"a": {"b": 2}} suffix') == {"a": {"b": 2}}
+
+
+def test_run_refuses_when_lock_held(settings):
+    import fcntl
+
+    from assistant import orchestrator
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    holder = (settings.data_dir / "run.lock").open("w")
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert orchestrator.run(settings) == 3  # refuses before touching anything
+    finally:
+        holder.close()

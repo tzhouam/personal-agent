@@ -1,3 +1,4 @@
+import fcntl
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -252,6 +253,19 @@ def build_graph(deps: Deps):
 
 def run(settings: Settings, dry_run: bool = False, resume: bool = False) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    # Canonical single-run guard: cron, chat trigger_run, and manual CLI runs
+    # all pass through here; holding the lock for the whole run prevents two
+    # pipelines from interleaving state.json / run artifacts.
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    lock_fd = (settings.data_dir / "run.lock").open("w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.error("another run already holds %s — refusing to start", lock_fd.name)
+        lock_fd.close()
+        return 3
+
     prev = load_state(settings.state_file)
 
     if resume and prev and prev.get("phase") not in (None, "done") and prev.get("run_id"):
@@ -287,6 +301,7 @@ def run(settings: Settings, dry_run: bool = False, resume: bool = False) -> int:
         final = build_graph(deps).invoke(initial)
     finally:
         deps.events.close()
+        lock_fd.close()  # releases the flock
 
     for err in final.get("errors", []):
         log.warning("run error: %s", err)
