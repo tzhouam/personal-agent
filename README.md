@@ -63,8 +63,11 @@ nohup assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &
   only — no public URL needed, so it works from this container as-is.
 - **WeChat via OpenClaw (live)**: Tencent's official
   `@tencent-weixin/openclaw-weixin` plugin runs in an OpenClaw Gateway on this
-  machine; its agent delegates data questions to `assistant ask`. Setup,
-  restart runbook, and troubleshooting: [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md).
+  machine, and our [`openclaw-plugin/`](openclaw-plugin/) bridge (a
+  `before_agent_reply` hook) routes every inbound message straight to
+  `assistant ask` — the gateway's own LLM never runs, OpenClaw is transport
+  only. Setup, restart runbook, and troubleshooting:
+  [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md).
 - **WeChat via WeCom (企业微信, alternative)**: register a free WeCom org +
   self-built app, enable the WeChat plugin (我→设置→插件→企业微信, scan QR) —
   the agent then messages you *inside WeChat*. Set

@@ -12,17 +12,20 @@ WeChat (owner's own account)
 OpenClaw Gateway  (~/.openclaw, Node 24 at /opt/node24, foreground under nohup)
   │  channel plugin: @tencent-weixin/openclaw-weixin
   ▼
-OpenClaw agent  (provider deepseek-anthropic → api.deepseek.com/anthropic)
-  │  ~/.openclaw/workspace/AGENTS.md instructs it to delegate
+personal-agent-bridge plugin  (openclaw-plugin/ in this repo, --link installed)
+  │  before_agent_reply typed hook → short-circuits BEFORE any model call
   ▼
-/rebase/.venv/bin/assistant ask "<message>"   ← the personal-agent, real data
+/rebase/.venv/bin/assistant ask "<message>"   ← the personal-agent, the only brain
 ```
 
-You message **your own WeChat-connected bot**; OpenClaw's agent answers, and for
-anything about todos / digest / profile / reading list it is instructed to run
-`assistant ask` (exec tool) and relay the real data instead of answering from
-its own head. If a reply ever looks invented rather than data-backed, harden the
-bridge prompt in `~/.openclaw/workspace/AGENTS.md`.
+You message **your own WeChat-connected bot**; the bridge plugin claims every
+inbound message with a `before_agent_reply` hook (first `{handled: true}` wins,
+runs before the model), execs `assistant ask`, and returns its stdout as the
+reply. **OpenClaw's own LLM agent never runs for user messages** — it is pure
+transport, so there is no persona to drift and no prompt-obedience risk.
+Slash commands (`/new`, `/status`, …) and heartbeats fall through to OpenClaw's
+normal handling. The workspace bootstrap files (`~/.openclaw/workspace/SOUL.md`
+etc.) only matter as a fallback if the plugin is ever disabled.
 
 ## Security
 
@@ -30,9 +33,11 @@ bridge prompt in `~/.openclaw/workspace/AGENTS.md`.
   plugin binds to the account that scanned the QR, so the sender is inherently
   the owner and **no pairing approval is needed** (the pairing queue stays
   empty; that's expected, not a bug).
-- The OpenClaw agent has an exec tool (that's how the bridge works), so anyone
-  who could message it could drive shell commands. With account-bound identity
-  that's only the owner; still, don't approve other senders into pairing.
+- The bridge hook runs a fixed binary (`assistant ask <message>`) — the message
+  is a single argv element, never shell-interpreted, and the LLM cannot choose
+  other commands because no LLM is in the loop before the personal-agent.
+  Inside the personal-agent the usual rule applies: the model's write surface
+  is the typed chat actions, nothing else.
 - The DeepSeek key is **never stored in OpenClaw's config**: `openclaw.json`
   references `${DEEPSEEK_ANTHROPIC_KEY}` and the launcher injects it from
   `/rebase/personal-agent/.env` at start time.
@@ -44,7 +49,8 @@ bridge prompt in `~/.openclaw/workspace/AGENTS.md`.
 | Node 24 (gateway needs ≥22.19; system node stays v20) | `/opt/node24/bin` |
 | OpenClaw + config | `openclaw` 2026.6.11 global npm; `~/.openclaw/openclaw.json` |
 | WeChat plugin | `@tencent-weixin/openclaw-weixin` 2.4.6 (installed via `@tencent-weixin/openclaw-weixin-cli`) |
-| Bridge prompt | `~/.openclaw/workspace/AGENTS.md` |
+| **Bridge plugin (the brain hookup)** | `openclaw-plugin/` in this repo — `openclaw plugins install --link /rebase/personal-agent/openclaw-plugin` |
+| Fallback prompt (only if plugin disabled) | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` |
 | Launcher | `~/.openclaw/start-gateway.sh` (PATH + key injection + `exec openclaw gateway`) |
 | Gateway log | `/tmp/openclaw/openclaw-<date>.log` (+ `~/.openclaw/logs/gateway-nohup.log`) |
 
@@ -56,7 +62,15 @@ Required config that is NOT the default (`openclaw config set …` or edit json)
 - `models.providers.deepseek-anthropic`: `baseUrl`, `apiKey: "${DEEPSEEK_ANTHROPIC_KEY}"`,
   `api: "anthropic-messages"`, and the model entry **must set `maxTokens`**
   (e.g. 8192) — the Anthropic transport errors with "requires a positive
-  maxTokens value" otherwise, and the WeChat reply is just an error notice.
+  maxTokens value" otherwise. (Only reached by slash commands/heartbeats now —
+  user messages never touch the model.)
+- `plugins.entries.personal-agent-bridge.enabled: true` **and**
+  `plugins.entries.personal-agent-bridge.hooks.allowConversationAccess: true` —
+  non-bundled plugins may not register conversation hooks (`before_agent_reply`)
+  without the latter; the hook silently stays unregistered.
+- Do **not** set `hooks.timeouts.before_agent_reply`: a timed-out hook falls
+  through to OpenClaw's own LLM. The plugin bounds the CLI call itself (120 s)
+  and returns the error inside the bridge instead.
 
 ## Restart runbook
 
@@ -88,6 +102,8 @@ in a real terminal and scan the QR with WeChat.
 | Gateway exits code 78, log says "missing gateway.mode" | `openclaw config set gateway.mode local` |
 | "channels.start requires credentials before opening a websocket" | set `gateway.auth.mode token` + `gateway.auth.token` |
 | WeChat replies with a short error; log shows "requires a positive maxTokens" | add `maxTokens` to the provider's `models[]` entry, restart gateway |
+| Replies look invented / generic instead of data-backed | the bridge plugin isn't intercepting — `openclaw plugins inspect personal-agent-bridge --runtime` must show `Status: loaded` + `before_agent_reply (priority 100)`; check `enabled` + `hooks.allowConversationAccess` in openclaw.json, then restart the gateway. (Historical variant of this failure: before the plugin existed, delegation relied on the workspace SOUL.md/AGENTS.md prompt, and OpenClaw's seeded onboarding persona drowned it out — the prompt files are only a fallback now.) |
+| Replies show "(assistant bridge error: …)" | the plugin *is* working; the personal-agent CLI failed — run `/rebase/.venv/bin/assistant ask "test"` in a terminal and fix what it reports (.env, ~/.personal-agent) |
 | Config change has no effect | old process still serving — `pkill -x openclaw` (a kill pattern with "gateway" in it matches nothing) and relaunch |
 | "Missing env var DEEPSEEK_ANTHROPIC_KEY" warning from CLI commands | harmless outside the launcher; only the gateway process needs the env var |
 | Where did my message go? | `grep -a "inbound message\|outbound: text\|embedded_run_agent_end" /tmp/openclaw/openclaw-<date>.log` |

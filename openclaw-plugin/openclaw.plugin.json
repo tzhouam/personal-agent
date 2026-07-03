@@ -1,0 +1,9 @@
+{
+  "id": "personal-agent-bridge",
+  "name": "Personal Agent Bridge",
+  "description": "Answers every inbound message with the personal-agent (`assistant ask`) instead of the gateway's own LLM.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
