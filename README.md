@@ -103,7 +103,10 @@ or the loop scheduler (`nohup ./scheduler.sh &`, logs `~/.personal-agent/schedul
 
 ### Restart runbook (after a container restart)
 
-**One line** — the gateway brings cron, the chat listener, and WeChat back with it:
+Usually **zero lines**: a guarded block in `~/.bashrc` revives the gateway the
+first time any interactive shell opens after a restart (verified by drill).
+Manual equivalent — the gateway brings cron, the chat listener, and WeChat
+back with it:
 
 ```bash
 nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &

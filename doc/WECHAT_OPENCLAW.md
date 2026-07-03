@@ -93,7 +93,9 @@ Required config that is NOT the default (`openclaw config set …` or edit json)
 
 ## Restart runbook
 
-The gateway is the only daemon (PID 1 is tini — nothing supervises it). It
+The gateway is the only daemon (PID 1 is tini — nothing supervises it), and a
+guarded block in `~/.bashrc` auto-revives it on the first interactive shell
+after a container restart (drill-verified 2026-07-03). Manual start — it
 brings cron (daily digest), the chat listener, and WeChat back with it:
 
 ```bash
