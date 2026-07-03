@@ -127,7 +127,7 @@ def build_graph(deps: Deps):
 
             github = GitHubCollector(settings) if settings.github_token else None
             todos = update_todos(deps.todos, state.get("digest", {}),
-                                 state.get("resume", {}), github=github)
+                                 state.get("resume", {}), github=github, llm=deps.llm)
             log.info("todos: %d open (%d added, %d auto-closed)", todos["open_count"],
                      len(todos["added"]), len(todos.get("closed", [])))
             errors = []

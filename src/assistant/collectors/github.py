@@ -157,30 +157,29 @@ class GitHubCollector:
         }
 
     # ── per-item context & completion state (feeds the todo store) ──
-    def fetch_item_context(self, html_url: str | None) -> str:
-        """Rich one-line context for a PR/issue: author, size, age, body snippet."""
+    def fetch_item_context(self, html_url: str | None) -> dict:
+        """Structured context for a PR/issue: ``meta`` (author/size/age line,
+        shown verbatim) and ``body`` (raw text — LLM-summarized, never shown raw)."""
         parts = _split_item_url(html_url)
         if not parts:
-            return ""
+            return {}
         owner, repo, kind, number = parts
         if kind == "pull":
             resp = self.client.get(f"{API}/repos/{owner}/{repo}/pulls/{number}")
             resp.raise_for_status()
             d = resp.json()
-            body = " ".join((d.get("body") or "").split())[:300]
-            ctx = (f"PR by {d.get('user', {}).get('login', '?')} · "
-                   f"{d.get('changed_files', '?')} files "
-                   f"(+{d.get('additions', '?')}/−{d.get('deletions', '?')}) · "
-                   f"opened {str(d.get('created_at', ''))[:10]}")
+            meta = (f"PR by {d.get('user', {}).get('login', '?')} · "
+                    f"{d.get('changed_files', '?')} files "
+                    f"(+{d.get('additions', '?')}/−{d.get('deletions', '?')}) · "
+                    f"opened {str(d.get('created_at', ''))[:10]}")
         else:
             resp = self.client.get(f"{API}/repos/{owner}/{repo}/issues/{number}")
             resp.raise_for_status()
             d = resp.json()
-            body = " ".join((d.get("body") or "").split())[:300]
-            ctx = (f"Issue by {d.get('user', {}).get('login', '?')} · "
-                   f"{d.get('comments', 0)} comments · "
-                   f"opened {str(d.get('created_at', ''))[:10]}")
-        return f"{ctx}. {body}" if body else ctx
+            meta = (f"Issue by {d.get('user', {}).get('login', '?')} · "
+                    f"{d.get('comments', 0)} comments · "
+                    f"opened {str(d.get('created_at', ''))[:10]}")
+        return {"meta": meta, "body": " ".join((d.get("body") or "").split())[:1500]}
 
     def check_finished(self, html_url: str | None) -> tuple[bool, str]:
         """Is the task behind this URL done? Merged/closed items are done; a

@@ -34,10 +34,23 @@ class FakeGitHub:
         self.finished_urls = {}
 
     def fetch_item_context(self, url):
-        return "PR by alice · 3 files (+40/−5) · opened 2026-07-01. Fixes the scheduler race."
+        return {"meta": "PR by alice · 3 files (+40/−5) · opened 2026-07-01",
+                "body": "## Purpose This PR fixes the scheduler race. ## Test Plan unit tests"}
 
     def check_finished(self, url):
         return self.finished_urls.get(url, (False, ""))
+
+
+class FakeLLM:
+    """Returns a written detail for every task it is asked to summarize."""
+
+    cheap_model = "fake"
+
+    def complete_json(self, prompt, system=None, **kw):
+        ids = [line.split("id=", 1)[1] for line in prompt.splitlines()
+               if line.startswith("id=")]
+        return [{"id": i, "detail": "Review a small PR that fixes the scheduler race."}
+                for i in ids]
 
 
 def test_update_todos_from_digest_and_resume(tmp_path):
@@ -48,12 +61,15 @@ def test_update_todos_from_digest_and_resume(tmp_path):
          "summary": "You were requested to review a PR that fixes the scheduler.",
          "todo": "Review scheduler fix PR", "action": "review"},
     ], "yellow": [], "white": []}}
-    result = update_todos(store, digest, {"status": "pending_approval"}, github=github)
+    result = update_todos(store, digest, {"status": "pending_approval"}, github=github,
+                          llm=FakeLLM())
     assert result["open_count"] == 2  # review todo + resume-approval todo
     review = next(t for t in result["open"] if t.get("source") == "github")
     assert review["title"] == "Review scheduler fix PR"  # short label as the title
-    assert review["detail"].startswith("You were requested")  # long sentence kept
-    assert "PR by alice · 3 files (+40/−5)" in review["detail"]  # enriched context
+    # detail is the LLM-written task summary + meta line — never the raw body
+    assert review["detail"].startswith("Review a small PR that fixes the scheduler race.")
+    assert "PR by alice · 3 files (+40/−5)" in review["detail"]
+    assert "## Purpose" not in review["detail"]
 
     # resume approved → its todo auto-closes; review todo not duplicated
     result = update_todos(store, digest, {"status": "no_change"}, github=github)
@@ -68,6 +84,20 @@ def test_update_todos_from_digest_and_resume(tmp_path):
     assert result["open_count"] == 0
     assert result["closed"] == [{"id": "t1", "title": "Review scheduler fix PR",
                                  "reason": "PR merged"}]
+
+
+def test_todo_detail_fallback_without_llm(tmp_path):
+    """No LLM → the notification sentence + meta line; the raw body is dropped."""
+    store = TodoStore(tmp_path)
+    digest = {"sections": {"red": [
+        {"id": "9", "url": "https://github.com/o/r/pull/9",
+         "summary": "You were asked to review X.", "todo": "Review X"},
+    ]}}
+    result = update_todos(store, digest, {"status": "no_change"}, github=FakeGitHub())
+    detail = result["open"][0]["detail"]
+    assert detail.startswith("You were asked to review X.")
+    assert "PR by alice · 3 files (+40/−5)" in detail
+    assert "## Purpose" not in detail
 
 
 PROFILE = {
