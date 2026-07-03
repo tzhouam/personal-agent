@@ -51,7 +51,7 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None) -> 
         link_pills.append(f"<a class='pill' href='mailto:{e(ident['emails'][0])}'>✉ email</a>")
 
     pages = [
-        ("index.html", "Home", _skills_html(actives("skills"))),
+        ("index.html", "Home", _about_html(profile) + _skills_html(actives("skills"))),
         ("experience.html", "Experience", _experience_html(profile.get("experience", []))),
         ("education.html", "Education", _education_html(profile.get("education", []))),
         ("projects.html", "Projects", _projects_html(actives("projects"))),
@@ -100,6 +100,39 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None) -> 
               "</footer></main></body></html>"
         )
     return files
+
+
+def _about_html(profile: dict) -> str:
+    """Short self-introduction: identity.bio (owner-editable, never touched by the
+    LLM — identity is a protected section) with a deterministic fallback composed
+    from profile facts, so the section can't fabricate anything."""
+    e = html.escape
+    bio = str(profile.get("identity", {}).get("bio", "") or "").strip()
+    if not bio:
+        bio = _fallback_bio(profile)
+    if not bio:
+        return ""
+    paragraphs = "".join(f"<p class='bio'>{e(p.strip())}</p>"
+                         for p in bio.split("\n") if p.strip())
+    return f"<section id='about' class='card'><h2>About</h2>{paragraphs}</section>"
+
+
+def _fallback_bio(profile: dict) -> str:
+    """One factual sentence straight from the profile when no bio is written."""
+    name = profile.get("identity", {}).get("name", "")
+    bits = []
+    experience = profile.get("experience", [])
+    if experience:
+        job = experience[0]
+        if job.get("title") and job.get("org"):
+            bits.append(f"{job['title']} at {job['org']}")
+    projects = [p["name"] for p in profile.get("projects", [])
+                if p.get("status", "active") == "active" and p.get("name")][:3]
+    if projects:
+        bits.append("currently working on " + ", ".join(projects))
+    if not (name and bits):
+        return ""
+    return f"{name} — {'; '.join(bits)}."
 
 
 def _skills_html(skills: list[dict]) -> str:
@@ -251,6 +284,8 @@ a{color:#4f46e5;text-decoration:none}a:hover{text-decoration:underline}
 .hero.compact h1 a{color:#fff}
 .hero.compact h1 a:hover{text-decoration:none;color:#c7d2fe}
 .empty{color:#94a3b8;margin:0}
+.bio{color:#475569;line-height:1.65;margin:0 0 10px}
+.bio:last-child{margin-bottom:0}
 
 /* ── content cards ── */
 main{max-width:860px;margin:-48px auto 0;padding:0 20px 40px;position:relative;z-index:2}

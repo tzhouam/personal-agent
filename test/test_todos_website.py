@@ -73,7 +73,8 @@ def test_update_todos_from_digest_and_resume(tmp_path):
 PROFILE = {
     "identity": {"name": "Jane Doe", "github": "janedoe",
                  "emails": ["t@example.com"], "affiliations": ["ExampleU"],
-                 "links": ["https://github.com/tzhouam"]},
+                 "links": ["https://github.com/tzhouam"],
+                 "bio": "Engineer at Huawei working on vLLM-Omni.\nWorld-model research on the side."},
     "skills": [{"name": "Python", "status": "active"},
                {"name": "Matlab", "status": "dormant"}],
     "experience": [{"title": "Engineer", "org": "Huawei",
@@ -83,6 +84,15 @@ PROFILE = {
                   "highlights": ["rebase automation"],
                   "evidence": ["https://github.com/vllm-project/vllm-omni"]}],
 }
+
+
+def test_about_fallback_without_bio():
+    profile = {k: v for k, v in PROFILE.items()}
+    profile["identity"] = {k: v for k, v in PROFILE["identity"].items() if k != "bio"}
+    home = render_site(profile, [], today=date(2026, 7, 3))["index.html"]
+    # deterministic fallback composed from profile facts only
+    assert "<h2>About</h2>" in home
+    assert "Engineer at Huawei" in home and "vllm-omni" in home
 
 
 def test_render_site_pages_and_calendar():
@@ -104,8 +114,12 @@ def test_render_site_pages_and_calendar():
     home = files["index.html"]
     assert "Jane Doe" in home and "ExampleU" in home
     assert "Python" in home and "Matlab" not in home        # dormant skill hidden
+    # self-introduction: identity.bio rendered as About paragraphs
+    assert "<h2>About</h2>" in home
+    assert "Engineer at Huawei working on vLLM-Omni." in home
+    assert "<p class='bio'>World-model research on the side.</p>" in home
     # sections live on their own pages now, not on the home page
-    assert "Huawei" not in home and "rebase automation" not in home
+    assert "<h2>Experience</h2>" not in home and "rebase automation" not in home
     assert files["experience.html"].count("Engineer") and "Huawei" in files["experience.html"]
     assert "ExampleU" in files["education.html"] and "BSc" in files["education.html"]
     assert "vllm-omni" in files["projects.html"] and "rebase automation" in files["projects.html"]
