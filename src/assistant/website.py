@@ -9,6 +9,12 @@ Todo pin/done buttons are client-side only (localStorage keyed by todo id):
 the page has no backend, so "done" hides the item in that browser without
 touching todos.yaml — the store is still closed by the agent's monitor pass
 or `assistant todo done`.
+
+The buttons are owner-only: hidden until owner mode is enabled by opening
+todos.html#owner once in a browser (persisted in localStorage; #guest turns
+it off). A static page can't truly authenticate, but a visitor who bypasses
+this only ever reorders their own browser's view — guests always see the
+canonical list because their stored marks are ignored outside owner mode.
 """
 
 import base64
@@ -336,8 +342,10 @@ ul.todos li{border:1px solid #e2e8f0;border-left:4px solid #ef4444;border-radius
 ul.todos .when{float:none;display:inline}
 .t-detail{color:#64748b;font-size:.86rem;margin-top:4px}
 
-/* pin / done controls (state lives in this browser's localStorage) */
-.t-actions{float:right;display:flex;gap:6px;margin:-2px 0 4px 10px}
+/* pin / done controls (state lives in this browser's localStorage);
+   owner-only — hidden until body.owner is set via the #owner hash */
+.t-actions{display:none}
+body.owner .t-actions{float:right;display:flex;gap:6px;margin:-2px 0 4px 10px}
 .t-actions button,#todo-show-hidden{border:1px solid #e2e8f0;background:#f8fafc;
   border-radius:8px;cursor:pointer;font:inherit;font-size:.78rem;padding:2px 10px;
   color:#64748b;white-space:nowrap;transition:background .15s,color .15s}
@@ -357,7 +365,7 @@ main{margin-top:-36px}.card{padding:20px 18px}.grid{grid-template-columns:1fr}}
 
 
 _JS = """(function () {
-  var DONE = 'agent-todos-done', PIN = 'agent-todos-pinned';
+  var DONE = 'agent-todos-done', PIN = 'agent-todos-pinned', OWNER = 'agent-owner';
   function load(k) { try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch (e) { return []; } }
   function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
   function toggle(k, id) {
@@ -365,9 +373,21 @@ _JS = """(function () {
     if (i < 0) v.push(id); else v.splice(i, 1);
     save(k, v);
   }
+  // owner mode: visit any page with #owner once to enable in this browser
+  // (#guest disables). Guests never see the buttons and their stored marks
+  // are ignored, so everyone else always sees the canonical list.
+  function readHash() {
+    if (location.hash === '#owner') localStorage.setItem(OWNER, '1');
+    if (location.hash === '#guest') localStorage.removeItem(OWNER);
+  }
+  readHash();
+  window.addEventListener('hashchange', function () { readHash(); apply(); });
+  function isOwner() { return localStorage.getItem(OWNER) === '1'; }
 
   function apply() {
-    var done = load(DONE), pinned = load(PIN);
+    var owner = isOwner();
+    document.body.classList.toggle('owner', owner);
+    var done = owner ? load(DONE) : [], pinned = owner ? load(PIN) : [];
     // calendar chips of done todos disappear too
     document.querySelectorAll('.cal [data-tid]').forEach(function (el) {
       el.classList.toggle('done-chip', done.indexOf(el.dataset.tid) >= 0);
@@ -395,13 +415,14 @@ _JS = """(function () {
     });
     var bar = document.getElementById('todo-hidden-bar');
     if (bar) {
-      bar.style.display = hidden ? 'block' : 'none';
+      bar.style.display = owner && hidden ? 'block' : 'none';
       bar.querySelector('span').textContent =
         hidden + ' done todo' + (hidden === 1 ? '' : 's') + ' hidden';
     }
   }
 
   document.addEventListener('click', function (ev) {
+    if (!isOwner()) return;
     var btn = ev.target.closest ? ev.target.closest('button') : null;
     if (!btn) return;
     if (btn.id === 'todo-show-hidden') {
