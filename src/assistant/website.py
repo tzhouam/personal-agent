@@ -28,7 +28,10 @@ _API = "https://api.github.com"
 
 # ── rendering ────────────────────────────────────────────────────────
 def render_site(profile: dict, todos: list[dict], today: date | None = None) -> dict[str, str]:
-    """Returns {filename: content} for the generated site."""
+    """Returns {filename: content} for the generated site — one page per section.
+
+    Every page is always rendered (an empty section shows a placeholder) so a
+    previously published page never goes stale-but-orphaned in the repo."""
     today = today or date.today()
     ident = profile.get("identity", {})
     e = html.escape
@@ -47,81 +50,111 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None) -> 
     if ident.get("emails"):
         link_pills.append(f"<a class='pill' href='mailto:{e(ident['emails'][0])}'>✉ email</a>")
 
-    skills = actives("skills")
-    experience = profile.get("experience", [])
-    education = profile.get("education", [])
-    projects = actives("projects")
-    anchors = [("skills", "Skills", skills), ("experience", "Experience", experience),
-               ("education", "Education", education), ("projects", "Projects", projects),
-               ("todos", "Todos", True)]
-
-    parts = [
-        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>",
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>",
-        f"<meta property='og:title' content='{e(name)}'>",
-        f"<meta property='og:image' content='{e(photo)}'>",
-        f"<title>{e(name)}</title>",
-        "<link rel='icon' href='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 "
-        "viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>'>",
-        "<link rel='preconnect' href='https://fonts.googleapis.com'>",
-        "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap'"
-        " rel='stylesheet'>",
-        "<link rel='stylesheet' href='agent-site.css'>",
-        "<script src='agent-site.js' defer></script></head><body>",
-        # ── hero overlay: photo + personal info ──
-        "<header class='hero'><div class='hero-inner'>",
-        (f"<img class='avatar' src='{e(photo)}' alt='{e(name)}'>" if photo else ""),
-        f"<h1>{e(name)}</h1>",
-        f"<p class='tagline'>{e(' · '.join(ident.get('affiliations', [])))}</p>",
-        f"<nav class='pills'>{''.join(link_pills)}</nav>",
-        "<nav class='anchors'>"
-        + "".join(f"<a href='#{a_id}'>{a_label}</a>" for a_id, a_label, has in anchors if has)
-        + "</nav>",
-        "</div></header><main>",
+    pages = [
+        ("index.html", "Home", _skills_html(actives("skills"))),
+        ("experience.html", "Experience", _experience_html(profile.get("experience", []))),
+        ("education.html", "Education", _education_html(profile.get("education", []))),
+        ("projects.html", "Projects", _projects_html(actives("projects"))),
+        ("todos.html", "Todos", _render_calendar(todos, today)),
     ]
 
-    if skills:
-        parts.append("<section id='skills' class='card'><h2>Skills</h2><p class='chips'>"
-                     + "".join(f"<span class='chip'>{e(s['name'])}</span>" for s in skills)
-                     + "</p></section>")
+    files = {"agent-site.css": _CSS, "agent-site.js": _JS}
+    for filename, label, body in pages:
+        nav = "<nav class='anchors'>" + "".join(
+            f"<a href='{fn}'{' class=active' if fn == filename else ''}>{lbl}</a>"
+            for fn, lbl, _ in pages
+        ) + "</nav>"
+        head = (
+            "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+            f"<meta property='og:title' content='{e(name)}'>"
+            f"<meta property='og:image' content='{e(photo)}'>"
+            f"<title>{e(name) if filename == 'index.html' else f'{e(name)} — {label}'}</title>"
+            "<link rel='icon' href='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 "
+            "viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>'>"
+            "<link rel='preconnect' href='https://fonts.googleapis.com'>"
+            "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap'"
+            " rel='stylesheet'>"
+            "<link rel='stylesheet' href='agent-site.css'>"
+            "<script src='agent-site.js' defer></script></head><body>"
+        )
+        if filename == "index.html":  # full hero: photo + personal info
+            hero = (
+                "<header class='hero'><div class='hero-inner'>"
+                + (f"<img class='avatar' src='{e(photo)}' alt='{e(name)}'>" if photo else "")
+                + f"<h1>{e(name)}</h1>"
+                + f"<p class='tagline'>{e(' · '.join(ident.get('affiliations', [])))}</p>"
+                + f"<nav class='pills'>{''.join(link_pills)}</nav>"
+                + nav + "</div></header>"
+            )
+        else:  # compact banner: name links home, same nav
+            hero = (
+                "<header class='hero compact'><div class='hero-inner'>"
+                f"<h1><a href='index.html'>{e(name)}</a></h1>"
+                + nav + "</div></header>"
+            )
+        files[filename] = (
+            head + hero + "<main>"
+            + (body or "<section class='card'><p class='empty'>Nothing here yet.</p></section>")
+            + f"<footer>Maintained automatically by personal-agent · updated {today.isoformat()}"
+              "</footer></main></body></html>"
+        )
+    return files
 
-    if experience:
-        parts.append("<section id='experience' class='card'><h2>Experience</h2><ul class='timeline'>")
-        for job in experience:
-            period = job.get("period", {})
-            when = f"{period.get('start', '')} – {period.get('end') or 'present'}"
-            parts.append(f"<li><div class='t-head'><b>{e(str(job.get('title', '')))}</b>"
-                         f" · {e(str(job.get('org', '')))}"
-                         f"<span class='when'>{e(when)}</span></div>")
-            for h in job.get("highlights", []):
-                parts.append(f"<div class='hl'>{e(str(h))}</div>")
-            parts.append("</li>")
-        parts.append("</ul></section>")
 
-    if education:
-        parts.append("<section id='education' class='card'><h2>Education</h2><ul class='timeline'>")
-        for school in education:
-            parts.append(f"<li><div class='t-head'><b>{e(str(school.get('school', '')))}</b>"
-                         f" · {e(str(school.get('degree', '')))}"
-                         f"<span class='when'>{e(str(school.get('period', '')))}</span></div></li>")
-        parts.append("</ul></section>")
+def _skills_html(skills: list[dict]) -> str:
+    e = html.escape
+    if not skills:
+        return ""
+    return ("<section id='skills' class='card'><h2>Skills</h2><p class='chips'>"
+            + "".join(f"<span class='chip'>{e(s['name'])}</span>" for s in skills)
+            + "</p></section>")
 
-    if projects:
-        parts.append("<section id='projects' class='card'><h2>Projects</h2><div class='grid'>")
-        for p in projects:
-            link = next((str(l) for l in p.get("evidence", []) if str(l).startswith("http")), None)
-            title = f"<a href='{e(link)}'>{e(p['name'])}</a>" if link else e(p["name"])
-            highlights = "".join(f"<div class='hl'>{e(str(h))}</div>" for h in p.get("highlights", []))
-            parts.append(f"<div class='proj'><h3>{title}</h3>"
-                         f"<span class='role'>{e(p.get('role', ''))}</span>{highlights}</div>")
-        parts.append("</div></section>")
 
-    parts.append(_render_calendar(todos, today))
-    parts.append(
-        f"<footer>Maintained automatically by personal-agent · updated {today.isoformat()}</footer>"
-        "</main></body></html>"
-    )
-    return {"index.html": "".join(parts), "agent-site.css": _CSS, "agent-site.js": _JS}
+def _experience_html(experience: list[dict]) -> str:
+    e = html.escape
+    if not experience:
+        return ""
+    parts = ["<section id='experience' class='card'><h2>Experience</h2><ul class='timeline'>"]
+    for job in experience:
+        period = job.get("period", {})
+        when = f"{period.get('start', '')} – {period.get('end') or 'present'}"
+        parts.append(f"<li><div class='t-head'><b>{e(str(job.get('title', '')))}</b>"
+                     f" · {e(str(job.get('org', '')))}"
+                     f"<span class='when'>{e(when)}</span></div>")
+        for h in job.get("highlights", []):
+            parts.append(f"<div class='hl'>{e(str(h))}</div>")
+        parts.append("</li>")
+    parts.append("</ul></section>")
+    return "".join(parts)
+
+
+def _education_html(education: list[dict]) -> str:
+    e = html.escape
+    if not education:
+        return ""
+    parts = ["<section id='education' class='card'><h2>Education</h2><ul class='timeline'>"]
+    for school in education:
+        parts.append(f"<li><div class='t-head'><b>{e(str(school.get('school', '')))}</b>"
+                     f" · {e(str(school.get('degree', '')))}"
+                     f"<span class='when'>{e(str(school.get('period', '')))}</span></div></li>")
+    parts.append("</ul></section>")
+    return "".join(parts)
+
+
+def _projects_html(projects: list[dict]) -> str:
+    e = html.escape
+    if not projects:
+        return ""
+    parts = ["<section id='projects' class='card'><h2>Projects</h2><div class='grid'>"]
+    for p in projects:
+        link = next((str(l) for l in p.get("evidence", []) if str(l).startswith("http")), None)
+        title = f"<a href='{e(link)}'>{e(p['name'])}</a>" if link else e(p["name"])
+        highlights = "".join(f"<div class='hl'>{e(str(h))}</div>" for h in p.get("highlights", []))
+        parts.append(f"<div class='proj'><h3>{title}</h3>"
+                     f"<span class='role'>{e(p.get('role', ''))}</span>{highlights}</div>")
+    parts.append("</div></section>")
+    return "".join(parts)
 
 
 def _parse_day(value) -> date | None:
@@ -208,7 +241,16 @@ a{color:#4f46e5;text-decoration:none}a:hover{text-decoration:underline}
 .pill:hover{background:rgba(255,255,255,.25);text-decoration:none}
 .anchors{display:flex;gap:22px;justify-content:center;flex-wrap:wrap}
 .anchors a{color:#e0e7ff;font-weight:600;font-size:.92rem;text-transform:uppercase;
-  letter-spacing:.08em}
+  letter-spacing:.08em;padding-bottom:3px;border-bottom:2px solid transparent}
+.anchors a.active{color:#fff;border-bottom-color:#a5b4fc}
+.anchors a:hover{text-decoration:none;color:#fff}
+
+/* compact banner on section pages */
+.hero.compact{padding:26px 20px 52px}
+.hero.compact h1{font-size:1.5rem;margin:0 0 14px}
+.hero.compact h1 a{color:#fff}
+.hero.compact h1 a:hover{text-decoration:none;color:#c7d2fe}
+.empty{color:#94a3b8;margin:0}
 
 /* ── content cards ── */
 main{max-width:860px;margin:-48px auto 0;padding:0 20px 40px;position:relative;z-index:2}

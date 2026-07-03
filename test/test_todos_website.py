@@ -85,7 +85,7 @@ PROFILE = {
 }
 
 
-def test_render_site_sections_and_calendar():
+def test_render_site_pages_and_calendar():
     today = date(2026, 7, 2)
     todos = [
         {"id": "t1", "title": "Review scheduler PR", "source": "github",
@@ -95,21 +95,41 @@ def test_render_site_sections_and_calendar():
          "created": "2026-07-01", "status": "open"},
     ]
     files = render_site(PROFILE, todos, today=today)
-    page = files["index.html"]
 
-    assert "Jane Doe" in page and "ExampleU" in page
-    assert "Engineer" in page and "Huawei" in page          # experience
-    assert "vllm-omni" in page and "rebase automation" in page  # projects
-    assert "Python" in page and "Matlab" not in page        # dormant skill hidden
+    # one page per section, plus shared assets
+    for page_name in ("index.html", "experience.html", "education.html",
+                      "projects.html", "todos.html", "agent-site.css", "agent-site.js"):
+        assert page_name in files
+
+    home = files["index.html"]
+    assert "Jane Doe" in home and "ExampleU" in home
+    assert "Python" in home and "Matlab" not in home        # dormant skill hidden
+    # sections live on their own pages now, not on the home page
+    assert "Huawei" not in home and "rebase automation" not in home
+    assert files["experience.html"].count("Engineer") and "Huawei" in files["experience.html"]
+    assert "ExampleU" in files["education.html"] and "BSc" in files["education.html"]
+    assert "vllm-omni" in files["projects.html"] and "rebase automation" in files["projects.html"]
+
+    # every page carries the nav with its own entry marked active
+    for fn in ("index.html", "experience.html", "education.html", "projects.html", "todos.html"):
+        assert all(f"href='{other}'" in files[fn] for other, _ in
+                   [("index.html", 0), ("experience.html", 0), ("education.html", 0),
+                    ("projects.html", 0), ("todos.html", 0)])
+        assert f"<a href='{fn}' class=active" in files[fn]
+    # section pages get the compact banner; home keeps the full hero
+    assert "hero compact" not in home and "avatar" in home
+    assert "hero compact" in files["projects.html"]
+
+    page = files["todos.html"]
     assert "July 2026" in page
     # calendar: due-dated todo on its due day (red), undated todo on created day
     assert page.count("Review scheduler PR"[:40]) == 2      # calendar chip + list entry
     assert "class='todo due'" in page                       # due chip styled distinctly
     assert page.count("No due date") == 2                   # created-date chip + list entry
-    # list entries carry the short link label and the description
+    # list entries carry the short link label, the description, and pin/done buttons
     assert "[PR #5]</a>" in page
     assert "You were asked to review the scheduler fix." in page
-    assert "agent-site.css" in files
+    assert "data-tid='t1'" in page and "b-pin" in page and "b-done" in page
 
 
 def test_sync_website_not_configured(settings):
