@@ -57,6 +57,10 @@ nohup assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &
   own addresses with a subject starting `agent` — e.g. "agent: add a todo to
   review X, due Friday". The reply comes back by email. Non-owner senders and
   other subjects are ignored; a UID watermark prevents replays.
+- **Slack**: create a bot app (scopes `im:history`, `im:read`, `chat:write`;
+  plus `users:read` + `users:read.email` to skip setting `SLACK_OWNER_ID`),
+  put the `xoxb-` token in `SLACK_BOT_TOKEN`, then just DM the bot. Polling
+  only — no public URL needed, so it works from this container as-is.
 - **WeChat via WeCom (企业微信)**: register a free WeCom org + self-built app,
   enable the WeChat plugin (我→设置→插件→企业微信, scan QR) — the agent then
   messages you *inside WeChat*. Set `WECOM_CORP_ID/SECRET/AGENT_ID/OWNER_USERID`

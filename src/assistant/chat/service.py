@@ -13,6 +13,7 @@ from ..llm import LLM
 from ..profile_store import ProfileStore
 from .agent import handle_message
 from .email_channel import EmailChannel
+from .slack_channel import SlackChannel
 from .wecom import WeComChannel
 
 log = logging.getLogger("assistant")
@@ -48,9 +49,13 @@ def run_listener(settings: Settings, once: bool = False) -> int:
 
     llm = LLM(settings)
     channels = []
-    email = EmailChannel(settings, _owner_addresses(settings))
+    owner_addresses = _owner_addresses(settings)
+    email = EmailChannel(settings, owner_addresses)
     if email.enabled:
         channels.append(email)
+    slack = SlackChannel(settings, owner_addresses)
+    if slack.enabled:
+        channels.append(slack)
     wecom = WeComChannel(settings)
     if wecom.enabled:
         channels.append(wecom)
