@@ -114,7 +114,14 @@ nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &
 
 (Restart-only variant: `pkill -x openclaw` first — the process is titled `openclaw`.)
 Dead-man signal: if the 07:00 digest email/WeChat ping doesn't arrive, the
-gateway is down — run the line above. Logs: `/tmp/openclaw/openclaw-<date>.log`
+gateway is down — run the line above.
+
+⚠️ After a container **rebuild**, reinstall tzdata (`apt-get install -y
+tzdata`): the base image sets `TZ=Asia/Shanghai` but ships **no zoneinfo
+files**, so everything silently falls back to UTC — digest dates shift a day
+and wall-clock schedules drift 8 h. OpenClaw's cron is immune (Node bundles
+ICU), and `daily-run.sh` + the bridge pin `TZ` for the Python side, but the
+pin only works when tzdata exists. Logs: `/tmp/openclaw/openclaw-<date>.log`
 (gateway incl. chat listener), `~/.personal-agent/daily-run.log` (daily runs),
 `~/.personal-agent/chat.log` (legacy standalone listener only).
 

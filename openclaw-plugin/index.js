@@ -24,13 +24,16 @@ import { homedir } from "node:os";
 const ASSISTANT_BIN = process.env.PERSONAL_AGENT_BIN ?? "/rebase/.venv/bin/assistant";
 const TIMEOUT_MS = 120_000;
 const PID_FILE = `${homedir()}/.personal-agent/chat_listener.pid`;
+// Container clock is UTC; pin the owner's zone so "today" in chat replies and
+// digest dates match his morning (needs the system tzdata package).
+const childEnv = () => ({ ...process.env, TZ: process.env.PERSONAL_AGENT_TZ ?? "Asia/Hong_Kong" });
 
 function ask(text) {
   return new Promise((resolve) => {
     execFile(
       ASSISTANT_BIN,
       ["ask", text],
-      { timeout: TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      { timeout: TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, env: childEnv() },
       (err, stdout, stderr) => {
         const reply = (stdout ?? "").trim();
         if (!err && reply) return resolve({ ok: true, text: reply });
@@ -70,7 +73,10 @@ export function chatListenService() {
 
   const spawnOnce = (logger) => {
     const startedAt = Date.now();
-    child = spawn(ASSISTANT_BIN, ["chat-listen"], { stdio: ["ignore", "inherit", "inherit"] });
+    child = spawn(ASSISTANT_BIN, ["chat-listen"], {
+      stdio: ["ignore", "inherit", "inherit"],
+      env: childEnv(),
+    });
     logger?.info?.(`[personal-agent-bridge] chat-listen started (pid ${child.pid})`);
     child.on("exit", (code, sig) => {
       child = null;

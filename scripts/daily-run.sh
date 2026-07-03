@@ -5,6 +5,10 @@
 # ~/.personal-agent/daily-run.log. Exit code: 0 only when the run finished,
 # so cron run history records error (and can alert) on a stuck pipeline.
 set -u
+# The container clock is UTC and OpenClaw cron fires at 23:00 UTC (= 07:00
+# HKT). Pin the owner's zone so date.today()/run ids/digest dates match his
+# morning, not the previous UTC day. Requires the tzdata package.
+export TZ=${PERSONAL_AGENT_TZ:-Asia/Hong_Kong}
 ASSISTANT=/rebase/.venv/bin/assistant
 PY=/rebase/.venv/bin/python
 DIR="$HOME/.personal-agent"
