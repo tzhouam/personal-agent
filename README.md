@@ -49,8 +49,9 @@ actions (add/close todos, mark reading done, trigger a digest run):
 
 ```bash
 assistant ask "what's due this week?"     # one-off, local
-assistant chat-listen                     # foreground loop; nohup for background:
-nohup assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &
+assistant chat-listen                     # foreground loop (normally you don't run
+                                          # this yourself — the OpenClaw gateway
+                                          # supervises it as a plugin service)
 ```
 
 - **Email (works out of the box)**: mail the digest mailbox from one of your
@@ -78,35 +79,41 @@ nohup assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &
 
 ## Schedule (daily 07:00 HKT)
 
-On a systemd host:
+The OpenClaw gateway is the single runtime: its SQLite-persisted **command
+cron** runs [`scripts/daily-run.sh`](scripts/daily-run.sh) (`run || run
+--resume`, full logs → `~/.personal-agent/daily-run.log`, stdout = the one-line
+WeChat announce) at 07:00 Asia/Hong_Kong, and the bridge plugin supervises the
+chat listener as a gateway service. Job management:
+
+```bash
+export PATH=/opt/node24/bin:$PATH
+openclaw cron list                 # the job is named daily-digest
+openclaw cron run <jobId> --wait   # force a run now (sends the real digest!)
+openclaw cron runs --id <jobId>    # run history + captured summary lines
+```
+
+Fallbacks when not using OpenClaw — systemd host:
 
 ```bash
 sudo cp systemd/personal-agent.{service,timer} /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now personal-agent.timer
+sudo systemctl daemon-reload && sudo systemctl enable --now personal-agent.timer
 ```
 
-In this container (PID 1 is tini — no systemd/cron), use the fallback loop scheduler:
-
-```bash
-nohup /rebase/personal-agent/scheduler.sh >/dev/null 2>&1 &
-# logs: ~/.personal-agent/scheduler.log · stop: kill $(cat ~/.personal-agent/scheduler.pid)
-```
+or the loop scheduler (`nohup ./scheduler.sh &`, logs `~/.personal-agent/scheduler.log`).
 
 ### Restart runbook (after a container restart)
 
-All daemons die with the container. Bring everything back:
+**One line** — the gateway brings cron, the chat listener, and WeChat back with it:
 
 ```bash
-nohup /rebase/personal-agent/scheduler.sh >/dev/null 2>&1 &                          # daily digest, 07:00 HKT
-nohup /rebase/.venv/bin/assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &   # email chat listener
-nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &      # WeChat gateway (OpenClaw)
-# restart just the gateway (process is titled `openclaw`): pkill -x openclaw, then re-run the third line
+nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &
 ```
 
-Logs if anything acts up: `/tmp/openclaw/openclaw-<date>.log` (gateway),
-`~/.personal-agent/chat.log` (email listener), `~/.personal-agent/scheduler.log`
-(daily runs).
+(Restart-only variant: `pkill -x openclaw` first — the process is titled `openclaw`.)
+Dead-man signal: if the 07:00 digest email/WeChat ping doesn't arrive, the
+gateway is down — run the line above. Logs: `/tmp/openclaw/openclaw-<date>.log`
+(gateway incl. chat listener), `~/.personal-agent/daily-run.log` (daily runs),
+`~/.personal-agent/chat.log` (legacy standalone listener only).
 
 ## Architecture (M1 slice)
 

@@ -3,6 +3,12 @@
 Status: **live since 2026-07-03**. The owner chats with the assistant from
 regular WeChat; OpenClaw is the transport, the personal-agent stays the brain.
 
+Since 2026-07-03 evening the gateway is also the **single runtime** for the
+whole assistant: its command-cron runs the daily pipeline (job `daily-digest`,
+07:00 Asia/Hong_Kong → `scripts/daily-run.sh`, one-line result announced to
+WeChat) and the bridge plugin supervises `assistant chat-listen` (email
+channel) as a gateway service — no separate scheduler/listener daemons.
+
 ## How it flows
 
 ```
@@ -16,6 +22,17 @@ personal-agent-bridge plugin  (openclaw-plugin/ in this repo, --link installed)
   │  before_agent_reply typed hook → short-circuits BEFORE any model call
   ▼
 /rebase/.venv/bin/assistant ask "<message>"   ← the personal-agent, the only brain
+```
+
+The same plugin registers a gateway service (`chat-listen-supervisor`) that
+spawns and respawns `assistant chat-listen` (exponential backoff 5s→300s,
+stale-pid takeover), and the gateway's cron owns the daily run:
+
+```
+openclaw cron (job daily-digest, 0 7 * * * Asia/Hong_Kong, --exact, command payload)
+  → scripts/daily-run.sh  (flock; assistant run || assistant run --resume;
+                           logs → ~/.personal-agent/daily-run.log)
+  → stdout (one line) announced to WeChat; full digest still emailed
 ```
 
 You message **your own WeChat-connected bot**; the bridge plugin claims every
@@ -71,25 +88,23 @@ Required config that is NOT the default (`openclaw config set …` or edit json)
 - Do **not** set `hooks.timeouts.before_agent_reply`: a timed-out hook falls
   through to OpenClaw's own LLM. The plugin bounds the CLI call itself (120 s)
   and returns the error inside the bridge instead.
+- `agents.defaults.heartbeat.every: "0m"` — otherwise the gateway wakes the
+  DeepSeek model every 30 min for nothing.
 
 ## Restart runbook
 
-All three assistant daemons die with the container (PID 1 is tini — nothing
-supervises them). Bring everything back with:
+The gateway is the only daemon (PID 1 is tini — nothing supervises it). It
+brings cron (daily digest), the chat listener, and WeChat back with it:
 
 ```bash
-nohup /rebase/personal-agent/scheduler.sh >/dev/null 2>&1 &                          # daily digest, 07:00 HKT
-nohup /rebase/.venv/bin/assistant chat-listen >> ~/.personal-agent/chat.log 2>&1 &   # email (+Slack/WeCom) chat listener
-nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &      # WeChat gateway
-```
-
-Restart just the gateway (e.g. after config changes — they are only read at
-startup): the process is titled **`openclaw`**, *not* "openclaw gateway", so:
-
-```bash
-pkill -x openclaw
 nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &
 ```
+
+To restart (e.g. after config changes — they are only read at startup): the
+process is titled **`openclaw`**, *not* "openclaw gateway", so
+`pkill -x openclaw` first, then the line above. Cron jobs persist in
+`~/.openclaw/state/openclaw.sqlite`; the supervised listener kills any stale
+`chat_listener.pid` holder on startup and takes over.
 
 Re-login (rarely; credentials persist under `~/.openclaw`): run
 `PATH=/opt/node24/bin:$PATH openclaw channels login --channel openclaw-weixin`
@@ -104,6 +119,8 @@ in a real terminal and scan the QR with WeChat.
 | WeChat replies with a short error; log shows "requires a positive maxTokens" | add `maxTokens` to the provider's `models[]` entry, restart gateway |
 | Replies look invented / generic instead of data-backed | the bridge plugin isn't intercepting — `openclaw plugins inspect personal-agent-bridge --runtime` must show `Status: loaded` + `before_agent_reply (priority 100)`; check `enabled` + `hooks.allowConversationAccess` in openclaw.json, then restart the gateway. (Historical variant of this failure: before the plugin existed, delegation relied on the workspace SOUL.md/AGENTS.md prompt, and OpenClaw's seeded onboarding persona drowned it out — the prompt files are only a fallback now.) |
 | Replies show "(assistant bridge error: …)" | the plugin *is* working; the personal-agent CLI failed — run `/rebase/.venv/bin/assistant ask "test"` in a terminal and fix what it reports (.env, ~/.personal-agent) |
+| Mystery cron jobs with LLM prompts (`gh api …`) appear in `openclaw cron list` | the pre-bridge DeepSeek persona created its own DIY pipeline jobs (2026-07-03: daily-pipeline / website-sync / pr-check-noon — now disabled). Disable, don't imitate: the real pipeline is the `daily-digest` **command** job. The bridge only claims `trigger === "user"`, so agent-turn cron prompts are never piped into `assistant ask` |
+| No email replies / chat listener down | `pgrep -af "assistant chat-listen"` — the gateway service respawns it (backoff 5s→300s); check the gateway log for `[personal-agent-bridge] chat-listen` lines |
 | Config change has no effect | old process still serving — `pkill -x openclaw` (a kill pattern with "gateway" in it matches nothing) and relaunch |
 | "Missing env var DEEPSEEK_ANTHROPIC_KEY" warning from CLI commands | harmless outside the launcher; only the gateway process needs the env var |
 | Where did my message go? | `grep -a "inbound message\|outbound: text\|embedded_run_agent_end" /tmp/openclaw/openclaw-<date>.log` |

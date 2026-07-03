@@ -58,6 +58,21 @@ run_count: 0
    onboarding persona that drowns out a short AGENTS.md, and the agent chatted
    from its own head (`grep -c "assistant ask" <log>` → 0). Prompt files are
    now only the fallback if the plugin is disabled.
+   **Claim only `ctx.trigger === "user"`** (or missing): cron agent-turn jobs
+   also fire `before_agent_reply` (with `trigger: "cron"`) — claiming them
+   pipes cron prompts into `assistant ask` and misfires chat actions.
+   Beware: an unbridged persona can CREATE cron jobs — the 2026-07-03 persona
+   scheduled its own DIY `gh api` pipeline (daily-pipeline/website-sync/
+   pr-check-noon); audit `openclaw cron list` after any persona incident and
+   `openclaw cron disable <id>` the strays.
+5. Same plugin can supervise residual pollers as a gateway service:
+   `api.registerService({id, start(ctx), stop(ctx)})` (ctx has `logger`,
+   `config`, `workspaceDir`); spawn the poller in `start`, respawn on exit
+   with exponential backoff (reset after 5 min uptime), SIGTERM in `stop`.
+   Kill any stale pid-file holder before the first spawn (a SIGKILL'd gateway
+   orphans the child, which still holds the pid lock). Never spawn at module
+   top level — plugin discovery evaluates the entry file; only `start()` runs
+   on real gateway startup.
 5. Login: `openclaw channels login --channel openclaw-weixin` (owner scans QR).
    No pairing approval needed — the plugin binds to the owner's own account,
    so the sender is inherently the owner.
