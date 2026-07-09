@@ -69,6 +69,22 @@ class Settings(BaseSettings):
     wecom_aes_key: str = ""        # 43-char EncodingAESKey
     wecom_callback_port: int = 8329
 
+    # Local service daemon (`assistant serve`) — loopback-only HTTP consumed
+    # by the OpenClaw bridge plugin and slash commands. The bearer token is
+    # optional (the socket never leaves 127.0.0.1); set it to also keep other
+    # local processes out.
+    serve_port: int = 8377
+    serve_token: str = ""
+    serve_session_turns: int = 10  # exchanges of chat history kept per session
+
+    # Deliver-phase WeChat announce (best-effort, OFF by default — enable only
+    # after removing --announce from the OpenClaw cron job, or 07:00 pings twice)
+    wechat_announce: bool = False
+    announce_channel: str = "openclaw-weixin"
+    announce_account: str = ""     # gateway account id (…-im-bot)
+    announce_to: str = ""          # owner's WeChat im id
+    openclaw_bin: str = "/opt/node24/bin/openclaw"
+
     # Personal website — "owner/name" GitHub Pages repo; the agent pushes the
     # rendered site directly to the default branch (owner's choice, 2026-07-02)
     website_repo: str = ""

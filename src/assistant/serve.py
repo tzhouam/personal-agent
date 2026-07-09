@@ -1,0 +1,228 @@
+"""`assistant serve` — the one long-lived daemon behind the OpenClaw bridge.
+
+Loopback-only HTTP (stdlib, zero new deps):
+
+    POST /chat            {"session": "<channel:peer>", "text": "..."} → {"reply"}
+    POST /actions/<name>  {<params>}                                   → {"result"}
+    POST /run             {"resume": true?}                            → {"result"}
+    GET  /status                                                       → {"status"}
+    GET  /healthz                                                      → {"ok"}
+
+Design invariants (doc/DESIGN_SERVICE_LAYER.md):
+- ``Settings()``/``LLM()`` are rebuilt **per request**, so a `.env` edit (new
+  API key, changed recipient) takes effect on the next message — the stale-
+  credential failure class of the standalone listener is gone.
+- /chat keeps a rolling per-session history (JSON spill under
+  ``~/.personal-agent/sessions/``), which exec-per-message never had.
+- The email chat poll runs as a background thread in here (OpenClaw has no
+  IMAP channel), also with fresh Settings each cycle. The daemon holds the
+  same ``chat_listener.pid`` lock as the standalone listener, so the two
+  can never race one inbox watermark and the bridge supervisor's stale-pid
+  takeover keeps working unchanged.
+"""
+
+import hashlib
+import json
+import logging
+import signal
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from .actions import run_action
+from .chat.agent import handle_message
+from .config import Settings
+from .llm import LLM
+
+log = logging.getLogger("assistant")
+
+_MAX_BODY = 64 * 1024
+
+
+class SessionStore:
+    """Rolling chat history per session id, spilled to disk so multi-turn
+    context survives a daemon restart."""
+
+    def __init__(self, data_dir: Path, keep: int = 10):
+        self.dir = data_dir / "sessions"
+        self.keep = keep
+
+    def _path(self, session_id: str) -> Path:
+        return self.dir / (hashlib.sha1(session_id.encode()).hexdigest()[:16] + ".json")
+
+    def history(self, session_id: str) -> list[dict]:
+        path = self._path(session_id)
+        if not path.exists():
+            return []
+        try:
+            return json.loads(path.read_text()).get("turns", [])
+        except ValueError:
+            return []
+
+    def append(self, session_id: str, owner: str, assistant: str) -> None:
+        turns = self.history(session_id)
+        turns.append({"owner": owner[:2000], "assistant": assistant[:2000]})
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._path(session_id).write_text(json.dumps(
+            {"session": session_id, "turns": turns[-self.keep:]},
+            ensure_ascii=False))
+
+
+def make_server(settings_factory=Settings, llm_factory=None, port: int | None = None):
+    """Build (but don't start) the HTTP server. Factories are per-request —
+    that is the stale-credential fix — and injectable for tests."""
+    boot = settings_factory()
+    sessions = SessionStore(boot.data_dir, keep=boot.serve_session_turns)
+    make_llm = llm_factory or (lambda s: LLM(s))
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "personal-agent"
+
+        def log_message(self, fmt, *args):  # route to our logger, not stderr
+            log.debug("serve: " + fmt, *args)
+
+        def _send(self, code: int, payload: dict) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self, settings: Settings) -> bool:
+            if not settings.serve_token:
+                return True
+            header = self.headers.get("Authorization", "")
+            return header == f"Bearer {settings.serve_token}"
+
+        def _body(self) -> dict:
+            length = min(int(self.headers.get("Content-Length") or 0), _MAX_BODY)
+            raw = self.rfile.read(length) if length else b""
+            if not raw:
+                return {}
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+
+        def do_GET(self):
+            settings = settings_factory()
+            if self.path == "/healthz":
+                return self._send(200, {"ok": True})
+            if not self._authorized(settings):
+                return self._send(401, {"error": "bad or missing bearer token"})
+            if self.path == "/status":
+                return self._send(200, {"status": run_action("run_status", {}, settings)})
+            return self._send(404, {"error": f"no route {self.path}"})
+
+        def do_POST(self):
+            settings = settings_factory()
+            if not self._authorized(settings):
+                return self._send(401, {"error": "bad or missing bearer token"})
+            try:
+                body = self._body()
+            except ValueError:
+                return self._send(400, {"error": "body is not valid JSON"})
+
+            try:
+                if self.path == "/chat":
+                    text = str(body.get("text", "")).strip()
+                    if not text:
+                        return self._send(400, {"error": "missing 'text'"})
+                    session = str(body.get("session", "") or "default")
+                    reply = handle_message(text, settings, make_llm(settings),
+                                           history=sessions.history(session))
+                    sessions.append(session, text, reply)
+                    return self._send(200, {"reply": reply})
+
+                if self.path == "/run":
+                    params = {"resume": True} if body.get("resume") else {}
+                    return self._send(200,
+                                      {"result": run_action("trigger_run", params, settings)})
+
+                if self.path.startswith("/actions/"):
+                    name = self.path.removeprefix("/actions/")
+                    try:
+                        result = run_action(name, body, settings)
+                    except KeyError:
+                        return self._send(404, {"error": f"unknown action {name!r}"})
+                    except ValueError as exc:
+                        return self._send(400, {"error": str(exc)})
+                    return self._send(200, {"result": result})
+
+                return self._send(404, {"error": f"no route {self.path}"})
+            except Exception as exc:  # any handler bug → JSON 500, not a hang
+                log.exception("serve: %s failed", self.path)
+                return self._send(500, {"error": str(exc)})
+
+    server = ThreadingHTTPServer(("127.0.0.1", boot.serve_port if port is None else port),
+                                 Handler)
+    server.sessions = sessions  # test seam
+    return server
+
+
+def _chat_poll_loop(settings_factory, sessions: SessionStore,
+                    stop: threading.Event, llm_factory=None) -> None:
+    """Email (+WeCom) chat polling, absorbed from the standalone listener.
+    Everything is rebuilt each cycle so `.env` edits apply within one poll."""
+    from .chat.service import build_channels
+
+    make_llm = llm_factory or (lambda s: LLM(s))
+    first = True
+    while not stop.is_set():
+        try:
+            settings = settings_factory()
+            channels = build_channels(settings, log_wecom=first)
+            first = False
+            for channel in channels:
+                try:
+                    messages = channel.poll()
+                except Exception as exc:
+                    log.warning("%s poll failed: %s", channel.name, exc)
+                    continue
+                for message in messages:
+                    log.info("%s message from %s: %.80s", channel.name,
+                             message.get("sender", "?"), message["text"])
+                    try:
+                        session = f"{channel.name}:{message.get('sender', '')}"
+                        reply = handle_message(message["text"], settings,
+                                               make_llm(settings),
+                                               history=sessions.history(session))
+                        sessions.append(session, message["text"], reply)
+                        channel.send(reply, in_reply_to=message)
+                        log.info("replied via %s (%d chars)", channel.name, len(reply))
+                    except Exception:
+                        log.exception("failed to answer %s message", channel.name)
+            stop.wait(settings.chat_poll_seconds)
+        except Exception:  # the poll thread must never die
+            log.exception("chat poll cycle failed")
+            stop.wait(60)
+
+
+def run_serve(settings: Settings) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    from .chat.service import _acquire_pid_lock
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    if not _acquire_pid_lock(settings):  # same lock as chat-listen: one inbox reader
+        return 1
+
+    server = make_server()
+    stop = threading.Event()
+    poller = threading.Thread(
+        target=_chat_poll_loop,
+        args=(Settings, server.sessions, stop),
+        name="chat-poll", daemon=True)
+    poller.start()
+
+    def _shutdown(signum, frame):
+        log.info("serve: signal %d — shutting down", signum)
+        stop.set()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    log.info("serve: listening on 127.0.0.1:%d (chat poll every %ds)",
+             server.server_address[1], settings.chat_poll_seconds)
+    server.serve_forever()
+    stop.set()
+    return 0

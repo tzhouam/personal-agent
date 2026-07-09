@@ -26,6 +26,25 @@ def _owner_addresses(settings: Settings) -> list[str]:
     return addresses
 
 
+def build_channels(settings: Settings, log_wecom: bool = True) -> list:
+    """All enabled inbound chat channels — shared by the standalone listener
+    and the serve daemon's poll thread."""
+    channels = []
+    email = EmailChannel(settings, _owner_addresses(settings))
+    if email.enabled:
+        channels.append(email)
+    wecom = WeComChannel(settings)
+    if wecom.enabled:
+        channels.append(wecom)
+        if wecom.start_callback_server():
+            if log_wecom:
+                log.info("wecom: send + receive enabled")
+        elif log_wecom:
+            log.info("wecom: send-only (set WECOM_TOKEN/WECOM_AES_KEY + public "
+                     "callback URL to receive)")
+    return channels
+
+
 def _acquire_pid_lock(settings: Settings) -> bool:
     pid_file = settings.data_dir / "chat_listener.pid"
     if pid_file.exists():
@@ -47,19 +66,7 @@ def run_listener(settings: Settings, once: bool = False) -> int:
         return 1
 
     llm = LLM(settings)
-    channels = []
-    owner_addresses = _owner_addresses(settings)
-    email = EmailChannel(settings, owner_addresses)
-    if email.enabled:
-        channels.append(email)
-    wecom = WeComChannel(settings)
-    if wecom.enabled:
-        channels.append(wecom)
-        if wecom.start_callback_server():
-            log.info("wecom: send + receive enabled")
-        else:
-            log.info("wecom: send-only (set WECOM_TOKEN/WECOM_AES_KEY + public "
-                     "callback URL to receive)")
+    channels = build_channels(settings)
     if not channels:
         log.error("no chat channel configured (need SMTP creds or WeCom app)")
         return 1

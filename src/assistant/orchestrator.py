@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .collectors import REGISTRY
 from .config import Settings
+from .deliver.announce import announce_digest
 from .deliver.email import render_html, send_email
 from .events_store import EventsStore
 from .llm import LLM
@@ -205,6 +206,13 @@ def build_graph(deps: Deps):
             transport = send_email(deps.settings,
                                    f"[assistant] Daily digest — {run_date}", html_body)
             log.info("digest emailed via %s", transport)
+            note = announce_digest(settings, (
+                f"Daily digest {run_date} delivered — "
+                f"{digest.get('total', 0)} notifications, "
+                f"{todos.get('open_count', 0)} todos open. "
+                f"Full digest in your email."))
+            if note != "disabled":
+                log.info("wechat announce: %s", note)
             # only mark items seen once actually delivered
             deps.events.mark_seen(
                 [f"gh-notif-{i['id']}-{i.get('updated_at', '')}"
