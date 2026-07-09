@@ -55,6 +55,8 @@ const cases = [
   ["/run research", { action: "run_phase", params: { phase: "research" }, timeoutMs: 90_000 }],
   ["/plan book a dinner for 6 on Friday",
    { action: "plan_task", params: { request: "book a dinner for 6 on Friday" }, timeoutMs: 120_000 }],
+  ["/search vllm omni releases",
+   { action: "web_search", params: { query: "vllm omni releases" }, timeoutMs: 120_000 }],
   ["/new", null],
   ["/todos", null],
 ];

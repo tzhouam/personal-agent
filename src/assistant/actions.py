@@ -144,31 +144,60 @@ def _run_phase(settings: Settings, p: dict) -> str:
             "on the website/next digest, or ask me in a few minutes")
 
 
+_SEARCH_ANSWER_SYSTEM = """You answer the owner's question from the web search results below.
+Be concise and concrete; cite the source URL in parentheses after each claim you take from a
+result. If the results don't answer the question, say so and suggest a better query.
+Answer in the language the owner used. Plain text, no markdown headings."""
+
+
+def _web_search(settings: Settings, p: dict) -> str:
+    from .llm import LLM
+    from .search import format_results, web_search
+
+    query = str(p.get("query", "")).strip()
+    results = web_search(query, max_results=8, settings=settings)
+    if not results:
+        return f"web search for {query!r} returned nothing (backend may be rate-limited — try again)"
+    try:
+        answer = LLM(settings).complete(
+            f"## Question\n{query}\n\n## Search results\n{format_results(results, limit=8)}",
+            system=_SEARCH_ANSWER_SYSTEM, max_tokens=8000).strip()
+    except Exception:  # search worked, synthesis didn't — raw results still help
+        answer = ""
+    return answer or "top results:\n" + format_results(results)
+
+
 _PLAN_SYSTEM = """You are the owner's personal task planner. You get a novel task request (booking,
 arranging, researching, errands). Produce a concrete, realistic plan.
 
-Be honest about capabilities: the agent has NO calendar, browser, or payment access — steps
-needing those are the owner's, but make them trivially easy (draft the message to send, list
-the exact search query, name the criteria). Steps the agent CAN do: track the task as a todo,
-remind via the daily digest, draft text, reason over the owner's profile/todos.
+Be honest about capabilities: the agent has NO calendar or payment access — steps needing
+those are the owner's, but make them trivially easy (draft the message to send, name the
+criteria). Steps the agent CAN do: web search (results may be provided below — use them to
+name real candidates), track the task as a todo, remind via the daily digest, draft text,
+reason over the owner's profile/todos.
 
 Respond with ONLY JSON:
 {"title": "<short imperative todo title>",
  "due": "YYYY-MM-DD or null",
  "steps": [{"who": "agent|owner", "step": "<one concrete action>"}],
  "next": "<the single next action to take>"}
-3-6 steps. Never invent facts (restaurant names, availability) — plan how to find them."""
+3-6 steps. Never invent facts — name candidates only when the search results support them."""
 
 
 def _plan_task(settings: Settings, p: dict) -> str:
     from .llm import LLM
     from .profile_store import ProfileStore, render_summary
+    from .search import format_results, web_search
 
     request = str(p.get("request", "")).strip()
     profile_store = ProfileStore(settings.profile_dir)
     context = (render_summary(profile_store.load()) if profile_store.exists() else "")
+    findings = web_search(request, max_results=6, settings=settings)  # [] on failure
     plan = LLM(settings).complete_json(
-        f"## Owner profile\n{context}\n\n## Task request\n{request}",
+        f"## Owner profile\n{context}\n\n"
+        + (f"## Web search results for the request\n{format_results(findings)}\n\n"
+           if findings else "")
+        + f"## Task request\n{request}",
         system=_PLAN_SYSTEM, max_tokens=8000)
     if not isinstance(plan, dict) or not plan.get("steps"):
         return f"couldn't produce a plan for {request!r} — try rephrasing"
@@ -260,6 +289,16 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "run_phase", "phase": "research"}   # research|website|todos'
                        '|resume|curate|consolidate, or "all" for the full daily run',
         slash="run",
+    ),
+    Action(
+        name="web_search",
+        description="search the internet and answer from the results",
+        handler=_web_search,
+        params={"query": {"required": True, "desc": "the search query"}},
+        llm=True,
+        prompt_example='{"type": "web_search", "query": "<what to look up>"}   # for '
+                       'questions needing current/external information',
+        slash="search",
     ),
     Action(
         name="plan_task",

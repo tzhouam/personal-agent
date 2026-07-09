@@ -1,0 +1,103 @@
+from assistant import search as search_mod
+from assistant.actions import run_action
+from assistant.search import _real_url, fetch_page, format_results, web_search
+
+_DDG_PAGE = """<html><body><table>
+<tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=x" class='result-link'>First &amp; Best</a></td></tr>
+<tr><td class='result-snippet'>Snippet   one <b>bold</b>
+spans lines</td></tr>
+<tr><td><a rel="nofollow" href="https://direct.example.com/b" class='result-link'>Second</a></td></tr>
+<tr><td class='result-snippet'>Snippet two</td></tr>
+</table></body></html>"""
+
+
+def test_ddg_parse_and_url_decoding(monkeypatch):
+    class FakeResp:
+        text = _DDG_PAGE
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(search_mod.httpx, "get", lambda *a, **k: FakeResp())
+    results = web_search("anything")
+    assert results[0] == {"title": "First & Best", "url": "https://example.com/a",
+                          "snippet": "Snippet one bold spans lines"}
+    assert results[1]["url"] == "https://direct.example.com/b"
+    assert "First & Best" in format_results(results)
+    assert _real_url("plain") == "plain"
+
+
+def test_search_failures_degrade_to_empty(monkeypatch):
+    monkeypatch.setattr(search_mod.httpx, "get",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("blocked")))
+    assert web_search("q") == []
+    assert web_search("   ") == []
+    monkeypatch.setattr(search_mod.httpx, "get",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")))
+    assert fetch_page("https://x") == ""
+
+
+def test_tavily_used_when_key_present(settings, monkeypatch):
+    calls = []
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": [{"title": "T", "url": "https://t", "content": "c" * 400}]}
+
+    monkeypatch.setattr(search_mod.httpx, "post",
+                        lambda url, **k: calls.append(url) or FakeResp())
+    s = settings.model_copy(update={"tavily_api_key": "tv-key"})
+    results = web_search("q", settings=s)
+    assert calls == ["https://api.tavily.com/search"]
+    assert results[0]["title"] == "T" and len(results[0]["snippet"]) == 300
+
+
+def test_web_search_action_synthesizes(settings, monkeypatch):
+    monkeypatch.setattr("assistant.search.web_search",
+                        lambda q, max_results=8, settings=None: [
+                            {"title": "Doc", "url": "https://d", "snippet": "answer here"}])
+
+    class FakeLLM:
+        def __init__(self, settings):
+            pass
+
+        def complete(self, prompt, system=None, **kw):
+            assert "answer here" in prompt
+            return "The answer (https://d)."
+
+    monkeypatch.setattr("assistant.llm.LLM", FakeLLM)
+    assert run_action("web_search", {"query": "what is X"}, settings) \
+        == "The answer (https://d)."
+    # synthesis failure → raw results, still useful
+    monkeypatch.setattr(FakeLLM, "complete",
+                        lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("api")))
+    assert "top results:" in run_action("web_search", {"query": "what is X"}, settings)
+    # no results → honest message
+    monkeypatch.setattr("assistant.search.web_search",
+                        lambda q, max_results=8, settings=None: [])
+    assert "returned nothing" in run_action("web_search", {"query": "zzz"}, settings)
+
+
+def test_plan_task_gets_search_enrichment(settings, monkeypatch):
+    monkeypatch.setattr("assistant.search.web_search",
+                        lambda q, max_results=6, settings=None: [
+                            {"title": "Yu Zhi Lan", "url": "https://r", "snippet": "sichuan"}])
+    prompts = []
+
+    class FakeLLM:
+        def __init__(self, settings):
+            pass
+
+        def complete_json(self, prompt, system=None, **kw):
+            prompts.append(prompt)
+            return {"title": "Book dinner", "due": None,
+                    "steps": [{"who": "owner", "step": "call Yu Zhi Lan"}],
+                    "next": "call"}
+
+    monkeypatch.setattr("assistant.llm.LLM", FakeLLM)
+    result = run_action("plan_task", {"request": "find a sichuan restaurant"}, settings)
+    assert "Web search results" in prompts[0] and "Yu Zhi Lan" in prompts[0]
+    assert result.startswith("planned: Book dinner")

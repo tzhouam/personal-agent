@@ -95,9 +95,17 @@ auth for the loopback API; the bridge reads it from the same `.env`).
   daemon's `/chat` (session memory; exec `assistant ask` as fallback) — the
   gateway's own LLM never runs, OpenClaw is transport only. The bridge also
   answers `/todo [add <title> [due:YYYY-MM-DD]] [done <id>]`, `/read [done
-  <id>]`, `/digest`, and `/status` straight from `/actions/…` with no LLM
-  call. Setup, restart runbook, and troubleshooting:
-  [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md).
+  <id>]`, `/digest`, `/status`, `/run <phase>`, `/plan <task>`, and
+  `/search <query>` straight from `/actions/…`. Setup, restart runbook, and
+  troubleshooting: [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md).
+
+Beyond the typed store actions, chat can **run standalone pipeline phases**
+(`run_phase`: research/website/todos/resume/curate/consolidate), **plan novel
+multi-step tasks** (`plan_task`: LLM plan with agent/owner steps, tracked as
+a todo, enriched with live search results), and **search the web**
+(`web_search`: keyless DuckDuckGo Lite via [src/assistant/search.py]
+(src/assistant/search.py), or Tavily if `TAVILY_API_KEY` is set; answers are
+LLM-synthesized with source URLs).
 - **WeChat via WeCom (企业微信, alternative)**: register a free WeCom org +
   self-built app, enable the WeChat plugin (我→设置→插件→企业微信, scan QR) —
   the agent then messages you *inside WeChat*. Set

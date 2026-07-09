@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # rendered site directly to the default branch (owner's choice, 2026-07-02)
     website_repo: str = ""
 
+    # Web search (chat `web_search` action + plan_task enrichment) — works
+    # keyless via DuckDuckGo Lite; set a Tavily key for a sturdier backend
+    tavily_api_key: str = ""
+
     # Research digest
     sources_file: Path = _REPO_ROOT / "config" / "sources.yaml"
     # window is wide because the seen-store dedupes across runs — a paper is

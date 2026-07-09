@@ -102,7 +102,7 @@ async function ask(text, session) {
 /** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
  * (null = not ours, let OpenClaw built-ins have it). */
 export function parseSlash(body) {
-  const m = body.match(/^\/(todo|read|digest|status|run|plan)\b\s*(.*)$/s);
+  const m = body.match(/^\/(todo|read|digest|status|run|plan|search)\b\s*(.*)$/s);
   if (!m) return null;
   const [, family, restRaw] = m;
   const rest = restRaw.trim();
@@ -115,6 +115,10 @@ export function parseSlash(body) {
   if (family === "plan") {
     if (!rest) return { usage: "usage: /plan <the task, one sentence>" };
     return { action: "plan_task", params: { request: rest }, timeoutMs: TIMEOUT_MS };
+  }
+  if (family === "search") {
+    if (!rest) return { usage: "usage: /search <query>" };
+    return { action: "web_search", params: { query: rest }, timeoutMs: TIMEOUT_MS };
   }
   if (family === "todo") {
     if (!rest || rest === "list") return { action: "list_todos", params: {} };
