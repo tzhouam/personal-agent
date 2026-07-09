@@ -90,6 +90,19 @@ def _search_google(query: str, max_results: int, api_key: str, cse_id: str) -> l
             for item in resp.json().get("items", [])]
 
 
+def _search_brave(query: str, max_results: int, api_key: str) -> list[dict]:
+    """Brave Search API — independent index, ~1-2k free queries/month, no card."""
+    resp = httpx.get("https://api.search.brave.com/res/v1/web/search",
+                     params={"q": query, "count": min(max_results, 20)},
+                     headers={"X-Subscription-Token": api_key,
+                              "Accept": "application/json"},
+                     timeout=20)
+    resp.raise_for_status()
+    return [{"title": r.get("title", ""), "url": r.get("url", ""),
+             "snippet": _clean(r.get("description", ""))[:300]}
+            for r in resp.json().get("web", {}).get("results", [])]
+
+
 def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict]:
     resp = httpx.post("https://api.tavily.com/search",
                       json={"api_key": api_key, "query": query,
@@ -122,6 +135,9 @@ def web_search_answer(query: str, max_results: int = 8,
     if get("tavily_api_key"):
         backends.append(("tavily", lambda: {"answer": "", "results": _search_tavily(
             query, max_results, get("tavily_api_key"))}))
+    if get("brave_api_key"):
+        backends.append(("brave", lambda: {"answer": "", "results": _search_brave(
+            query, max_results, get("brave_api_key"))}))
     backends.append(("ddg", lambda: {"answer": "", "results": _search_ddg(query, max_results)}))
     for name, backend in backends:  # keyed backends first, DDG as the safety net
         try:

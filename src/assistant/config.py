@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     google_cse_id: str = ""   # Programmable Search Engine id ("cx")
     tavily_api_key: str = ""
+    brave_api_key: str = ""
 
     # Research digest
     sources_file: Path = _REPO_ROOT / "config" / "sources.yaml"

@@ -110,6 +110,25 @@ def test_google_backend_and_fallback_chain(settings, monkeypatch):
     assert web_search("q", settings=s)[0]["title"] == "D"
 
 
+def test_brave_backend(settings, monkeypatch):
+    class BraveResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"web": {"results": [
+                {"title": "B", "url": "https://b", "description": "desc <b>x</b>"}]}}
+
+    headers_seen = {}
+    monkeypatch.setattr(search_mod.httpx, "get",
+                        lambda url, headers=None, **k: headers_seen.update(headers or {})
+                        or BraveResp())
+    s = settings.model_copy(update={"brave_api_key": "br-key"})
+    results = web_search("q", settings=s)
+    assert headers_seen["X-Subscription-Token"] == "br-key"
+    assert results == [{"title": "B", "url": "https://b", "snippet": "desc x"}]
+
+
 def test_tavily_used_when_key_present(settings, monkeypatch):
     calls = []
 
