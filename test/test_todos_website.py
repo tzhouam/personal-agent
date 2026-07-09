@@ -227,7 +227,8 @@ def test_reading_page_like_todos():
     assert "href='reading.html'" in files["index.html"]
     # day-grouped scroll list, newest day first, with the todo buttons
     assert page.index("2026-07-08") < page.index("2026-06-10")
-    assert "class='todo-scroll'" in page and "<details class='t-day'" in page
+    # the reading list gets the tall scroll variant (far more items than todos)
+    assert "class='todo-scroll tall'" in page and "<details class='t-day'" in page
     assert "data-tid='r1'" in page and "b-done" in page
     assert "relates to your KV-cache work" in page
     # reading items never show the todo staleness badge
