@@ -1,6 +1,7 @@
 import fcntl
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from langgraph.graph import END, START, StateGraph
@@ -11,6 +12,7 @@ from .deliver.announce import announce_digest
 from .deliver.email import render_html, send_email
 from .events_store import EventsStore
 from .llm import LLM
+from .metrics import EXTRACTORS, build_health, render_health_html
 from .profile_store import ProfileStore
 from .research.pipeline import run_research
 from .state import AssistantState, load_state, persist_state
@@ -79,6 +81,8 @@ def build_graph(deps: Deps):
         try:
             result = update_profile(deps.llm, deps.profile, state.get("observations", []))
             deps.save_artifact("profile_update.json", result)
+            deps.events.record_metrics(state["run_id"], "profile",
+                                       {"ops_rejected": len(result.get("rejected_ops", []))})
             _advance("resume")
             return {"profile_diff": result["profile_diff"],
                     "profile_ops": result["profile_ops"], "phase": "resume"}
@@ -162,7 +166,8 @@ def build_graph(deps: Deps):
     def node_website(state: AssistantState) -> dict:
         try:
             website = sync_website(settings, deps.profile.load(),
-                                   (state.get("todos") or {}).get("open", []))
+                                   (state.get("todos") or {}).get("open", []),
+                                   reading=state.get("reading") or deps.reading.open_items())
             log.info("website: %s %s", website.get("status"), website.get("pr_url", ""))
             errors = []
         except Exception as exc:
@@ -192,9 +197,16 @@ def build_graph(deps: Deps):
         }
         if state.get("errors"):
             stats["errors"] = "; ".join(str(e) for e in state["errors"])[:300]
+        try:
+            health_html = render_health_html(
+                build_health(deps.events, settings.profile_dir))
+        except Exception:  # health is a nicety — never block the digest
+            log.exception("health section failed")
+            health_html = ""
         html_body = render_html(run_date, digest, research, resume, todos, reading,
                                 website, state.get("profile_diff", ""),
-                                state.get("profile_ops", []), stats)
+                                state.get("profile_ops", []), stats,
+                                health_html=health_html)
         digest_path = deps.run_dir / "digest.html"
         digest_path.write_text(html_body)
 
@@ -242,12 +254,28 @@ def build_graph(deps: Deps):
         _advance("done")
         return {"curated": curated, "phase": "done", "errors": errors}
 
+    def _instrumented(name, fn):
+        """Record duration, error count, and the phase's headline numbers
+        (metrics.EXTRACTORS) into events.db — doc/PIPELINE_METRICS.md."""
+        def wrapped(state: AssistantState) -> dict:
+            start = time.monotonic()
+            out = fn(state)
+            try:
+                values = {"duration_s": round(time.monotonic() - start, 2),
+                          "errors": len(out.get("errors") or [])}
+                values.update(EXTRACTORS.get(name, lambda o: {})(out))
+                deps.events.record_metrics(state["run_id"], name, values)
+            except Exception:  # metrics must never break the pipeline
+                log.exception("metrics recording failed for %s", name)
+            return out
+        return wrapped
+
     nodes = {"collect": node_collect, "profile": node_profile, "resume": node_resume,
              "digest": node_digest, "todos": node_todos, "research": node_research,
              "website": node_website, "deliver": node_deliver, "curate": node_curate}
     graph = StateGraph(AssistantState)
     for phase in _PHASES:
-        graph.add_node(phase, nodes[phase])
+        graph.add_node(phase, _instrumented(phase, nodes[phase]))
     graph.add_conditional_edges(
         START,
         lambda s: s.get("phase") if s.get("phase") in _PHASES else "collect",
@@ -305,8 +333,12 @@ def run(settings: Settings, dry_run: bool = False, resume: bool = False) -> int:
         if start_phase in ("deliver", "curate"):
             initial["website"] = deps.load_artifact("website.json") or {}
 
+    run_start = time.monotonic()
     try:
         final = build_graph(deps).invoke(initial)
+        deps.events.record_metrics(run_id, "run", {
+            "duration_s": round(time.monotonic() - run_start, 2),
+            "errors": len(final.get("errors") or [])})
     finally:
         deps.events.close()
         lock_fd.close()  # releases the flock

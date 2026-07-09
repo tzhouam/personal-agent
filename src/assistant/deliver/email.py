@@ -16,7 +16,8 @@ _PRIORITY_META = {
 
 def render_html(run_date: str, digest: dict, research: dict, resume: dict,
                 todos: dict, reading: list[dict], website: dict,
-                profile_diff: str, profile_ops: list[dict], stats: dict) -> str:
+                profile_diff: str, profile_ops: list[dict], stats: dict,
+                health_html: str = "") -> str:
     parts = [
         "<div style='font-family:-apple-system,Segoe UI,sans-serif;max-width:720px;margin:auto;color:#1f2937'>",
         f"<h2 style='border-bottom:2px solid #e5e7eb;padding-bottom:8px'>Daily digest — {run_date}</h2>",
@@ -148,6 +149,9 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
             "<pre style='background:#f3f4f6;padding:10px;border-radius:6px;font-size:12px;"
             f"overflow-x:auto'>{html.escape(profile_diff[:4000])}</pre>"
         )
+
+    if health_html:  # pre-rendered by metrics.render_health_html
+        parts.append(health_html)
 
     footer_bits = [f"{k}: {v}" for k, v in stats.items()]
     parts.append(

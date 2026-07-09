@@ -35,7 +35,8 @@ _API = "https://api.github.com"
 
 
 # ── rendering ────────────────────────────────────────────────────────
-def render_site(profile: dict, todos: list[dict], today: date | None = None) -> dict[str, str]:
+def render_site(profile: dict, todos: list[dict], today: date | None = None,
+                reading: list[dict] | None = None) -> dict[str, str]:
     """Returns {filename: content} for the generated site — one page per section.
 
     Every page is always rendered (an empty section shows a placeholder) so a
@@ -64,6 +65,7 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None) -> 
         ("education.html", "Education", _education_html(profile.get("education", []))),
         ("projects.html", "Projects", _projects_html(actives("projects"))),
         ("todos.html", "Todos", _render_calendar(todos, today)),
+        ("reading.html", "Reading", _render_reading(reading or [], today)),
     ]
 
     files = {"agent-site.css": _CSS, "agent-site.js": _JS}
@@ -287,10 +289,49 @@ def _render_calendar(todos: list[dict], today: date) -> str:
     return "".join(parts)
 
 
-def _todo_li(todo: dict, idx: int, today: date) -> str:
+def _render_reading(reading: list[dict], today: date) -> str:
+    """The reading list, presented like the todo list: a scrollable list of
+    collapsible day groups (by surfaced date, newest first) with owner-only
+    pin/done buttons — reading ids (r#) share the todos' localStorage marks."""
+    parts = ["<section id='reading' class='card'><h2>Reading list</h2>"]
+    if not reading:
+        parts.append("<p class='empty'>Nothing unread. 📚</p></section>")
+        return "".join(parts)
+
+    reading = sorted(reading, key=lambda r: str(r.get("created", "")), reverse=True)
+    groups: dict[str, list[dict]] = {}
+    for item in reading:
+        groups.setdefault(str(item.get("created") or "no date"), []).append(item)
+
+    parts.append(f"<p class='cal-note'>{len(reading)} unread — mark read with "
+                 "<code>assistant reading done &lt;id&gt;</code> or the ✓ button.</p>"
+                 "<div class='todo-scroll'>")
+    idx = 0
+    for group_i, (day, day_items) in enumerate(groups.items()):
+        anchor = _parse_day(day)
+        label = f"{day} · {anchor.strftime('%a')}" if anchor else day
+        open_attr = " open" if group_i < 5 else ""
+        parts.append(f"<details class='t-day'{open_attr}><summary>{label} "
+                     f"<span class='t-count'>({len(day_items)})</span></summary>"
+                     "<ul class='todos'>")
+        for item in day_items:
+            entry = {"id": item.get("id"), "title": item.get("title", ""),
+                     "url": item.get("url"), "detail": item.get("why", ""),
+                     "source": item.get("source", ""), "created": item.get("created", "")}
+            parts.append(_todo_li(entry, idx, today, stale_badge=False))
+            idx += 1
+        parts.append("</ul></details>")
+    parts.append("</div>")
+    parts.append("<div id='todo-hidden-bar'><span></span> — "
+                 "<button id='todo-show-hidden'>show</button></div>")
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def _todo_li(todo: dict, idx: int, today: date, stale_badge: bool = True) -> str:
     e = html.escape
     title = f"<b>{e(todo['title'])}</b>"
-    if going_stale(todo, today):  # fading toward the 30-day expiry
+    if stale_badge and going_stale(todo, today):  # fading toward the 30-day expiry
         title += " <span class='t-stale' title='untouched for 3+ weeks — expires at 30 days'>⏳ going stale</span>"
     label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
                       todo.get("type", ""))
@@ -531,7 +572,8 @@ def _git(workdir: Path, settings: Settings, *args: str,
                           capture_output=True, text=True, check=check)
 
 
-def sync_website(settings: Settings, profile: dict, todos: list[dict]) -> dict:
+def sync_website(settings: Settings, profile: dict, todos: list[dict],
+                 reading: list[dict] | None = None) -> dict:
     if not settings.website_repo or not settings.github_token:
         return {"status": "not_configured", "note": "set WEBSITE_REPO (owner/name) in .env"}
 
@@ -554,7 +596,7 @@ def sync_website(settings: Settings, profile: dict, todos: list[dict]) -> dict:
     _git(workdir, settings, "checkout", "-q", "-B", default_branch,
          f"origin/{default_branch}")
 
-    for filename, content in render_site(profile, todos).items():
+    for filename, content in render_site(profile, todos, reading=reading).items():
         (workdir / filename).write_text(content)
 
     if not _git(workdir, settings, "status", "--porcelain").stdout.strip():

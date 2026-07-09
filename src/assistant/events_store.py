@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _SCHEMA = """
@@ -27,6 +27,15 @@ CREATE TABLE IF NOT EXISTS seen (
     last_seen TEXT NOT NULL,
     context TEXT
 );
+CREATE TABLE IF NOT EXISTS metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    step TEXT NOT NULL,
+    name TEXT NOT NULL,
+    value REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS metrics_name_ts ON metrics (name, ts);
 """
 
 
@@ -93,6 +102,29 @@ class EventsStore:
                 (item_id, now, now, context),
             )
         self.conn.commit()
+
+    # ── pipeline metrics (doc/PIPELINE_METRICS.md) ───────────────────
+    def record_metrics(self, run_id: str, step: str, values: dict) -> None:
+        """One row per (run, step, metric). Values must be numeric."""
+        now = datetime.now(timezone.utc).isoformat()
+        for name, value in values.items():
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue  # a non-numeric value must never kill a phase
+            self.conn.execute(
+                "INSERT INTO metrics (run_id, ts, step, name, value) VALUES (?, ?, ?, ?, ?)",
+                (run_id, now, step, name, value),
+            )
+        self.conn.commit()
+
+    def metrics_window(self, days: int = 7) -> list[dict]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = self.conn.execute(
+            "SELECT run_id, ts, step, name, value FROM metrics WHERE ts >= ?"
+            " ORDER BY ts", (cutoff,))
+        return [{"run_id": r[0], "ts": r[1], "step": r[2], "name": r[3], "value": r[4]}
+                for r in rows]
 
     def close(self) -> None:
         self.conn.close()

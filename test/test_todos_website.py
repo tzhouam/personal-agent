@@ -210,6 +210,32 @@ def test_calendar_importance_cap_and_list_order():
     assert page.count("<ul class='todos'>") == 4
 
 
+def test_reading_page_like_todos():
+    today = date(2026, 7, 9)
+    reading = [
+        {"id": "r1", "title": "Fresh paper", "url": "https://arxiv.org/abs/1",
+         "why": "relates to your KV-cache work", "source": "arxiv",
+         "created": "2026-07-08", "status": "open"},
+        {"id": "r2", "title": "Old survey", "url": "https://arxiv.org/abs/2",
+         "why": "", "source": "arxiv", "created": "2026-06-10", "status": "open"},
+    ]
+    files = render_site(PROFILE, [], today=today, reading=reading)
+    assert "reading.html" in files
+    page = files["reading.html"]
+    # nav on every page includes Reading, and the page marks itself active
+    assert "<a href='reading.html' class=active" in page
+    assert "href='reading.html'" in files["index.html"]
+    # day-grouped scroll list, newest day first, with the todo buttons
+    assert page.index("2026-07-08") < page.index("2026-06-10")
+    assert "class='todo-scroll'" in page and "<details class='t-day'" in page
+    assert "data-tid='r1'" in page and "b-done" in page
+    assert "relates to your KV-cache work" in page
+    # reading items never show the todo staleness badge
+    assert "going stale" not in page
+    # empty state renders a placeholder, not a broken section
+    assert "Nothing unread" in render_site(PROFILE, [], today=today)["reading.html"]
+
+
 def test_todo_expiry_after_a_month(tmp_path):
     store = TodoStore(tmp_path)
     store.upsert("k-old", title="Stale item", source="github")
