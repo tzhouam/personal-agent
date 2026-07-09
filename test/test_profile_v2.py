@@ -275,6 +275,15 @@ def test_consolidate_dry_run_changes_nothing(tmp_path, settings, monkeypatch):
     assert store.load()["projects"][2]["status"] == "active"
 
 
+def test_resume_voice_rules_wired_into_both_writers():
+    from assistant.tasks import resume
+    from assistant.writing import RESUME_VOICE_RULES
+
+    assert "as measured by" in RESUME_VOICE_RULES  # XYZ formula present
+    assert RESUME_VOICE_RULES in profile_consolidate._SYSTEM
+    assert RESUME_VOICE_RULES in resume._EDIT_SYSTEM
+
+
 def test_consolidate_survives_llm_failure(tmp_path, settings):
     store = ProfileStore(settings.profile_dir)
     store.ensure_repo()

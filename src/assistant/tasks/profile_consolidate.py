@@ -27,6 +27,7 @@ from ..deliver.email import send_email
 from ..llm import LLM
 from ..profile_store import (CONSOLIDATE_OPS, ProfileStore, append_ops_log,
                              load_aliases, render_initiatives)
+from ..writing import RESUME_VOICE_RULES
 
 log = logging.getLogger("assistant")
 
@@ -65,7 +66,9 @@ Editorial rules:
 6. Skills describe real capabilities ("LLM inference systems", "multi-agent orchestration"),
    not GitHub language stats. Use rewrite_entry/add_skill/mark_dormant to converge on that;
    evidence for a skill should reference the initiatives/projects that prove it.
-7. Do not touch entries with status "merged". At most 20 ops."""
+7. Do not touch entries with status "merged". At most 20 ops.
+
+""" + RESUME_VOICE_RULES
 
 
 def consolidate_profile(llm: LLM, store: ProfileStore, settings: Settings,

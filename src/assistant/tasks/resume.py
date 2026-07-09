@@ -17,6 +17,7 @@ import yaml
 
 from ..config import Settings
 from ..llm import LLM
+from ..writing import RESUME_VOICE_RULES
 
 _RELEVANCE_SYSTEM = """Decide whether today's profile changes are resume-worthy (new project
 milestone, publication, promotion-level skill evidence — not routine activity bumps).
@@ -33,7 +34,10 @@ Rules:
   fabricate, inflate, or reword existing claims to sound better.
 - Preserve the document's LaTeX style, formatting, and voice.
 - Prefer few, small edits. Each "search" string must occur exactly once in the file.
-- An empty edits list is the right answer if nothing genuinely belongs on the resume."""
+- An empty edits list is the right answer if nothing genuinely belongs on the resume.
+- Any NEW bullet you write follows the resume-voice rules below.
+
+""" + RESUME_VOICE_RULES
 
 
 def find_main_tex(repo: Path) -> Path | None:
