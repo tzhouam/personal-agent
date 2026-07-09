@@ -68,10 +68,6 @@ class Settings(BaseSettings):
     wecom_token: str = ""          # callback (receive) settings from the app's API page
     wecom_aes_key: str = ""        # 43-char EncodingAESKey
     wecom_callback_port: int = 8329
-    # Slack: DM the bot ↔ agent replies in the DM. Outbound HTTPS polling only,
-    # so it works behind NAT with just a bot token (xoxb-…).
-    slack_bot_token: str = ""
-    slack_owner_id: str = ""       # U… member id; empty = resolve via owner email
 
     # Personal website — "owner/name" GitHub Pages repo; the agent pushes the
     # rendered site directly to the default branch (owner's choice, 2026-07-02)

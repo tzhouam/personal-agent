@@ -58,10 +58,6 @@ assistant chat-listen                     # foreground loop (normally you don't 
   own addresses with a subject starting `agent` — e.g. "agent: add a todo to
   review X, due Friday". The reply comes back by email. Non-owner senders and
   other subjects are ignored; a UID watermark prevents replays.
-- **Slack**: create a bot app (scopes `im:history`, `im:read`, `chat:write`;
-  plus `users:read` + `users:read.email` to skip setting `SLACK_OWNER_ID`),
-  put the `xoxb-` token in `SLACK_BOT_TOKEN`, then just DM the bot. Polling
-  only — no public URL needed, so it works from this container as-is.
 - **WeChat via OpenClaw (live)**: Tencent's official
   `@tencent-weixin/openclaw-weixin` plugin runs in an OpenClaw Gateway on this
   machine, and our [`openclaw-plugin/`](openclaw-plugin/) bridge (a

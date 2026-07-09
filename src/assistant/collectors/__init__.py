@@ -1,6 +1,6 @@
 """Collector registry — each collector turns one data source into Observations.
 
-Adding a source (gmail, chrome, slack, …) = one module registering itself here;
+Adding a source (gmail, chrome, calendar, …) = one module registering itself here;
 the orchestrator iterates the registry and never changes.
 """
 
