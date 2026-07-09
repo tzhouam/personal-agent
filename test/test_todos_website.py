@@ -166,14 +166,78 @@ def test_render_site_pages_and_calendar():
 
     page = files["todos.html"]
     assert "July 2026" in page
-    # calendar: due-dated todo on its due day (red), undated todo on created day
+    # calendar shows only important todos: due-dated chip present…
     assert page.count("Review scheduler PR"[:40]) == 2      # calendar chip + list entry
     assert "class='todo due'" in page                       # due chip styled distinctly
-    assert page.count("No due date") == 2                   # created-date chip + list entry
+    # …but an undated, non-red todo is list-only (no calendar chip)
+    assert page.count("No due date") == 1
+    # the list is a scroll container
+    assert "class='todo-scroll'" in page
     # list entries carry the short link label, the description, and pin/done buttons
     assert "[PR #5]</a>" in page
     assert "You were asked to review the scheduler fix." in page
     assert "data-tid='t1'" in page and "b-pin" in page and "b-done" in page
+
+
+def test_calendar_importance_cap_and_list_order():
+    today = date(2026, 7, 2)
+    todos = (
+        # 4 important items on the same due day → capped at 3 + "+1 more"
+        [{"id": f"t{i}", "title": f"Due item {i}", "source": "github", "priority": "red",
+          "created": "2026-07-01", "due": "2026-07-10", "status": "open"} for i in range(4)]
+        + [{"id": "t8", "title": "Later due", "source": "github",
+            "created": "2026-06-01", "due": "2026-07-20", "status": "open"},
+           {"id": "t9", "title": "Old undated", "source": "manual",
+            "created": "2026-06-10", "status": "open"},
+           {"id": "t10", "title": "New undated", "source": "manual",
+            "created": "2026-07-01", "status": "open"}]
+    )
+    page = render_site(PROFILE, todos, today=today)["todos.html"]
+    assert "+1 more" in page
+    assert "Key items only" in page
+    # scroll list ordered by date: due items soonest-first, then undated newest-first
+    order = [page.index(f">Later due") if False else page.rindex(t)
+             for t in ("Due item 0", "Later due", "New undated", "Old undated")]
+    assert order == sorted(order)
+    # undated items never earn calendar chips: single occurrence each
+    assert page.count("Old undated") == 1 and page.count("New undated") == 1
+
+
+def test_todo_expiry_after_a_month(tmp_path):
+    store = TodoStore(tmp_path)
+    store.upsert("k-old", title="Stale item", source="github")
+    store.upsert("k-new", title="Fresh item", source="github")
+    store.upsert("k-due", title="Old but scheduled", source="manual", due="2026-08-01")
+    data = store.load()  # age two items past the cutoff
+    for item in data["items"]:
+        if item["key"] in ("k-old", "k-due"):
+            item["created"] = "2026-05-01"
+    store._save(data, "age items for test")
+
+    expired = store.expire_stale(days=30, today=date(2026, 7, 2))
+    assert [t["title"] for t in expired] == ["Stale item"]
+    remaining = store.open_items()
+    assert {t["title"] for t in remaining} == {"Fresh item", "Old but scheduled"}
+    stale = next(i for i in store.load()["items"] if i["key"] == "k-old")
+    assert stale["status"] == "outdated" and stale["outdated_at"] == "2026-07-02"
+    # second pass is a no-op
+    assert store.expire_stale(days=30, today=date(2026, 7, 2)) == []
+    # a past-due scheduled item does expire once its due date lapses
+    # (the fresh item has aged past 30 days by then too)
+    expired = store.expire_stale(days=30, today=date(2026, 8, 15))
+    assert {t["title"] for t in expired} == {"Old but scheduled", "Fresh item"}
+
+
+def test_update_todos_reports_expired_as_closed(tmp_path):
+    store = TodoStore(tmp_path)
+    store.upsert("k-old", title="Ancient todo", source="github")
+    data = store.load()
+    data["items"][0]["created"] = "2020-01-01"
+    store._save(data, "age")
+    result = update_todos(store, digest={}, resume={})
+    assert result["open_count"] == 0
+    assert result["closed"] == [{"id": "t1", "title": "Ancient todo",
+                                 "reason": "outdated (open >30 days)"}]
 
 
 def test_sync_website_not_configured(settings):

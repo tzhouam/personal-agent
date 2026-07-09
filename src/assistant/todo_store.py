@@ -7,7 +7,7 @@ CLI: ``assistant todo done t3``.
 """
 
 import subprocess
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
@@ -71,6 +71,28 @@ class _YamlItems:
 
     def open_items(self) -> list[dict]:
         return [i for i in self.load()["items"] if i["status"] == "open"]
+
+    def expire_stale(self, days: int = 30, today: date | None = None) -> list[dict]:
+        """Mark open items older than ``days`` as outdated (never delete — the
+        status change removes them from the open list, website, and email).
+        Items with a due date today or later stay open regardless of age."""
+        today = today or date.today()
+        cutoff = (today - timedelta(days=days)).isoformat()
+        data = self.load()
+        expired = []
+        for item in data["items"]:
+            if item["status"] != "open" or not item.get("created"):
+                continue
+            if item["created"] > cutoff:
+                continue
+            if item.get("due") and str(item["due"]) >= today.isoformat():
+                continue  # still scheduled — age alone doesn't outdate it
+            item["status"] = "outdated"
+            item["outdated_at"] = today.isoformat()
+            expired.append(item)
+        if expired:
+            self._save(data, f"{self.FILENAME}: {len(expired)} item(s) outdated (>{days}d)")
+        return expired
 
 
 class TodoStore(_YamlItems):

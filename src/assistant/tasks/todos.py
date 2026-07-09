@@ -41,8 +41,11 @@ def _summarize_details(llm, items: list[dict]) -> dict[str, str]:
 
 
 def update_todos(store: TodoStore, digest: dict, resume: dict, github=None, llm=None) -> dict:
-    # ── monitor pass first: close finished work before adding new items ──
-    closed = []
+    # ── age-out pass: a todo untouched for a month is stale by definition ──
+    closed = [{"id": t["id"], "title": t["title"], "reason": "outdated (open >30 days)"}
+              for t in store.expire_stale(days=30)]
+
+    # ── monitor pass: close finished work before adding new items ──
     if github is not None:
         for todo in store.open_items():
             if todo.get("source") != "github" or not todo.get("url"):

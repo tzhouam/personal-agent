@@ -203,16 +203,36 @@ def _parse_day(value) -> date | None:
         return None
 
 
+_CAL_MAX_PER_DAY = 3
+
+
+def _cal_important(todos: list[dict]) -> list[dict]:
+    """Only the most important todos earn a calendar cell: red priority or an
+    explicit due date. The full list lives in the scroll list below."""
+    return [t for t in todos if t.get("priority") == "red" or t.get("due")]
+
+
+def _todo_sort_key(todo: dict):
+    """Date-ordered: due items first (soonest due at the top), then undated
+    items newest-created first."""
+    due = _parse_day(todo.get("due"))
+    if due:
+        return (0, due.toordinal())
+    created = _parse_day(todo.get("created"))
+    return (1, -(created.toordinal() if created else 0))
+
+
 def _render_calendar(todos: list[dict], today: date) -> str:
     e = html.escape
-    # every todo lands on the calendar: due date if set, else its created date
+    # calendar shows only the important todos: due date if set, else created day
     by_day: dict[int, list[dict]] = {}
-    for todo in todos:
+    for todo in _cal_important(todos):
         anchor = _parse_day(todo.get("due")) or _parse_day(todo.get("created"))
         if anchor and anchor.year == today.year and anchor.month == today.month:
             by_day.setdefault(anchor.day, []).append(todo)
 
-    parts = [f"<section id='todos' class='card'><h2>Todo Calendar — {today.strftime('%B %Y')}</h2><table class='cal'>",
+    parts = [f"<section id='todos' class='card'><h2>Todo Calendar — {today.strftime('%B %Y')}</h2>"
+             "<p class='cal-note'>Key items only — the full list is below.</p><table class='cal'>",
              "<tr>" + "".join(f"<th>{d}</th>" for d in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")) + "</tr>"]
     for week in _calendar.Calendar().monthdayscalendar(today.year, today.month):
         parts.append("<tr>")
@@ -222,16 +242,21 @@ def _render_calendar(todos: list[dict], today: date) -> str:
                 continue
             classes = "today" if day == today.day else ""
             cell = f"<b>{day}</b>"
-            for todo in by_day.get(day, []):
+            day_todos = by_day.get(day, [])
+            for todo in day_todos[:_CAL_MAX_PER_DAY]:
                 kind = "todo due" if todo.get("due") else "todo"
                 cell += (f"<div class='{kind}' data-tid='{e(str(todo.get('id', '')))}'"
                          f" title='{e(todo.get('detail', ''))}'>{e(todo['title'][:40])}</div>")
+            if len(day_todos) > _CAL_MAX_PER_DAY:
+                cell += f"<div class='more'>+{len(day_todos) - _CAL_MAX_PER_DAY} more</div>"
             parts.append(f"<td class='{classes}'>{cell}</td>")
         parts.append("</tr>")
     parts.append("</table>")
 
+    todos = sorted(todos, key=_todo_sort_key)
     if todos:
-        parts.append("<h3>Open todos</h3><ul class='todos'>")
+        parts.append(f"<h3>Open todos ({len(todos)})</h3>"
+                     "<div class='todo-scroll'><ul class='todos'>")
         for idx, todo in enumerate(todos):
             title = f"<b>{e(todo['title'])}</b>"
             label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
@@ -250,7 +275,7 @@ def _render_calendar(todos: list[dict], today: date) -> str:
             parts.append(f"<li data-tid='{e(str(todo.get('id', '')))}' data-idx='{idx}'>"
                          f"{actions}{title} <span class='when'>({e(todo.get('source', ''))}, "
                          f"since {e(todo.get('created', ''))}{due})</span>{detail}</li>")
-        parts.append("</ul>")
+        parts.append("</ul></div>")
         parts.append("<div id='todo-hidden-bar'><span></span> — "
                      "<button id='todo-show-hidden'>show</button></div>")
     parts.append("</section>")
@@ -336,6 +361,10 @@ table.cal{border-collapse:collapse;width:100%;margin-top:6px}
 .cal .todo{background:linear-gradient(135deg,#e0e7ff,#ede9fe);border-left:3px solid #6366f1;
   border-radius:5px;padding:2px 5px;margin-top:3px;font-size:.72rem}
 .cal .todo.due{background:linear-gradient(135deg,#fee2e2,#fce7f3);border-left-color:#ef4444}
+.cal-note{color:#64748b;font-size:.85rem;margin:2px 0 0}
+.cal .more{color:#6366f1;font-size:.72rem;font-weight:600;margin-top:2px}
+.todo-scroll{max-height:480px;overflow-y:auto;padding-right:6px;margin-top:6px;
+  scrollbar-width:thin;border-bottom:1px solid #e2e8f0}
 ul.todos{list-style:none;padding:0;margin:0}
 ul.todos li{border:1px solid #e2e8f0;border-left:4px solid #ef4444;border-radius:10px;
   padding:10px 14px;margin-bottom:8px;background:#fff}
