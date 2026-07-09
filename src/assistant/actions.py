@@ -84,6 +84,7 @@ def _trigger_run(settings: Settings, p: dict) -> str:
     cmd = [sys.executable, "-m", "assistant.cli", "run"]
     if p.get("resume"):
         cmd.append("--resume")
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
     log_file = (settings.data_dir / "chat_run.log").open("a")
     subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT,
                      start_new_session=True)
@@ -110,6 +111,82 @@ def _show_profile(settings: Settings, p: dict) -> str:
     if not store.exists():
         return "(no profile yet — run `assistant bootstrap`)"
     return render_summary(store.load(), max_items=12)
+
+
+# phases the owner may run standalone; the rest need the full pipeline's
+# upstream state (collect→profile→digest), so they map to trigger_run
+RUNNABLE_PHASES = ("research", "website", "todos", "resume", "curate", "consolidate")
+
+
+def _run_phase(settings: Settings, p: dict) -> str:
+    phase = str(p.get("phase", "")).strip().lower()
+    if phase in ("run", "all", "daily", "digest", "collect", "profile", "deliver"):
+        return _trigger_run(settings, {}) + " (that phase needs the full pipeline)"
+    if phase not in RUNNABLE_PHASES:
+        return (f"unknown phase {phase!r} — runnable: {', '.join(RUNNABLE_PHASES)}, "
+                "or 'all' for the full daily run")
+    if phase == "website":  # fast — run it inline and report the real result
+        from .profile_store import ProfileStore
+        from .todo_store import ReadingList, TodoStore
+        from .urgency import urgency
+        from .website import sync_website
+
+        todos = sorted(TodoStore(settings.profile_dir).open_items(),
+                       key=urgency, reverse=True)
+        result = sync_website(settings, ProfileStore(settings.profile_dir).load(),
+                              todos, reading=ReadingList(settings.profile_dir).open_items())
+        return f"website sync: {result.get('status')} {result.get('url', '')}".strip()
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (settings.data_dir / "phase_run.log").open("a")
+    subprocess.Popen([sys.executable, "-m", "assistant.cli", "run-phase", phase],
+                     stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+    return (f"phase '{phase}' started in the background — I'll have the results "
+            "on the website/next digest, or ask me in a few minutes")
+
+
+_PLAN_SYSTEM = """You are the owner's personal task planner. You get a novel task request (booking,
+arranging, researching, errands). Produce a concrete, realistic plan.
+
+Be honest about capabilities: the agent has NO calendar, browser, or payment access — steps
+needing those are the owner's, but make them trivially easy (draft the message to send, list
+the exact search query, name the criteria). Steps the agent CAN do: track the task as a todo,
+remind via the daily digest, draft text, reason over the owner's profile/todos.
+
+Respond with ONLY JSON:
+{"title": "<short imperative todo title>",
+ "due": "YYYY-MM-DD or null",
+ "steps": [{"who": "agent|owner", "step": "<one concrete action>"}],
+ "next": "<the single next action to take>"}
+3-6 steps. Never invent facts (restaurant names, availability) — plan how to find them."""
+
+
+def _plan_task(settings: Settings, p: dict) -> str:
+    from .llm import LLM
+    from .profile_store import ProfileStore, render_summary
+
+    request = str(p.get("request", "")).strip()
+    profile_store = ProfileStore(settings.profile_dir)
+    context = (render_summary(profile_store.load()) if profile_store.exists() else "")
+    plan = LLM(settings).complete_json(
+        f"## Owner profile\n{context}\n\n## Task request\n{request}",
+        system=_PLAN_SYSTEM, max_tokens=8000)
+    if not isinstance(plan, dict) or not plan.get("steps"):
+        return f"couldn't produce a plan for {request!r} — try rephrasing"
+
+    title = str(plan.get("title") or request)[:120]
+    step_lines = [f"{i}. [{s.get('who', '?')}] {s.get('step', '')}"
+                  for i, s in enumerate(plan.get("steps", [])[:6], 1)]
+    detail = (" / ".join(step_lines))[:580]
+    extra = {"due": plan["due"]} if plan.get("due") else {}
+    todo = TodoStore(settings.profile_dir).upsert(
+        f"plan:{title}", title=title, detail=detail, source="chat",
+        priority="yellow", **extra)
+    lines = [f"planned: {title}" + (f" (todo {todo['id']})" if todo
+                                    else " (already tracked)")]
+    lines += step_lines
+    if plan.get("next"):
+        lines.append(f"→ next: {plan['next']}")
+    return "\n".join(lines)
 
 
 # ── the registry ─────────────────────────────────────────────────────
@@ -172,6 +249,28 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         description="last run id/phase and open counts",
         handler=_run_status,
         slash="status",
+    ),
+    Action(
+        name="run_phase",
+        description="run one standalone pipeline phase now",
+        handler=_run_phase,
+        params={"phase": {"required": True,
+                          "desc": "research|website|todos|resume|curate|consolidate|all"}},
+        llm=True,
+        prompt_example='{"type": "run_phase", "phase": "research"}   # research|website|todos'
+                       '|resume|curate|consolidate, or "all" for the full daily run',
+        slash="run",
+    ),
+    Action(
+        name="plan_task",
+        description="plan a novel multi-step task (booking, arranging, researching) "
+                    "and track it as a todo",
+        handler=_plan_task,
+        params={"request": {"required": True, "desc": "the owner's task, one sentence"}},
+        llm=True,
+        prompt_example='{"type": "plan_task", "request": "<the task in one sentence>"}'
+                       '   # for novel multi-step asks: bookings, arranging, research',
+        slash="plan",
     ),
     Action(
         name="show_profile",

@@ -27,6 +27,11 @@ chat reply, not a report. Answer in the language the owner wrote in.
 You may execute actions, but ONLY when the owner explicitly asks for them:
 {prompt_block()}
 
+When the owner asks for something novel and multi-step that no other action covers (book a
+meeting, find a restaurant, arrange or research something), do NOT refuse — emit plan_task
+with the request; the planner breaks it down and tracks it. When the owner asks to run,
+refresh, or update part of the daily routine, emit run_phase with the closest phase.
+
 Respond with ONLY JSON: {{"reply": "<chat reply>", "actions": []}}
 Never claim an action succeeded in the reply — outcomes are appended automatically."""
 

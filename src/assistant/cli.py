@@ -220,6 +220,80 @@ def cmd_enrich_profile(settings: Settings, args) -> int:
     return 0
 
 
+def cmd_run_phase(settings: Settings, phase: str) -> int:
+    """Run one standalone pipeline phase with live data (WeChat `run_phase`
+    action lands here for the slow phases). Phases that need upstream state
+    (collect/profile/digest/deliver) belong to the full `assistant run`."""
+    import logging
+
+    from .events_store import EventsStore
+    from .llm import LLM
+    from .todo_store import ReadingList, TodoStore
+    from .urgency import urgency
+    from .website import sync_website
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    store = ProfileStore(settings.profile_dir)
+    llm = LLM(settings)
+
+    def _push_site() -> str:
+        todos = sorted(TodoStore(settings.profile_dir).open_items(),
+                       key=urgency, reverse=True)
+        result = sync_website(settings, store.load(), todos,
+                              reading=ReadingList(settings.profile_dir).open_items())
+        return result.get("status", "?")
+
+    if phase == "research":
+        from .research.pipeline import run_research
+
+        events = EventsStore(settings.events_db)
+        try:
+            research = run_research(llm, store.load(), events, settings)
+            reading = ReadingList(settings.profile_dir)
+            for paper in research.get("papers", []):
+                reading.upsert(paper["seen_id"], title=paper["title"], url=paper["url"],
+                               source="arxiv", why=paper.get("why", ""))
+            events.mark_seen(research.get("seen_ids", []), context="run-phase research")
+        finally:
+            events.close()
+        print(f"research: {len(research.get('papers', []))} papers, "
+              f"{len(research.get('industry', []))} industry items; website {_push_site()}")
+        return 0
+    if phase == "website":
+        print(f"website: {_push_site()}")
+        return 0
+    if phase == "todos":
+        from .collectors.github import GitHubCollector
+        from .tasks.todos import update_todos
+
+        github = GitHubCollector(settings) if settings.github_token else None
+        todos = update_todos(TodoStore(settings.profile_dir), digest={}, resume={},
+                             github=github, llm=llm)
+        print(f"todos: {todos['open_count']} open, {len(todos['closed'])} auto-closed; "
+              f"website {_push_site()}")
+        return 0
+    if phase == "resume":
+        from .tasks.resume import sync_resume
+
+        result = sync_resume(llm, settings, store.load(), "")
+        print(f"resume: {result.get('status')} {result.get('note', '')}".strip())
+        return 0
+    if phase == "curate":
+        from .tasks.curate import curate
+
+        curated = curate(store)
+        print(f"curate: {len(curated.get('decayed', []))} entries decayed")
+        return 0
+    if phase == "consolidate":
+        from .tasks.profile_consolidate import consolidate_profile
+
+        result = consolidate_profile(llm, store, settings)
+        print(f"consolidate: {len(result['applied'])} ops applied; website {_push_site()}")
+        return 0
+    print(f"unknown phase {phase!r}")
+    return 1
+
+
 def cmd_resume_init(settings: Settings) -> int:
     """Clone the Overleaf project (git bridge / any remote) or init an empty repo."""
     import subprocess
@@ -306,6 +380,11 @@ def main() -> None:
     sub.add_parser("serve", help="local HTTP daemon: chat/actions/run endpoints "
                                  "for the OpenClaw bridge + email chat polling")
 
+    phase_p = sub.add_parser("run-phase",
+                             help="run one standalone pipeline phase now")
+    phase_p.add_argument("phase", choices=["research", "website", "todos", "resume",
+                                           "curate", "consolidate"])
+
     cons_p = sub.add_parser("consolidate",
                             help="weekly profile consolidation: merge fragments, "
                                  "promote evidence into contribution highlights")
@@ -352,6 +431,8 @@ def main() -> None:
         from .serve import run_serve
 
         sys.exit(run_serve(settings))
+    elif args.command == "run-phase":
+        sys.exit(cmd_run_phase(settings, args.phase))
     elif args.command == "consolidate":
         import logging
 

@@ -5,12 +5,69 @@ from assistant.todo_store import ReadingList, TodoStore
 
 def test_registry_covers_the_llm_action_set():
     llm_actions = {name for name, a in ACTIONS.items() if a.llm}
-    assert llm_actions == {"add_todo", "done_todo", "done_reading", "trigger_run"}
+    assert llm_actions == {"add_todo", "done_todo", "done_reading", "trigger_run",
+                           "run_phase", "plan_task"}
     block = prompt_block()
     for name in llm_actions:
         assert name in block
     # non-LLM actions never appear in the chat prompt
     assert "list_todos" not in block and "run_status" not in block
+
+
+def test_run_phase_validation_and_dispatch(settings, monkeypatch):
+    from assistant import actions as actions_mod
+
+    # unknown phase → helpful error, nothing spawned
+    result = run_action("run_phase", {"phase": "frobnicate"}, settings)
+    assert "unknown phase" in result and "research" in result
+
+    # website runs inline and reports the sync result
+    monkeypatch.setattr("assistant.website.sync_website",
+                        lambda s, p, t, reading=None: {"status": "pushed", "url": "https://x"})
+    monkeypatch.setattr("assistant.profile_store.ProfileStore.load", lambda self: {})
+    assert run_action("run_phase", {"phase": "website"}, settings) \
+        == "website sync: pushed https://x"
+
+    # slow phases spawn `assistant run-phase <phase>` in the background
+    spawned = []
+    monkeypatch.setattr(actions_mod.subprocess, "Popen",
+                        lambda cmd, **kw: spawned.append(cmd))
+    result = run_action("run_phase", {"phase": "research"}, settings)
+    assert "started in the background" in result
+    assert spawned[0][-2:] == ["run-phase", "research"]
+
+    # pipeline-dependent phases fall back to the full run
+    monkeypatch.setattr(actions_mod, "_trigger_run", lambda s, p: "daily run started")
+    assert "full pipeline" in run_action("run_phase", {"phase": "digest"}, settings)
+
+
+def test_plan_task_plans_and_tracks(settings, monkeypatch):
+    plan = {"title": "Book team dinner", "due": "2026-07-15",
+            "steps": [{"who": "agent", "step": "track and remind"},
+                      {"who": "owner", "step": "pick one of the 3 candidates"}],
+            "next": "search Dianping for Sichuan near the office"}
+
+    class FakeLLM:
+        def __init__(self, settings):
+            pass
+
+        def complete_json(self, prompt, system=None, **kw):
+            assert "book a dinner" in prompt
+            return plan
+
+    monkeypatch.setattr("assistant.llm.LLM", FakeLLM)
+    result = run_action("plan_task", {"request": "book a dinner for the team"}, settings)
+    assert result.startswith("planned: Book team dinner (todo t1)")
+    assert "[owner] pick one of the 3 candidates" in result
+    assert "→ next: search Dianping" in result
+    todo = TodoStore(settings.profile_dir).open_items()[0]
+    assert todo["title"] == "Book team dinner" and todo["due"] == "2026-07-15"
+    assert "[agent] track and remind" in todo["detail"]
+
+    # unplannable → graceful line, no todo
+    monkeypatch.setattr(FakeLLM, "complete_json", lambda self, *a, **k: {"steps": []})
+    assert "couldn't produce a plan" in run_action("plan_task", {"request": "x"}, settings)
+    assert len(TodoStore(settings.profile_dir).open_items()) == 1
 
 
 def test_run_action_todo_roundtrip(settings):

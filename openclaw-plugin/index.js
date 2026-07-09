@@ -99,15 +99,23 @@ async function ask(text, session) {
   }
 }
 
-/** "/todo add buy GPU due:2026-07-15" → {action, params} | {usage} | null
+/** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
  * (null = not ours, let OpenClaw built-ins have it). */
 export function parseSlash(body) {
-  const m = body.match(/^\/(todo|read|digest|status)\b\s*(.*)$/s);
+  const m = body.match(/^\/(todo|read|digest|status|run|plan)\b\s*(.*)$/s);
   if (!m) return null;
   const [, family, restRaw] = m;
   const rest = restRaw.trim();
   if (family === "status") return { action: "run_status", params: {} };
   if (family === "digest") return { action: "trigger_run", params: {} };
+  if (family === "run") {
+    if (!rest) return { usage: "usage: /run <research|website|todos|resume|curate|consolidate|all>" };
+    return { action: "run_phase", params: { phase: rest.split(/\s+/)[0] }, timeoutMs: 90_000 };
+  }
+  if (family === "plan") {
+    if (!rest) return { usage: "usage: /plan <the task, one sentence>" };
+    return { action: "plan_task", params: { request: rest }, timeoutMs: TIMEOUT_MS };
+  }
   if (family === "todo") {
     if (!rest || rest === "list") return { action: "list_todos", params: {} };
     const done = rest.match(/^done\s+(\S+)$/);
@@ -134,7 +142,8 @@ export function parseSlash(body) {
 async function handleSlash(parsed) {
   if (parsed.usage) return parsed.usage;
   try {
-    const data = await daemonPost(`/actions/${parsed.action}`, parsed.params, ACTION_TIMEOUT_MS);
+    const data = await daemonPost(`/actions/${parsed.action}`, parsed.params,
+                                  parsed.timeoutMs ?? ACTION_TIMEOUT_MS);
     return data?.result ?? "(empty result)";
   } catch (err) {
     return `(assistant daemon unreachable: ${String(err?.message ?? err).slice(0, 200)} — is \`assistant serve\` running?)`;

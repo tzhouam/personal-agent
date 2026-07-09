@@ -52,6 +52,9 @@ const cases = [
   ["/todo add 复查 PR", { action: "add_todo", params: { title: "复查 PR", source: "wechat" } }],
   ["/read", { action: "list_reading", params: {} }],
   ["/read done r2", { action: "done_reading", params: { id: "r2" } }],
+  ["/run research", { action: "run_phase", params: { phase: "research" }, timeoutMs: 90_000 }],
+  ["/plan book a dinner for 6 on Friday",
+   { action: "plan_task", params: { request: "book a dinner for 6 on Friday" }, timeoutMs: 120_000 }],
   ["/new", null],
   ["/todos", null],
 ];
@@ -61,6 +64,7 @@ for (const [input, want] of cases) {
     throw new Error(`parseSlash(${input}): ${JSON.stringify(got)} != ${JSON.stringify(want)}`);
 }
 if (!parseSlash("/todo frobnicate")?.usage) throw new Error("bad /todo subcommand should give usage");
+if (!parseSlash("/run")?.usage || !parseSlash("/plan")?.usage) throw new Error("bare /run and /plan should give usage");
 console.log("parseSlash: PASS");
 
 // ---- daemon down: chat falls back to exec, slash reports unreachable ----
