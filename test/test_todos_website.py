@@ -196,11 +196,18 @@ def test_calendar_importance_cap_and_list_order():
     assert "+1 more" in page
     assert "Key items only" in page
     # scroll list ordered by date: due items soonest-first, then undated newest-first
-    order = [page.index(f">Later due") if False else page.rindex(t)
+    order = [page.rindex(t)
              for t in ("Due item 0", "Later due", "New undated", "Old undated")]
     assert order == sorted(order)
     # undated items never earn calendar chips: single occurrence each
     assert page.count("Old undated") == 1 and page.count("New undated") == 1
+    # same-day todos embed into one collapsible group: 4 due days collapse to
+    # one <details> with a count, one group per distinct day overall
+    assert page.count("<details class='t-day'") == 4
+    assert "2026-07-10 · Fri · due <span class='t-count'>(4)</span>" in page
+    # nearest groups start open; each group holds its own ul for the pin JS
+    assert page.count("<details class='t-day' open>") == 4
+    assert page.count("<ul class='todos'>") == 4
 
 
 def test_todo_expiry_after_a_month(tmp_path):

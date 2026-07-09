@@ -255,31 +255,53 @@ def _render_calendar(todos: list[dict], today: date) -> str:
 
     todos = sorted(todos, key=_todo_sort_key)
     if todos:
-        parts.append(f"<h3>Open todos ({len(todos)})</h3>"
-                     "<div class='todo-scroll'><ul class='todos'>")
-        for idx, todo in enumerate(todos):
-            title = f"<b>{e(todo['title'])}</b>"
-            label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
-                              todo.get("type", ""))
-            if label:  # short bracketed link; the summary stays plain text
-                title = f"<a href='{e(todo['url'])}'>[{e(label)}]</a>: {title}"
-            elif todo.get("url"):
-                title = f"<a href='{e(todo['url'])}'>[link]</a>: {title}"
-            due = f" · due {e(str(todo['due']))}" if todo.get("due") else ""
-            detail = (f"<div class='t-detail'>{e(todo['detail'])}</div>"
-                      if todo.get("detail") else "")
-            actions = ("<span class='t-actions'>"
-                       "<button class='b-pin' title='Pin to the top of the list'>📌 Pin</button>"
-                       "<button class='b-done' title='Mark done — hide on this page'>✓ Done</button>"
-                       "</span>")
-            parts.append(f"<li data-tid='{e(str(todo.get('id', '')))}' data-idx='{idx}'>"
-                         f"{actions}{title} <span class='when'>({e(todo.get('source', ''))}, "
-                         f"since {e(todo.get('created', ''))}{due})</span>{detail}</li>")
-        parts.append("</ul></div>")
+        # same-day todos embed into one collapsible group; group order follows
+        # the date-ordered flat sort (nearest deadlines first, then recency)
+        groups: dict[str, list[dict]] = {}
+        for todo in todos:
+            anchor = _parse_day(todo.get("due")) or _parse_day(todo.get("created"))
+            groups.setdefault(anchor.isoformat() if anchor else "no date", []).append(todo)
+
+        parts.append(f"<h3>Open todos ({len(todos)})</h3><div class='todo-scroll'>")
+        idx = 0
+        for group_i, (day, day_todos) in enumerate(groups.items()):
+            anchor = _parse_day(day)
+            label = f"{day} · {anchor.strftime('%a')}" if anchor else day
+            if any(t.get("due") for t in day_todos):
+                label += " · due"
+            open_attr = " open" if group_i < 5 else ""  # older days start collapsed
+            parts.append(f"<details class='t-day'{open_attr}><summary>{label} "
+                         f"<span class='t-count'>({len(day_todos)})</span></summary>"
+                         "<ul class='todos'>")
+            parts.extend(_todo_li(todo, idx + j) for j, todo in enumerate(day_todos))
+            idx += len(day_todos)
+            parts.append("</ul></details>")
+        parts.append("</div>")
         parts.append("<div id='todo-hidden-bar'><span></span> — "
                      "<button id='todo-show-hidden'>show</button></div>")
     parts.append("</section>")
     return "".join(parts)
+
+
+def _todo_li(todo: dict, idx: int) -> str:
+    e = html.escape
+    title = f"<b>{e(todo['title'])}</b>"
+    label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
+                      todo.get("type", ""))
+    if label:  # short bracketed link; the summary stays plain text
+        title = f"<a href='{e(todo['url'])}'>[{e(label)}]</a>: {title}"
+    elif todo.get("url"):
+        title = f"<a href='{e(todo['url'])}'>[link]</a>: {title}"
+    due = f" · due {e(str(todo['due']))}" if todo.get("due") else ""
+    detail = (f"<div class='t-detail'>{e(todo['detail'])}</div>"
+              if todo.get("detail") else "")
+    actions = ("<span class='t-actions'>"
+               "<button class='b-pin' title='Pin to the top of the list'>📌 Pin</button>"
+               "<button class='b-done' title='Mark done — hide on this page'>✓ Done</button>"
+               "</span>")
+    return (f"<li data-tid='{e(str(todo.get('id', '')))}' data-idx='{idx}'>"
+            f"{actions}{title} <span class='when'>({e(todo.get('source', ''))}, "
+            f"since {e(todo.get('created', ''))}{due})</span>{detail}</li>")
 
 
 _CSS = """*{box-sizing:border-box}
@@ -365,6 +387,14 @@ table.cal{border-collapse:collapse;width:100%;margin-top:6px}
 .cal .more{color:#6366f1;font-size:.72rem;font-weight:600;margin-top:2px}
 .todo-scroll{max-height:480px;overflow-y:auto;padding-right:6px;margin-top:6px;
   scrollbar-width:thin;border-bottom:1px solid #e2e8f0}
+details.t-day{margin:0 0 8px}
+details.t-day summary{cursor:pointer;font-weight:600;color:#334155;font-size:.92rem;
+  padding:6px 8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+  user-select:none}
+details.t-day[open] summary{margin-bottom:6px}
+details.t-day summary .t-count{color:#64748b;font-weight:400}
+details.t-day.all-done{display:none}
+body.show-hidden details.t-day.all-done{display:block}
 ul.todos{list-style:none;padding:0;margin:0}
 ul.todos li{border:1px solid #e2e8f0;border-left:4px solid #ef4444;border-radius:10px;
   padding:10px 14px;margin-bottom:8px;background:#fff}
@@ -421,26 +451,32 @@ _JS = """(function () {
     document.querySelectorAll('.cal [data-tid]').forEach(function (el) {
       el.classList.toggle('done-chip', done.indexOf(el.dataset.tid) >= 0);
     });
-    var list = document.querySelector('ul.todos');
-    if (!list) return;
-    var items = Array.prototype.slice.call(list.querySelectorAll('li[data-tid]'));
-    // pinned first (keeping their relative order), the rest in rendered order
-    items.sort(function (a, b) {
-      var pa = pinned.indexOf(a.dataset.tid) >= 0 ? 0 : 1;
-      var pb = pinned.indexOf(b.dataset.tid) >= 0 ? 0 : 1;
-      return pa - pb || (+a.dataset.idx) - (+b.dataset.idx);
-    }).forEach(function (li) { list.appendChild(li); });
-
+    var lists = Array.prototype.slice.call(document.querySelectorAll('ul.todos'));
+    if (!lists.length) return;
     var hidden = 0;
-    items.forEach(function (li) {
-      var id = li.dataset.tid;
-      var isDone = done.indexOf(id) >= 0, isPin = pinned.indexOf(id) >= 0;
-      if (isDone) hidden++;
-      li.classList.toggle('done-item', isDone);
-      li.classList.toggle('pinned', isPin);
-      var pb = li.querySelector('.b-pin'), db = li.querySelector('.b-done');
-      if (pb) pb.textContent = isPin ? '\\ud83d\\udccc Unpin' : '\\ud83d\\udccc Pin';
-      if (db) db.textContent = isDone ? '\\u21a9 Restore' : '\\u2713 Done';
+    lists.forEach(function (list) {  // one ul per embedded day group
+      var items = Array.prototype.slice.call(list.querySelectorAll('li[data-tid]'));
+      // pinned first within their day (keeping relative order), rest as rendered
+      items.sort(function (a, b) {
+        var pa = pinned.indexOf(a.dataset.tid) >= 0 ? 0 : 1;
+        var pb = pinned.indexOf(b.dataset.tid) >= 0 ? 0 : 1;
+        return pa - pb || (+a.dataset.idx) - (+b.dataset.idx);
+      }).forEach(function (li) { list.appendChild(li); });
+
+      var allDone = items.length > 0;
+      items.forEach(function (li) {
+        var id = li.dataset.tid;
+        var isDone = done.indexOf(id) >= 0, isPin = pinned.indexOf(id) >= 0;
+        if (isDone) hidden++; else allDone = false;
+        li.classList.toggle('done-item', isDone);
+        li.classList.toggle('pinned', isPin);
+        var pb = li.querySelector('.b-pin'), db = li.querySelector('.b-done');
+        if (pb) pb.textContent = isPin ? '\\ud83d\\udccc Unpin' : '\\ud83d\\udccc Pin';
+        if (db) db.textContent = isDone ? '\\u21a9 Restore' : '\\u2713 Done';
+      });
+      // a day whose todos are all done disappears with them
+      var group = list.closest ? list.closest('details.t-day') : null;
+      if (group) group.classList.toggle('all-done', allDone);
     });
     var bar = document.getElementById('todo-hidden-bar');
     if (bar) {
