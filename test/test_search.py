@@ -1,6 +1,7 @@
 from assistant import search as search_mod
 from assistant.actions import run_action
-from assistant.search import _real_url, fetch_page, format_results, web_search
+from assistant.search import (_real_url, fetch_page, format_results, web_search,
+                              web_search_answer)
 
 _DDG_PAGE = """<html><body><table>
 <tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=x" class='result-link'>First &amp; Best</a></td></tr>
@@ -35,6 +36,52 @@ def test_search_failures_degrade_to_empty(monkeypatch):
     monkeypatch.setattr(search_mod.httpx, "get",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")))
     assert fetch_page("https://x") == ""
+
+
+def test_gemini_grounding_preferred_and_falls_back(settings, monkeypatch):
+    class GeminiResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"candidates": [{
+                "content": {"parts": [{"text": "Grounded answer."}]},
+                "groundingMetadata": {"groundingChunks": [
+                    {"web": {"uri": "https://src1", "title": "src1.com"}},
+                    {"other": {}}]}}]}
+
+    urls = []
+    monkeypatch.setattr(search_mod.httpx, "post",
+                        lambda url, **k: urls.append(url) or GeminiResp())
+    s = settings.model_copy(update={"gemini_api_key": "gm", "tavily_api_key": "tv"})
+    out = web_search_answer("q", settings=s)
+    assert "generativelanguage.googleapis.com" in urls[0]
+    assert "gemini-2.5-flash" in urls[0]
+    assert out["answer"] == "Grounded answer."
+    assert out["results"] == [{"title": "src1.com", "url": "https://src1", "snippet": ""}]
+    # gemini failing → next backend (tavily here) still serves
+    def boom(url, **k):
+        if "generativelanguage" in url:
+            raise RuntimeError("quota")
+        class TavilyResp:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"results": [{"title": "T", "url": "https://t", "content": "c"}]}
+        return TavilyResp()
+    monkeypatch.setattr(search_mod.httpx, "post", boom)
+    assert web_search_answer("q", settings=s)["results"][0]["title"] == "T"
+
+
+def test_web_search_action_uses_grounded_answer(settings, monkeypatch):
+    monkeypatch.setattr(
+        "assistant.search.web_search_answer",
+        lambda q, max_results=8, settings=None: {
+            "answer": "It is 42.",
+            "results": [{"title": "hitchhikers.com", "url": "https://h", "snippet": ""}]})
+    result = run_action("web_search", {"query": "meaning of life"}, settings)
+    assert result.startswith("It is 42.")
+    assert "sources:" in result and "https://h" in result
 
 
 def test_google_backend_and_fallback_chain(settings, monkeypatch):
@@ -82,9 +129,11 @@ def test_tavily_used_when_key_present(settings, monkeypatch):
 
 
 def test_web_search_action_synthesizes(settings, monkeypatch):
-    monkeypatch.setattr("assistant.search.web_search",
-                        lambda q, max_results=8, settings=None: [
-                            {"title": "Doc", "url": "https://d", "snippet": "answer here"}])
+    monkeypatch.setattr("assistant.search.web_search_answer",
+                        lambda q, max_results=8, settings=None: {
+                            "answer": "",
+                            "results": [{"title": "Doc", "url": "https://d",
+                                         "snippet": "answer here"}]})
 
     class FakeLLM:
         def __init__(self, settings):
@@ -102,8 +151,8 @@ def test_web_search_action_synthesizes(settings, monkeypatch):
                         lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("api")))
     assert "top results:" in run_action("web_search", {"query": "what is X"}, settings)
     # no results → honest message
-    monkeypatch.setattr("assistant.search.web_search",
-                        lambda q, max_results=8, settings=None: [])
+    monkeypatch.setattr("assistant.search.web_search_answer",
+                        lambda q, max_results=8, settings=None: {"answer": "", "results": []})
     assert "returned nothing" in run_action("web_search", {"query": "zzz"}, settings)
 
 

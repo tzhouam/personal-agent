@@ -152,10 +152,14 @@ Answer in the language the owner used. Plain text, no markdown headings."""
 
 def _web_search(settings: Settings, p: dict) -> str:
     from .llm import LLM
-    from .search import format_results, web_search
+    from .search import format_results, web_search_answer
 
     query = str(p.get("query", "")).strip()
-    results = web_search(query, max_results=8, settings=settings)
+    out = web_search_answer(query, max_results=8, settings=settings)
+    results = out["results"]
+    if out["answer"]:  # grounded backend (Gemini) already searched + answered
+        sources = "\n".join(f"- {r['title']} {r['url']}" for r in results[:5])
+        return out["answer"] + (f"\n\nsources:\n{sources}" if sources else "")
     if not results:
         return f"web search for {query!r} returned nothing (backend may be rate-limited — try again)"
     try:

@@ -53,6 +53,30 @@ def _search_ddg(query: str, max_results: int) -> list[dict]:
     return results
 
 
+def _search_gemini(query: str, api_key: str, model: str) -> dict:
+    """Gemini API 'grounding with Google Search' — Google's post-CSE way to
+    search the whole web with one AI Studio key. Returns the grounded ANSWER
+    plus its cited sources in a single call (free tier: ~1500/day on
+    2.5-class models)."""
+    resp = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        params={"key": api_key},
+        json={"contents": [{"parts": [{"text": query}]}],
+              "tools": [{"google_search": {}}]},
+        timeout=45)
+    resp.raise_for_status()
+    candidate = (resp.json().get("candidates") or [{}])[0]
+    answer = " ".join(p.get("text", "")
+                      for p in candidate.get("content", {}).get("parts", [])).strip()
+    results = []
+    for chunk in candidate.get("groundingMetadata", {}).get("groundingChunks", []):
+        web = chunk.get("web") or {}
+        if web.get("uri"):
+            results.append({"title": web.get("title", ""), "url": web["uri"],
+                            "snippet": ""})
+    return {"answer": answer, "results": results}
+
+
 def _search_google(query: str, max_results: int, api_key: str, cse_id: str) -> list[dict]:
     """Google Programmable Search (Custom Search JSON API) — free tier is
     100 queries/day; needs an API key AND a search-engine id (cx)."""
@@ -77,30 +101,42 @@ def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict]:
             for r in resp.json().get("results", [])]
 
 
+def web_search_answer(query: str, max_results: int = 8,
+                      settings: Settings | None = None) -> dict:
+    """{"answer": str, "results": [{title, url, snippet}]} — answer is
+    non-empty only when a grounded backend (Gemini) produced one; plain
+    backends return results for the caller to synthesize. Both empty on
+    total failure (callers degrade)."""
+    query = str(query).strip()
+    if not query:
+        return {"answer": "", "results": []}
+    get = (lambda name: getattr(settings, name, "") if settings else "")
+    backends = []
+    if get("gemini_api_key"):
+        backends.append(("gemini", lambda: _search_gemini(
+            query, get("gemini_api_key"),
+            get("gemini_search_model") or "gemini-2.5-flash")))
+    if get("google_api_key") and get("google_cse_id"):
+        backends.append(("google", lambda: {"answer": "", "results": _search_google(
+            query, max_results, get("google_api_key"), get("google_cse_id"))}))
+    if get("tavily_api_key"):
+        backends.append(("tavily", lambda: {"answer": "", "results": _search_tavily(
+            query, max_results, get("tavily_api_key"))}))
+    backends.append(("ddg", lambda: {"answer": "", "results": _search_ddg(query, max_results)}))
+    for name, backend in backends:  # keyed backends first, DDG as the safety net
+        try:
+            out = backend()
+            if out.get("answer") or out.get("results"):
+                return out
+        except Exception as exc:
+            log.warning("web search via %s failed for %r: %s", name, query, exc)
+    return {"answer": "", "results": []}
+
+
 def web_search(query: str, max_results: int = 8,
                settings: Settings | None = None) -> list[dict]:
     """[{title, url, snippet}] — empty list on any failure (callers degrade)."""
-    query = str(query).strip()
-    if not query:
-        return []
-    google_key = getattr(settings, "google_api_key", "") if settings else ""
-    google_cx = getattr(settings, "google_cse_id", "") if settings else ""
-    tavily_key = getattr(settings, "tavily_api_key", "") if settings else ""
-    backends = []
-    if google_key and google_cx:
-        backends.append(("google", lambda: _search_google(query, max_results,
-                                                          google_key, google_cx)))
-    if tavily_key:
-        backends.append(("tavily", lambda: _search_tavily(query, max_results, tavily_key)))
-    backends.append(("ddg", lambda: _search_ddg(query, max_results)))
-    for name, backend in backends:  # keyed backend first, DDG as the safety net
-        try:
-            results = backend()
-            if results:
-                return results
-        except Exception as exc:
-            log.warning("web search via %s failed for %r: %s", name, query, exc)
-    return []
+    return web_search_answer(query, max_results, settings)["results"]
 
 
 def fetch_page(url: str, max_chars: int = 3000) -> str:

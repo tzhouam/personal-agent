@@ -91,7 +91,11 @@ class Settings(BaseSettings):
 
     # Web search (chat `web_search` action + plan_task enrichment) — works
     # keyless via DuckDuckGo Lite. Preferred backends when keys are present:
-    # Google Programmable Search (needs BOTH key and engine id) > Tavily > DDG.
+    # Gemini grounding (one AI Studio key, search+answer in one call, free
+    # 1500/day on 2.5-class) > Google CSE (key + cx; whole-web deprecated for
+    # new engines since 2026-01) > Tavily > DDG.
+    gemini_api_key: str = ""
+    gemini_search_model: str = "gemini-2.5-flash"
     google_api_key: str = ""
     google_cse_id: str = ""   # Programmable Search Engine id ("cx")
     tavily_api_key: str = ""
