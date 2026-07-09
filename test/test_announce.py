@@ -25,7 +25,7 @@ def test_sent_passes_exact_cli_args(settings, tmp_path):
     assert announce_digest(s, "Daily digest done.") == "sent"
     args = (tmp_path / "args.txt").read_text().splitlines()
     assert args == ["message", "send", "--channel", "openclaw-weixin",
-                    "--account", "acct-1", "--to", "owner-id",
+                    "--account", "acct-1", "--target", "owner-id",
                     "-m", "Daily digest done."]
 
 

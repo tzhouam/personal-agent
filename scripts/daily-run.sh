@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Daily pipeline entry for OpenClaw command-cron (replaces the scheduler.sh loop).
 # stdout is the announce message (delivered to WeChat when the cron job has
-# --announce) so it must stay ONE short line; full pipeline output goes to
-# ~/.personal-agent/daily-run.log. Exit code: 0 only when the run finished,
-# so cron run history records error (and can alert) on a stuck pipeline.
+# --announce). Since 2026-07-09 the deliver phase announces successes itself
+# (WECHAT_ANNOUNCE in .env), so this script is SILENT on success and only
+# emits a line on failure — the cron announce is the failure channel. Full
+# pipeline output goes to ~/.personal-agent/daily-run.log. Exit code: 0 only
+# when the run finished, so cron run history records error on a stuck pipeline.
 set -u
 # The container clock is UTC and OpenClaw cron fires at 23:00 UTC (= 07:00
 # HKT). Pin the owner's zone so date.today()/run ids/digest dates match his
@@ -40,15 +42,7 @@ except Exception:
     st = {}
 run_id, phase = st.get("run_id", "?"), st.get("phase", "?")
 if rc == 0 and phase in (None, "done"):
-    extra = ""
-    try:
-        dg = json.loads((d / "runs" / run_id / "digest.json").read_text())
-        n = sum(len(v) for v in dg.get("sections", {}).values())
-        extra = f", {n} digest items"
-    except Exception:
-        pass
-    print(f"Daily digest done ({run_id}{extra}). Full digest in your email.")
-    sys.exit(0)
+    sys.exit(0)  # silent — the pipeline's deliver phase announces success itself
 print(f"Daily run {run_id} stuck at phase '{phase}' — check ~/.personal-agent/daily-run.log")
 sys.exit(rc or 1)
 EOF

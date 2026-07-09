@@ -118,12 +118,13 @@ LLM-synthesized with source URLs).
 
 The OpenClaw gateway is the single runtime: its SQLite-persisted **command
 cron** runs [`scripts/daily-run.sh`](scripts/daily-run.sh) (`run || run
---resume`, full logs → `~/.personal-agent/daily-run.log`, stdout = the one-line
-WeChat announce) at 07:00 Asia/Hong_Kong, and the bridge plugin supervises
-`assistant serve` as a gateway service. The deliver phase can also announce
-to WeChat itself (`WECHAT_ANNOUNCE=true` + `ANNOUNCE_ACCOUNT`/`ANNOUNCE_TO`
-in `.env`) so manual and chat-triggered runs ping too — enable it only after
-removing `--announce` from the cron job, or 07:00 pings twice. Job management:
+--resume`, full logs → `~/.personal-agent/daily-run.log`) at 07:00
+Asia/Hong_Kong, and the bridge plugin supervises `assistant serve` as a
+gateway service. Announce split (since 2026-07-09): the **deliver phase
+announces successes** to WeChat itself (`WECHAT_ANNOUNCE=true` in `.env`, so
+manual and chat-triggered runs ping too), while the cron job's `--announce`
+carries **failures only** — `daily-run.sh` is silent on success and emits a
+line only when a run gets stuck. Job management:
 
 ```bash
 export PATH=/opt/node24/bin:$PATH
