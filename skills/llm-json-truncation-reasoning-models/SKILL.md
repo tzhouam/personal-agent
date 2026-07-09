@@ -5,8 +5,8 @@ trigger: complete_json / structured-output call raises "no JSON object or array 
 modules: [llm]
 status: active
 created_at: 2026-07-02
-last_used_at: 2026-07-02
-run_count: 0
+last_used_at: 2026-07-09
+run_count: 1
 ---
 
 ## Diagnose
@@ -20,7 +20,9 @@ run_count: 0
 
 ## Fix
 1. Give JSON calls a generous budget: 1500+ for tiny outputs, 8000 for anything
-   substantial (`src/assistant/llm.py`, `tasks/profile_update.py`).
+   substantial, 16000 for op emission over large prompts
+   (`src/assistant/llm.py`, `tasks/profile_update.py`; 2026-07-09: enrich
+   backfill batches truncated at 8000 — the first batch silently yielded 0 ops).
 2. Log truncation explicitly so the failure is diagnosable, not silent:
    `if resp.stop_reason == "max_tokens": log.warning(...)` (`llm.py:complete`).
 3. Keep the one-shot JSON retry with the parse error fed back — it fixes format

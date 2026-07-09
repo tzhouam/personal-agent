@@ -35,6 +35,8 @@ Rules:
 - WRITE GATE: transient one-offs (a single page visit, a lone drive-by comment, routine bot
   activity) get NO op at all — they stay in the raw event log. Evidence must advance a skill,
   project, or initiative.
+- The Repo context section (if present) is background only — use it to name projects correctly
+  and understand their purpose, never as evidence of the owner's activity.
 - Prefer bump_last_seen / add_evidence on existing entries over creating new ones.
 - New skills/interests only when observations show sustained or significant engagement, not a single visit.
 - Respect preferences.avoid_topics: never add or reactivate skills/interests/projects in those
@@ -42,7 +44,14 @@ Rules:
 - At most 15 ops. Empty ops list is a valid answer for an uneventful day."""
 
 
-def update_profile(llm: LLM, store: ProfileStore, observations: list[dict]) -> dict:
+def update_profile(llm: LLM, store: ProfileStore, observations: list[dict],
+                   context: str = "", backfill: bool = False) -> dict:
+    """``context`` is optional background (repo descriptions/READMEs from the
+    enrich backfill) injected as a labeled non-evidence block — a prompt param
+    rather than an observation so it reaches every batch un-clipped and can
+    never be cited as the owner's activity. ``backfill`` reframes the
+    observations as intentionally-old history so the model doesn't dismiss
+    them as stale (the daily framing made a backfill batch emit 0 ops)."""
     profile = store.load()
     today = date.today().isoformat()
 
@@ -64,15 +73,27 @@ def update_profile(llm: LLM, store: ProfileStore, observations: list[dict]) -> d
         f"{yaml.safe_dump(profile, sort_keys=False, allow_unicode=True)}\n```\n\n"
         f"## Known initiatives (join keys — attach matching work here)\n"
         f"{render_initiatives(aliases)}\n\n"
-        f"## Ops applied in the last 7 days (the arc your update continues)\n"
+        + (f"## Repo context (background about repos the owner works in — "
+           f"descriptions/READMEs, NOT the owner's activity; never cite as evidence)\n"
+           f"{context}\n\n" if context else "")
+        + f"## Ops applied in the last 7 days (the arc your update continues)\n"
         + ("\n".join(ops_lines) or "(none)")
-        + f"\n\n## Today's observations ({len(observations)} total"
+        + ("\n\n## Historical observations — HISTORY BACKFILL"
+           f" ({len(observations)} total"
+           if backfill else f"\n\n## Today's observations ({len(observations)} total")
         + (f", showing first {_MAX_OBSERVATIONS}" if dropped else "")
         + ")\n"
+        + ("These observations are intentionally OLD: capture anything the profile does not "
+           "already contain, regardless of date. Do not skip an item merely because it is old "
+           "or looks like it might be covered — check the profile text and add what is missing.\n"
+           if backfill else "")
         + ("\n".join(obs_lines) or "(no activity observed)")
     )
 
-    result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=8000)
+    # 16000: reasoning models spend a large invisible budget thinking before
+    # the JSON; 8000 truncated on backfill batches (see skill
+    # llm-json-truncation-reasoning-models)
+    result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=16000)
     ops = result.get("ops", []) if isinstance(result, dict) else []
 
     profile, applied, rejected = store.apply_ops(profile, ops, today=today)

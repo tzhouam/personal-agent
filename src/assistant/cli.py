@@ -113,12 +113,29 @@ def cmd_reading(settings: Settings, args) -> int:
     return 1
 
 
-def cmd_enrich_profile(settings: Settings) -> int:
-    """One-shot backfill: read the owner's full authored PR/issue/RFC history
-    and fold it into the profile in batches."""
-    from .collectors.github import GitHubCollector
+def cmd_enrich_profile(settings: Settings, args) -> int:
+    """History backfill: sweep everything the owner authored, reviewed, and
+    (optionally) commented on since --since, add per-repo commit summaries and
+    repo background context, and fold it all into the profile chronologically.
+    Finishes with the editorial consolidation pass unless --no-consolidate.
+
+    Rate budget: ~5-6 search requests (paced by _SEARCH_PAGE_DELAY for the
+    30/min search limit) + <=40 repo/readme + <=35 commit-page calls against
+    the 5000/hr core limit — no backoff machinery needed."""
+    import re as _re
+    from collections import Counter
+    from datetime import datetime, timezone
+
+    from .collectors.github import GitHubCollector, summarize_commits
+    from .events_store import EventsStore
     from .llm import LLM
     from .tasks.profile_update import update_profile
+
+    if not _re.fullmatch(r"\d{4}-\d{2}", args.since):
+        print(f"invalid --since {args.since!r} — expected YYYY-MM (e.g. 2025-07)")
+        return 1
+    year, month = args.since.split("-")
+    since = datetime(int(year), int(month), 1, tzinfo=timezone.utc)
 
     gh = GitHubCollector(settings)
     llm = LLM(settings)
@@ -127,17 +144,79 @@ def cmd_enrich_profile(settings: Settings) -> int:
         print("no profile yet — run `assistant bootstrap` first")
         return 1
 
-    items = gh.fetch_authored_items(since=None, max_items=200)
-    print(f"fetched {len(items)} authored PRs/issues/RFCs")
+    observations = gh.fetch_authored_items(since=since, max_items=None)
+    print(f"authored PRs/issues/RFCs since {args.since}: {len(observations)}")
+    reviewed = gh.fetch_reviewed_items(since=since)
+    print(f"reviewed (not authored): {len(reviewed)}")
+    observations += reviewed
+    if args.include_comments:
+        commented = gh.fetch_commented_items(since=since)
+        print(f"commented (not authored/reviewed): {len(commented)}")
+        observations += commented
+
+    # repos worth understanding: active owned repos ∪ repos seen in observations
+    owned = [r for r in gh.fetch_recent_repos(limit=100) if not r.get("fork")]
+    active_owned = [r["full_name"] for r in owned
+                    if (r.get("pushed_at") or "") >= since.date().isoformat()]
+    seen_repos = Counter(e for o in observations for e in o.get("entities", []) if e)
+    repo_set = list(dict.fromkeys(  # active owned first, then by activity volume
+        active_owned + [r for r, _ in seen_repos.most_common()]))[:20]
+
+    context_lines = []
+    for repo in repo_set:
+        ctx = gh.fetch_repo_context(repo)
+        if ctx is None:
+            print(f"  warning: {repo} unreachable with this token (private?) — skipping context")
+            continue
+        context_lines.append(
+            f"- {ctx['repo']}: {ctx['description'] or '(no description)'}"
+            + (f" | topics: {', '.join(ctx['topics'])}" if ctx["topics"] else "")
+            + (f" | README: {ctx['readme']}" if ctx["readme"] else ""))
+    repo_context = "\n".join(context_lines)
+    print(f"repo context built for {len(context_lines)}/{len(repo_set)} repos")
+
+    for repo in active_owned:  # direct-push work has no PR trail — use commits
+        commits = gh.fetch_repo_commits(repo, since)
+        if commits is None:
+            print(f"  warning: commits for {repo} not accessible with this token — skipped")
+            continue
+        observations += summarize_commits(repo, commits)
+
+    events = EventsStore(settings.events_db)
+    stored = events.add_observations(f"enrich-{date.today().isoformat()}",
+                                     observations, dedupe=True)
+    events.close()
+    print(f"{len(observations)} observations ({len(stored)} new in events.db)")
+
+    # ascending so the profile evolves in temporal order, oldest arc first
+    observations.sort(key=lambda o: o.get("ts", ""))
     total_ops = 0
     batch_size = 60  # keep each LLM pass well under the observation cap
-    for start in range(0, len(items), batch_size):
-        result = update_profile(llm, store, items[start:start + batch_size])
+    batches = range(0, len(observations), batch_size)
+    for i, start in enumerate(batches, 1):
+        try:
+            result = update_profile(llm, store, observations[start:start + batch_size],
+                                    context=repo_context, backfill=True)
+        except Exception as exc:  # one failed batch must not lose the run
+            print(f"batch {i}/{len(batches)}: FAILED ({exc}) — continuing")
+            continue
         total_ops += len(result["profile_ops"])
-        print(f"batch {start // batch_size + 1}: {len(result['profile_ops'])} ops applied"
+        print(f"batch {i}/{len(batches)}: {len(result['profile_ops'])} ops applied, "
+              f"{len(result['rejected_ops'])} rejected"
               + (f" — {result['notes']}" if result.get("notes") else ""))
-    print(f"done: {total_ops} ops total. Review with `assistant show-profile` or "
-          f"`git -C {settings.profile_dir} log -p`")
+
+    print(f"backfill done: {total_ops} ops total")
+    if not args.no_consolidate:
+        from .tasks.profile_consolidate import consolidate_profile
+
+        result = consolidate_profile(llm, store, settings)
+        print(f"consolidation: {len(result['applied'])} ops applied, "
+              f"{len(result['rejected'])} rejected"
+              + (f" — {result['notes']}" if result["notes"] else ""))
+        if result["diff"]:
+            print(result["diff"][:6000])
+    print(f"review: `assistant show-profile` / `git -C {settings.profile_dir} log -p`; "
+          f"rollback any step with `git -C {settings.profile_dir} revert <commit>`")
     return 0
 
 
@@ -197,7 +276,16 @@ def main() -> None:
     sub.add_parser("bootstrap", help="seed the profile from GitHub (first run only)")
     sub.add_parser("show-profile", help="print a summary of the current profile")
     sub.add_parser("send-test-email", help="verify email delivery")
-    sub.add_parser("enrich-profile", help="backfill the profile from all authored PRs/issues/RFCs")
+
+    enrich_p = sub.add_parser("enrich-profile",
+                              help="backfill the profile from GitHub history "
+                                   "(authored + reviewed + commits + repo context)")
+    enrich_p.add_argument("--since", default="2025-07", metavar="YYYY-MM",
+                          help="start of the backfill window (default 2025-07)")
+    enrich_p.add_argument("--include-comments", action="store_true",
+                          help="also sweep commented-not-reviewed PRs/issues (noisier)")
+    enrich_p.add_argument("--no-consolidate", action="store_true",
+                          help="skip the final editorial consolidation pass")
     sub.add_parser("resume-init", help="clone/init the resume repo (Overleaf git bridge)")
     sub.add_parser("resume-status", help="show any resume update pending approval")
     sub.add_parser("approve-resume", help="push the pending resume update to the remote")
@@ -243,7 +331,7 @@ def main() -> None:
     elif args.command == "send-test-email":
         sys.exit(cmd_test_email(settings))
     elif args.command == "enrich-profile":
-        sys.exit(cmd_enrich_profile(settings))
+        sys.exit(cmd_enrich_profile(settings, args))
     elif args.command == "resume-init":
         sys.exit(cmd_resume_init(settings))
     elif args.command == "resume-status":

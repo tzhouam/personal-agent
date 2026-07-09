@@ -39,9 +39,21 @@ class EventsStore:
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
 
-    def add_observations(self, run_id: str, observations: list[dict]) -> list[int]:
+    def add_observations(self, run_id: str, observations: list[dict],
+                         dedupe: bool = False) -> list[int]:
+        """``dedupe=True`` (backfill/enrich re-runs) skips rows identical in
+        (source, kind, title, url); the daily path keeps appending as-is —
+        a state change (e.g. [open]→[merged]) alters the title, so it still
+        inserts, which is new information, not a duplicate."""
         ids = []
         for obs in observations:
+            if dedupe and self.conn.execute(
+                "SELECT 1 FROM observations WHERE source=? AND kind=? AND title=?"
+                " AND ifnull(url,'')=? LIMIT 1",
+                (obs.get("source", ""), obs.get("kind", ""), obs.get("title", ""),
+                 obs.get("url") or ""),
+            ).fetchone():
+                continue
             cur = self.conn.execute(
                 "INSERT INTO observations (run_id, source, ts, kind, title, url, entities, raw)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

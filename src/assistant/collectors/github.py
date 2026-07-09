@@ -1,4 +1,7 @@
+import base64
 import re
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 
 import httpx
@@ -7,6 +10,8 @@ from ..config import Settings
 from . import register
 
 API = "https://api.github.com"
+_SEARCH_PAGE_DELAY = 2.1  # search API = 30 req/min authenticated; 0 in tests
+_SEARCH_MAX_PAGES = 10    # search API hard-caps at 1000 results
 
 _EVENT_KINDS = {
     "PushEvent": "commit",
@@ -111,18 +116,15 @@ class GitHubCollector:
         }
 
     # ── authored PRs / issues / RFCs (rich profile signal) ──────────
-    def fetch_authored_items(self, since: datetime | None = None,
-                             max_items: int = 100) -> list[dict]:
-        """Search-API sweep of everything the owner authored — PR and RFC bodies
-        carry far more profile signal than bare push events. since=None means
-        full history (used by `assistant enrich-profile`)."""
-        query = f"author:{self.user}"
-        if since is not None:
-            query += f" updated:>={since.date().isoformat()}"
+    def _search_issues(self, query: str, max_items: int | None = None) -> list[dict]:
+        """Paginated /search/issues sweep → raw items. max_items=None = full
+        sweep (bounded by the API's own 1000-result cap)."""
         items: list[dict] = []
-        for page in range(1, 4):
-            if len(items) >= max_items:
+        for page in range(1, _SEARCH_MAX_PAGES + 1):
+            if max_items is not None and len(items) >= max_items:
                 break
+            if page > 1 and _SEARCH_PAGE_DELAY:
+                time.sleep(_SEARCH_PAGE_DELAY)
             resp = self.client.get(
                 f"{API}/search/issues",
                 params={"q": query, "sort": "updated", "order": "desc",
@@ -132,8 +134,107 @@ class GitHubCollector:
             batch = resp.json().get("items", [])
             if not batch:
                 break
-            items.extend(self._issue_to_observation(item) for item in batch)
-        return items[:max_items]
+            items.extend(batch)
+            if page == _SEARCH_MAX_PAGES and len(batch) == 100:
+                print(f"warning: search hit the 1000-result cap for {query!r} — "
+                      "narrow the window to sweep the rest")
+        return items if max_items is None else items[:max_items]
+
+    def fetch_authored_items(self, since: datetime | None = None,
+                             max_items: int | None = 100) -> list[dict]:
+        """Search-API sweep of everything the owner authored — PR and RFC bodies
+        carry far more profile signal than bare push events. since=None means
+        full history, max_items=None means no cap (both used by
+        `assistant enrich-profile`)."""
+        query = f"author:{self.user}"
+        if since is not None:
+            query += f" updated:>={since.date().isoformat()}"
+        return [self._issue_to_observation(i)
+                for i in self._search_issues(query, max_items)]
+
+    def fetch_reviewed_items(self, since: datetime | None = None,
+                             max_items: int | None = None) -> list[dict]:
+        """PRs the owner reviewed but did not author — the 'core reviewer'
+        signal the events API loses after ~90 days."""
+        query = f"is:pr reviewed-by:{self.user} -author:{self.user}"
+        if since is not None:
+            query += f" updated:>={since.date().isoformat()}"
+        return [self._reviewed_to_observation(i, kind="pr_reviewed", verb="Reviewed")
+                for i in self._search_issues(query, max_items)]
+
+    def fetch_commented_items(self, since: datetime | None = None,
+                              max_items: int | None = None) -> list[dict]:
+        """PRs/issues the owner commented on without authoring or reviewing —
+        noisier than reviews, so callers gate it behind a flag."""
+        query = f"commenter:{self.user} -author:{self.user} -reviewed-by:{self.user}"
+        if since is not None:
+            query += f" updated:>={since.date().isoformat()}"
+        observations = []
+        for item in self._search_issues(query, max_items):
+            is_pr = "pull_request" in item
+            observations.append(self._reviewed_to_observation(
+                item,
+                kind="pr_commented" if is_pr else "issue_commented",
+                verb="Commented on"))
+        return observations
+
+    def _reviewed_to_observation(self, item: dict, kind: str, verb: str) -> dict:
+        repo = item.get("repository_url", "").replace("https://api.github.com/repos/", "")
+        noun = "PR" if "pull_request" in item else "issue"
+        snippet = " ".join((item.get("body") or "").split())[:400]
+        return {
+            "source": "github",
+            "ts": item.get("updated_at", ""),
+            "kind": kind,
+            "title": (f"{verb} {noun} in {repo}: {item.get('title', '')}"
+                      + (f" — {snippet}" if snippet else ""))[:600],
+            "url": item.get("html_url"),
+            "entities": [repo],
+            "raw": {"number": item.get("number")},
+        }
+
+    # ── repo understanding + commit history (enrich backfill) ───────
+    def fetch_repo_context(self, full_name: str) -> dict | None:
+        """Repo description/topics + README head, or None when the repo is
+        unreachable with this token (private → 404/403)."""
+        resp = self.client.get(f"{API}/repos/{full_name}")
+        if resp.status_code in (403, 404):
+            return None
+        resp.raise_for_status()
+        repo = resp.json()
+        readme = ""
+        readme_resp = self.client.get(f"{API}/repos/{full_name}/readme")
+        if readme_resp.status_code == 200:
+            content = base64.b64decode(readme_resp.json().get("content", "") or "")
+            readme = " ".join(content.decode("utf-8", errors="replace").split())[:400]
+        return {
+            "repo": full_name,
+            "description": repo.get("description") or "",
+            "topics": repo.get("topics", []) or [],
+            "language": repo.get("language") or "",
+            "readme": readme,
+        }
+
+    def fetch_repo_commits(self, full_name: str, since: datetime) -> list[dict] | None:
+        """Author-filtered commits since `since`. None = repo unreachable with
+        this token (404/403); [] = reachable but empty (409 = empty repo)."""
+        commits: list[dict] = []
+        for page in range(1, 6):
+            resp = self.client.get(
+                f"{API}/repos/{full_name}/commits",
+                params={"author": self.user, "since": since.isoformat(),
+                        "per_page": 100, "page": page},
+            )
+            if resp.status_code in (403, 404):
+                return None
+            if resp.status_code == 409:  # empty repository
+                return []
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            commits.extend(batch)
+        return commits
 
     def _issue_to_observation(self, item: dict) -> dict:
         is_pr = "pull_request" in item
@@ -245,12 +346,41 @@ class GitHubCollector:
         return resp.json()
 
     def fetch_recent_repos(self, limit: int = 30) -> list[dict]:
+        # /user/repos (authenticated) rather than /users/{name}/repos: the
+        # latter only lists public repos, silently hiding private-repo work
+        # (e.g. bde-private) from the enrich backfill.
         resp = self.client.get(
-            f"{API}/users/{self.user}/repos",
+            f"{API}/user/repos",
             params={"sort": "pushed", "per_page": limit, "type": "owner"},
         )
         resp.raise_for_status()
         return resp.json()
+
+
+def summarize_commits(repo: str, commits: list[dict], top_subjects: int = 3) -> list[dict]:
+    """Aggregate raw commit dicts into one observation per repo-month —
+    direct-push work (no PR trail) still becomes profile signal."""
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    for commit in commits:
+        date = ((commit.get("commit") or {}).get("author") or {}).get("date", "")
+        if date:
+            by_month[date[:7]].append(commit)
+    observations = []
+    for month in sorted(by_month):
+        batch = sorted(by_month[month], key=lambda c: c["commit"]["author"]["date"],
+                       reverse=True)
+        subjects = "; ".join(
+            c["commit"].get("message", "").splitlines()[0] for c in batch[:top_subjects])
+        observations.append({
+            "source": "github",
+            "ts": batch[0]["commit"]["author"]["date"],
+            "kind": "commits_summary",
+            "title": f"Pushed {len(batch)} commit(s) to {repo} in {month}: {subjects}"[:300],
+            "url": f"https://github.com/{repo}",
+            "entities": [repo],
+            "raw": {"month": month, "count": len(batch)},
+        })
+    return observations
 
 
 def _split_item_url(html_url: str | None) -> tuple[str, str, str, str] | None:
