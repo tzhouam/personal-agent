@@ -90,7 +90,10 @@ class Settings(BaseSettings):
     website_repo: str = ""
 
     # Web search (chat `web_search` action + plan_task enrichment) — works
-    # keyless via DuckDuckGo Lite; set a Tavily key for a sturdier backend
+    # keyless via DuckDuckGo Lite. Preferred backends when keys are present:
+    # Google Programmable Search (needs BOTH key and engine id) > Tavily > DDG.
+    google_api_key: str = ""
+    google_cse_id: str = ""   # Programmable Search Engine id ("cx")
     tavily_api_key: str = ""
 
     # Research digest

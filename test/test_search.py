@@ -37,6 +37,32 @@ def test_search_failures_degrade_to_empty(monkeypatch):
     assert fetch_page("https://x") == ""
 
 
+def test_google_backend_and_fallback_chain(settings, monkeypatch):
+    class GoogleResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": [{"title": "G", "link": "https://g", "snippet": "sg"}]}
+
+    seen = []
+    monkeypatch.setattr(search_mod.httpx, "get",
+                        lambda url, **k: seen.append(url) or GoogleResp())
+    s = settings.model_copy(update={"google_api_key": "gk", "google_cse_id": "cx1"})
+    results = web_search("q", settings=s)
+    assert seen[0].startswith("https://www.googleapis.com/customsearch")
+    assert results == [{"title": "G", "url": "https://g", "snippet": "sg"}]
+    # key without cx → google skipped entirely, DDG used
+    seen.clear()
+    monkeypatch.setattr(search_mod, "_search_ddg", lambda q, n: [{"title": "D", "url": "u", "snippet": ""}])
+    s2 = settings.model_copy(update={"google_api_key": "gk"})
+    assert web_search("q", settings=s2)[0]["title"] == "D" and not seen
+    # google failing → falls back to DDG instead of returning nothing
+    monkeypatch.setattr(search_mod, "_search_google",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("quota")))
+    assert web_search("q", settings=s)[0]["title"] == "D"
+
+
 def test_tavily_used_when_key_present(settings, monkeypatch):
     calls = []
 

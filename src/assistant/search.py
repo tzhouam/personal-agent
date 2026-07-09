@@ -53,6 +53,19 @@ def _search_ddg(query: str, max_results: int) -> list[dict]:
     return results
 
 
+def _search_google(query: str, max_results: int, api_key: str, cse_id: str) -> list[dict]:
+    """Google Programmable Search (Custom Search JSON API) — free tier is
+    100 queries/day; needs an API key AND a search-engine id (cx)."""
+    resp = httpx.get("https://www.googleapis.com/customsearch/v1",
+                     params={"key": api_key, "cx": cse_id, "q": query,
+                             "num": min(max_results, 10)},
+                     timeout=20)
+    resp.raise_for_status()
+    return [{"title": item.get("title", ""), "url": item.get("link", ""),
+             "snippet": item.get("snippet", "")}
+            for item in resp.json().get("items", [])]
+
+
 def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict]:
     resp = httpx.post("https://api.tavily.com/search",
                       json={"api_key": api_key, "query": query,
@@ -70,14 +83,24 @@ def web_search(query: str, max_results: int = 8,
     query = str(query).strip()
     if not query:
         return []
-    try:
-        api_key = getattr(settings, "tavily_api_key", "") if settings else ""
-        if api_key:
-            return _search_tavily(query, max_results, api_key)
-        return _search_ddg(query, max_results)
-    except Exception as exc:
-        log.warning("web search failed for %r: %s", query, exc)
-        return []
+    google_key = getattr(settings, "google_api_key", "") if settings else ""
+    google_cx = getattr(settings, "google_cse_id", "") if settings else ""
+    tavily_key = getattr(settings, "tavily_api_key", "") if settings else ""
+    backends = []
+    if google_key and google_cx:
+        backends.append(("google", lambda: _search_google(query, max_results,
+                                                          google_key, google_cx)))
+    if tavily_key:
+        backends.append(("tavily", lambda: _search_tavily(query, max_results, tavily_key)))
+    backends.append(("ddg", lambda: _search_ddg(query, max_results)))
+    for name, backend in backends:  # keyed backend first, DDG as the safety net
+        try:
+            results = backend()
+            if results:
+                return results
+        except Exception as exc:
+            log.warning("web search via %s failed for %r: %s", name, query, exc)
+    return []
 
 
 def fetch_page(url: str, max_chars: int = 3000) -> str:
