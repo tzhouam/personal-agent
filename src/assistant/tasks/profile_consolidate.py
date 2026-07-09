@@ -55,7 +55,8 @@ Editorial rules:
    "Led…", "Built…". Follow the style of the STYLE REFERENCE below. Keep the strongest
    evidence URLs inside the highlight text.
 2. MERGE fragments: entries that are the same line of work (see initiatives) are merged into the
-   owning entry; misfiled evidence is moved to where it belongs BEFORE rewriting.
+   owning entry; misfiled evidence is moved to where it belongs BEFORE rewriting. An initiative's
+   own `entry` is canonical — merge fragments INTO it, never merge it into something else.
 3. DEDUPE: near-duplicate highlights/evidence collapse into the better-written one. Resolve
    contradictions (e.g. inconsistent RFC/PR numbers) in favor of the version supported by more
    evidence URLs; note unresolved ones in "notes".

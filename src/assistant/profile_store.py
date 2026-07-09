@@ -84,12 +84,22 @@ class ProfileStore:
                   allowed: set | None = None):
         today = today or date.today().isoformat()
         allowed = allowed or DAILY_OPS
+        # initiative-owning entries are canonical: fragments merge INTO them,
+        # they are never merged away (the consolidator once merged
+        # vllm-omni-copilot — the automation initiative's own entry — into
+        # vLLM-Omni; owner had to unmerge it)
+        canonical = {str(i.get("entry", i["name"])).strip().lower()
+                     for i in load_aliases(self.dir)}
         applied, rejected = [], []
         for op in ops:
             kind = op.get("op")
             section = op.get("section", "")
             if kind not in allowed or section in PROTECTED_SECTIONS:
                 rejected.append({**op, "reason": "disallowed op or protected section"})
+                continue
+            if kind == "merge_projects" \
+                    and str(op.get("from", "")).strip().lower() in canonical:
+                rejected.append({**op, "reason": "initiative-owning entry may not be merged away"})
                 continue
             try:
                 if self._apply_one(profile, op, kind, today):

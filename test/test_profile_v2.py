@@ -149,6 +149,22 @@ def test_confirmations_bump_and_daily_cannot_rewrite(tmp_path):
     assert "rewrite_entry" in CONSOLIDATE_OPS and "rewrite_entry" not in DAILY_OPS
 
 
+def test_canonical_initiative_entry_cannot_be_merged_away(tmp_path):
+    store = ProfileStore(tmp_path / "p")
+    store.dir.mkdir(parents=True, exist_ok=True)
+    (store.dir / "aliases.yaml").write_text(
+        "initiatives:\n  - name: Automation\n    entry: side-repo\n    patterns: [x]\n")
+    profile, applied, rejected = store.apply_ops(
+        fragmented_profile(),
+        [{"op": "merge_projects", "into": "main-project", "from": "side-repo"}])
+    assert not applied and rejected
+    assert rejected[0]["reason"] == "initiative-owning entry may not be merged away"
+    # the canonical entry can still absorb fragments
+    _, applied2, _ = store.apply_ops(
+        profile, [{"op": "merge_projects", "into": "side-repo", "from": "docs-repo"}])
+    assert applied2
+
+
 def test_rewrite_skill_evidence_only(tmp_path):
     """Skills hold evidence, not highlights — an evidence/level rewrite must
     work without highlights, and stripping everything must not."""
