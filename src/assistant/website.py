@@ -67,7 +67,7 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
         ("education.html", "Education", _education_html(profile.get("education", []))),
         ("projects.html", "Projects", _projects_html(actives("projects"))),
         ("todos.html", "Todos", _render_calendar(todos, today)),
-        ("reading.html", "Reading", _render_reading(reading or [], today)),
+        ("reading.html", "Reading", _render_reading(reading or [], today, agent_mail=(ident.get('emails') or [''])[0])),
         ("routines.html", "Routines", _render_routines(routines or [], reminders or [])),
     ]
 
@@ -292,11 +292,16 @@ def _render_calendar(todos: list[dict], today: date) -> str:
     return "".join(parts)
 
 
-def _render_reading(reading: list[dict], today: date) -> str:
+def _render_reading(reading: list[dict], today: date, agent_mail: str = "") -> str:
     """The reading list, presented like the todo list: a scrollable list of
     collapsible day groups (by surfaced date, newest first) with owner-only
-    pin/done buttons — reading ids (r#) share the todos' localStorage marks."""
-    parts = ["<section id='reading' class='card'><h2>Reading list</h2>"]
+    pin/done buttons — reading ids (r#) share the todos' localStorage marks.
+    The extra 🚫 Unrelated button hides the item immediately AND opens a
+    prefilled "agent: …" mail so the mark reaches the canonical store and
+    biases the research scorer (the page itself is static — mail is the
+    existing owner→agent channel)."""
+    parts = [f"<section id='reading' class='card' data-agent-mail='{html.escape(agent_mail)}'>"
+             "<h2>Reading list</h2>"]
     if not reading:
         parts.append("<p class='empty'>Nothing unread. 📚</p></section>")
         return "".join(parts)
@@ -321,7 +326,8 @@ def _render_reading(reading: list[dict], today: date) -> str:
             entry = {"id": item.get("id"), "title": item.get("title", ""),
                      "url": item.get("url"), "detail": item.get("why", ""),
                      "source": item.get("source", ""), "created": item.get("created", "")}
-            parts.append(_todo_li(entry, idx, today, stale_badge=False))
+            parts.append(_todo_li(entry, idx, today, stale_badge=False,
+                                  unrelated_btn=True))
             idx += 1
         parts.append("</ul></details>")
     parts.append("</div>")
@@ -365,7 +371,8 @@ def _render_routines(routines: list[dict], reminders: list[dict]) -> str:
     return "".join(parts)
 
 
-def _todo_li(todo: dict, idx: int, today: date, stale_badge: bool = True) -> str:
+def _todo_li(todo: dict, idx: int, today: date, stale_badge: bool = True,
+             unrelated_btn: bool = False) -> str:
     e = html.escape
     title = f"<b>{e(todo['title'])}</b>"
     if stale_badge and going_stale(todo, today):  # fading toward the 30-day expiry
@@ -379,10 +386,13 @@ def _todo_li(todo: dict, idx: int, today: date, stale_badge: bool = True) -> str
     due = f" · due {e(str(todo['due']))}" if todo.get("due") else ""
     detail = (f"<div class='t-detail'>{e(todo['detail'])}</div>"
               if todo.get("detail") else "")
+    unrel = ("<button class='b-unrel' title='Not relevant — hide now and teach "
+             "the digest to avoid similar topics'>🚫 Unrelated</button>"
+             if unrelated_btn else "")
     actions = ("<span class='t-actions'>"
                "<button class='b-pin' title='Pin to the top of the list'>📌 Pin</button>"
                "<button class='b-done' title='Mark done — hide on this page'>✓ Done</button>"
-               "</span>")
+               f"{unrel}</span>")
     return (f"<li data-tid='{e(str(todo.get('id', '')))}' data-idx='{idx}'>"
             f"{actions}{title} <span class='when'>({e(todo.get('source', ''))}, "
             f"since {e(todo.get('created', ''))}{due})</span>{detail}</li>")
@@ -504,6 +514,9 @@ ul.todos li.pinned{border-left-color:#f59e0b;
 ul.todos li.pinned .b-pin{background:#fef3c7;border-color:#fcd34d;color:#92400e}
 ul.todos li.done-item{display:none}
 body.show-hidden ul.todos li.done-item{display:block;opacity:.55}
+ul.todos li.unrel-item{display:none}
+body.show-hidden ul.todos li.unrel-item{display:block;opacity:.4;border-left-color:#9ca3af}
+.b-unrel{color:#6b7280}
 .cal .todo.done-chip{display:none}
 #todo-hidden-bar{display:none;color:#94a3b8;font-size:.85rem;margin-top:10px}
 footer{text-align:center;color:#94a3b8;font-size:.8rem;margin-top:36px}
@@ -515,6 +528,7 @@ main{margin-top:-36px}.card{padding:20px 18px}.grid{grid-template-columns:1fr}}
 
 _JS = """(function () {
   var DONE = 'agent-todos-done', PIN = 'agent-todos-pinned', OWNER = 'agent-owner';
+  var UNREL = 'agent-reading-unrelated';
   function load(k) { try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch (e) { return []; } }
   function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
   function toggle(k, id) {
@@ -537,6 +551,7 @@ _JS = """(function () {
     var owner = isOwner();
     document.body.classList.toggle('owner', owner);
     var done = owner ? load(DONE) : [], pinned = owner ? load(PIN) : [];
+    var unrel = owner ? load(UNREL) : [];
     // calendar chips of done todos disappear too
     document.querySelectorAll('.cal [data-tid]').forEach(function (el) {
       el.classList.toggle('done-chip', done.indexOf(el.dataset.tid) >= 0);
@@ -557,12 +572,16 @@ _JS = """(function () {
       items.forEach(function (li) {
         var id = li.dataset.tid;
         var isDone = done.indexOf(id) >= 0, isPin = pinned.indexOf(id) >= 0;
-        if (isDone) hidden++; else allDone = false;
+        var isUnrel = unrel.indexOf(id) >= 0;
+        if (isDone || isUnrel) hidden++; else allDone = false;
         li.classList.toggle('done-item', isDone);
+        li.classList.toggle('unrel-item', isUnrel);
         li.classList.toggle('pinned', isPin);
         var pb = li.querySelector('.b-pin'), db = li.querySelector('.b-done');
+        var ub = li.querySelector('.b-unrel');
         if (pb) pb.textContent = isPin ? '\\ud83d\\udccc Unpin' : '\\ud83d\\udccc Pin';
         if (db) db.textContent = isDone ? '\\u21a9 Restore' : '\\u2713 Done';
+        if (ub) ub.textContent = isUnrel ? '\\u21a9 Undo unrelated' : '\\ud83d\\udeab Unrelated';
       });
       // a day whose todos are all done disappears with them
       var group = list.closest ? list.closest('details.t-day') : null;
@@ -589,6 +608,20 @@ _JS = """(function () {
     if (!li) return;
     if (btn.classList.contains('b-pin')) toggle(PIN, li.dataset.tid);
     else if (btn.classList.contains('b-done')) toggle(DONE, li.dataset.tid);
+    else if (btn.classList.contains('b-unrel')) {
+      var id = li.dataset.tid;
+      var marking = load(UNREL).indexOf(id) < 0;
+      toggle(UNREL, id);
+      if (marking) {
+        // the static page can't reach the agent's store directly — hand the
+        // mark to the existing owner->agent mail channel, prefilled
+        var sec = li.closest('section');
+        var addr = sec && sec.dataset.agentMail;
+        if (addr) location.href = 'mailto:' + addr +
+          '?subject=' + encodeURIComponent('agent: reading unrelated ' + id) +
+          '&body=' + encodeURIComponent('Recorded from the website. Just hit send.');
+      }
+    }
     else return;
     apply();
   });

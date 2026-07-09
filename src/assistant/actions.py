@@ -77,6 +77,13 @@ def _list_reading(settings: Settings, p: dict) -> str:
     return "\n".join(lines) or "(reading list empty)"
 
 
+def _unrelated_reading(settings: Settings, p: dict) -> str:
+    item_id = str(p.get("id", ""))
+    ok = ReadingList(settings.profile_dir).mark_unrelated(item_id)
+    return (f"reading item {item_id} marked unrelated — the research digest will "
+            "avoid similar topics" if ok else f"no reading item {item_id!r}")
+
+
 def _trigger_run(settings: Settings, p: dict) -> str:
     state = load_state(settings.state_file) or {}
     if state.get("phase") not in (None, "done"):
@@ -327,6 +334,17 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         name="list_reading",
         description="list unread reading-list items",
         handler=_list_reading,
+        slash="read",
+    ),
+    Action(
+        name="unrelated_reading",
+        description="negative feedback: mark a surfaced reading as unrelated so "
+                    "future digests avoid similar topics",
+        handler=_unrelated_reading,
+        params={"id": {"required": True, "desc": "reading id, e.g. r5"}},
+        llm=True,
+        prompt_example='{"type": "unrelated_reading", "id": "r5"}   # owner says this '
+                       'should not have been surfaced',
         slash="read",
     ),
     Action(

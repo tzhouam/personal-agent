@@ -154,7 +154,9 @@ export function parseSlash(body) {
   if (!rest || rest === "list") return { action: "list_reading", params: {} };
   const done = rest.match(/^done\s+(\S+)$/);
   if (done) return { action: "done_reading", params: { id: done[1] } };
-  return { usage: "usage: /read [list] | /read done <id>" };
+  const unrel = rest.match(/^unrelated\s+(\S+)$/);
+  if (unrel) return { action: "unrelated_reading", params: { id: unrel[1] } };
+  return { usage: "usage: /read [list] | /read done <id> | /read unrelated <id>" };
 }
 
 async function handleSlash(parsed) {

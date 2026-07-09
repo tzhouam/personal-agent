@@ -110,6 +110,10 @@ def cmd_reading(settings: Settings, args) -> int:
         result = run_action("done_reading", {"id": args.value or ""}, settings)
         print(result)
         return 0 if "marked read" in result else 1
+    if args.action == "unrelated":
+        result = run_action("unrelated_reading", {"id": args.value or ""}, settings)
+        print(result)
+        return 0 if "marked unrelated" in result else 1
     return 1
 
 
@@ -369,9 +373,10 @@ def main() -> None:
     todo_p.add_argument("value", nargs="?", help="title for add, id (t3) for done")
     todo_p.add_argument("--due", help="due date YYYY-MM-DD (add only)")
 
-    reading_p = sub.add_parser("reading", help="manage the reading list: list / done")
-    reading_p.add_argument("action", choices=["list", "done"])
-    reading_p.add_argument("value", nargs="?", help="id (r3) for done")
+    reading_p = sub.add_parser("reading",
+                               help="manage the reading list: list / done / unrelated")
+    reading_p.add_argument("action", choices=["list", "done", "unrelated"])
+    reading_p.add_argument("value", nargs="?", help="id (r3) for done/unrelated")
 
     chat_p = sub.add_parser("chat-listen",
                             help="answer owner messages from email/WeCom (foreground loop)")

@@ -8,7 +8,7 @@ def test_registry_covers_the_llm_action_set():
     assert llm_actions == {"add_todo", "done_todo", "done_reading", "trigger_run",
                            "run_phase", "plan_task", "web_search",
                            "set_reminder", "cancel_reminder",
-                           "create_routine", "cancel_routine"}
+                           "create_routine", "cancel_routine", "unrelated_reading"}
     block = prompt_block()
     for name in llm_actions:
         assert name in block

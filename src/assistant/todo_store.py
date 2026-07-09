@@ -107,3 +107,21 @@ class TodoStore(_YamlItems):
 class ReadingList(_YamlItems):
     FILENAME = "reading_list.yaml"
     ID_PREFIX = "r"
+
+    def mark_unrelated(self, item_id: str) -> bool:
+        """Negative feedback: the owner says this should never have been
+        surfaced. Removed from the open list AND recorded so the research
+        scorer penalizes similar items next run."""
+        data = self.load()
+        for item in data["items"]:
+            if item["id"] == item_id and item["status"] != "unrelated":
+                item["status"] = "unrelated"
+                item["unrelated_at"] = date.today().isoformat()
+                self._save(data, f"{self.FILENAME}: {item_id} marked unrelated")
+                return True
+        return False
+
+    def unrelated_titles(self, limit: int = 20) -> list[str]:
+        """Most recent negative marks first — the research scorer's context."""
+        return [i.get("title", "") for i in reversed(self.load()["items"])
+                if i["status"] == "unrelated"][:limit]

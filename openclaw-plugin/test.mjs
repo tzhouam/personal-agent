@@ -52,6 +52,7 @@ const cases = [
   ["/todo add 复查 PR", { action: "add_todo", params: { title: "复查 PR", source: "wechat" } }],
   ["/read", { action: "list_reading", params: {} }],
   ["/read done r2", { action: "done_reading", params: { id: "r2" } }],
+  ["/read unrelated r5", { action: "unrelated_reading", params: { id: "r5" } }],
   ["/run research", { action: "run_phase", params: { phase: "research" }, timeoutMs: 90_000 }],
   ["/plan book a dinner for 6 on Friday",
    { action: "plan_task", params: { request: "book a dinner for 6 on Friday" }, timeoutMs: 120_000 }],

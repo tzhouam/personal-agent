@@ -16,6 +16,8 @@ would want in a daily research digest. Respond immediately with ONLY this JSON, 
 
 _SCORE_SYSTEM = """Score each item's relevance to the owner profile from 0 (irrelevant) to 10
 (must-read). Judge by topical overlap with their skills, interests, and active projects.
+If a "Rejected as unrelated" list is present, those are items the owner explicitly rejected —
+score anything topically similar to them 0-2.
 Respond with ONLY a JSON array: [{"idx": <int>, "score": <int>}] covering every idx given."""
 
 _SUMMARY_SYSTEM = """Write the research section of the owner's daily digest.
@@ -34,6 +36,14 @@ _MIN_SCORE = 6
 def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Settings) -> dict:
     profile_summary = render_summary(profile)
     health: dict[str, str] = {}
+
+    # negative feedback: readings the owner marked unrelated bias the scorer
+    from ..todo_store import ReadingList
+
+    negatives = ReadingList(settings.profile_dir).unrelated_titles()
+    if negatives:
+        profile_summary += ("\n\n## Rejected as unrelated by the owner recently\n"
+                            + "\n".join(f"- {t}" for t in negatives))
 
     # ── 1. gather candidates ─────────────────────────────────────────
     papers = _gather_papers(llm, profile, profile_summary, settings, health)
