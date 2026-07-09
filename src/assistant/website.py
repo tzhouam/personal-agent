@@ -35,10 +35,41 @@ _API = "https://api.github.com"
 
 
 # ── rendering ────────────────────────────────────────────────────────
+_PROTECTED_PAGES = {"todos.html", "reading.html", "routines.html"}
+_PBKDF2_ITERATIONS = 100_000  # must match the WebCrypto params in _JS
+
+
+def _encrypt_body(body: str, password: str) -> str:
+    """AES-GCM-encrypt a page body; the browser decrypts with WebCrypto after
+    the owner enters the password (real client-side auth for a static site —
+    the published HTML contains only ciphertext)."""
+    import os as _os
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    salt, iv = _os.urandom(16), _os.urandom(12)
+    key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt,
+                     iterations=_PBKDF2_ITERATIONS).derive(password.encode())
+    ciphertext = AESGCM(key).encrypt(iv, body.encode(), None)
+    b64 = lambda raw: base64.b64encode(raw).decode()  # noqa: E731
+    return (
+        f"<section class='card lock' data-salt='{b64(salt)}' data-iv='{b64(iv)}'"
+        f" data-ct='{b64(ciphertext)}'>"
+        "<h2>🔒 Private</h2><p class='empty'>This section is encrypted.</p>"
+        "<form class='lock-form'><input type='password' placeholder='Password'"
+        " autocomplete='current-password'>"
+        "<button type='submit'>Unlock</button>"
+        "<span class='lock-err'></span></form></section>"
+    )
+
+
 def render_site(profile: dict, todos: list[dict], today: date | None = None,
                 reading: list[dict] | None = None,
                 routines: list[dict] | None = None,
-                reminders: list[dict] | None = None) -> dict[str, str]:
+                reminders: list[dict] | None = None,
+                password: str = "") -> dict[str, str]:
     """Returns {filename: content} for the generated site — one page per section.
 
     Every page is always rendered (an empty section shows a placeholder) so a
@@ -106,9 +137,11 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
                 f"<h1><a href='index.html'>{e(name)}</a></h1>"
                 + nav + "</div></header>"
             )
+        body = body or "<section class='card'><p class='empty'>Nothing here yet.</p></section>"
+        if password and filename in _PROTECTED_PAGES:
+            body = _encrypt_body(body, password)
         files[filename] = (
-            head + hero + "<main>"
-            + (body or "<section class='card'><p class='empty'>Nothing here yet.</p></section>")
+            head + hero + "<main>" + body
             + f"<footer>Maintained automatically by personal-agent · updated {today.isoformat()}"
               "</footer></main></body></html>"
         )
@@ -490,6 +523,12 @@ details.t-day[open] summary{margin-bottom:6px}
 details.t-day summary .t-count{color:#64748b;font-weight:400}
 .t-stale{color:#b45309;background:#fef3c7;border-radius:6px;padding:1px 6px;
   font-size:.72rem;font-weight:600}
+.lock-form{display:flex;gap:8px;margin-top:10px}
+.lock-form input{flex:0 1 220px;padding:8px 10px;border:1px solid #cbd5e1;
+  border-radius:8px;font:inherit}
+.lock-form button{padding:8px 14px;border:none;border-radius:8px;background:#4f46e5;
+  color:#fff;font-weight:600;cursor:pointer}
+.lock-err{color:#dc2626;font-size:.85rem;align-self:center}
 ul.routines{list-style:none;padding:0;margin:6px 0 0}
 ul.routines li{border:1px solid #e2e8f0;border-left:4px solid #6366f1;border-radius:10px;
   padding:10px 12px;margin-bottom:8px;background:#fff}
@@ -626,10 +665,48 @@ _JS = """(function () {
     else return;
     apply();
   });
+  // ── encrypted private pages (todos/reading/routines) ──
+  // content ships as AES-GCM ciphertext; WebCrypto decrypts with the owner's
+  // password (PBKDF2-SHA256, 100k iterations — must match the Python side).
+  var PW = 'agent-site-pw';
+  function b64bytes(s) { return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); }); }
+  function unlock(el, pw) {
+    var enc = new TextEncoder();
+    return crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey'])
+      .then(function (mat) {
+        return crypto.subtle.deriveKey(
+          { name: 'PBKDF2', salt: b64bytes(el.dataset.salt), iterations: 100000, hash: 'SHA-256' },
+          mat, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+      })
+      .then(function (key) {
+        return crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64bytes(el.dataset.iv) },
+                                     key, b64bytes(el.dataset.ct));
+      })
+      .then(function (pt) {
+        var host = document.createElement('div');
+        host.innerHTML = new TextDecoder().decode(pt);
+        el.replaceWith(host);
+        apply();  // wire pin/done/unrelated buttons on the decrypted content
+      });
+  }
+  function initLock() {
+    var el = document.querySelector('section.lock');
+    if (!el || !window.crypto || !crypto.subtle) return;
+    var saved = localStorage.getItem(PW);
+    if (saved) unlock(el, saved).catch(function () { localStorage.removeItem(PW); });
+    el.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var pw = el.querySelector('input').value;
+      unlock(el, pw).then(function () { localStorage.setItem(PW, pw); })
+        .catch(function () { el.querySelector('.lock-err').textContent = 'wrong password'; });
+    });
+  }
+
+  function boot() { apply(); initLock(); }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', apply);
+    document.addEventListener('DOMContentLoaded', boot);
   } else {
-    apply();
+    boot();
   }
 })();
 """
@@ -681,7 +758,8 @@ def sync_website(settings: Settings, profile: dict, todos: list[dict],
          f"origin/{default_branch}")
 
     for filename, content in render_site(profile, todos, reading=reading,
-                                         routines=routines, reminders=reminders).items():
+                                         routines=routines, reminders=reminders,
+                                         password=settings.website_password).items():
         (workdir / filename).write_text(content)
 
     if not _git(workdir, settings, "status", "--porcelain").stdout.strip():

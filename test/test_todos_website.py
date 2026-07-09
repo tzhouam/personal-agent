@@ -255,6 +255,46 @@ def test_routines_page():
     assert "No routines yet" in empty
 
 
+def test_password_protected_pages_ship_ciphertext_only():
+    import base64
+    import re
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    todos = [{"id": "t1", "title": "SECRET-TODO-TITLE", "source": "manual",
+              "created": "2026-07-09", "status": "open"}]
+    reading = [{"id": "r1", "title": "SECRET-PAPER", "url": "u", "why": "",
+                "source": "arxiv", "created": "2026-07-09", "status": "open"}]
+    files = render_site(PROFILE, todos, today=date(2026, 7, 9), reading=reading,
+                        routines=[{"id": "rt1", "task": "SECRET-ROUTINE",
+                                   "time": "07:30", "days": "daily", "condition": ""}],
+                        password="s3cret-pw")
+    for page_name, secret in (("todos.html", "SECRET-TODO-TITLE"),
+                              ("reading.html", "SECRET-PAPER"),
+                              ("routines.html", "SECRET-ROUTINE")):
+        page = files[page_name]
+        assert secret not in page                      # nothing readable ships
+        assert "class='card lock'" in page and "lock-form" in page
+    # public pages stay plaintext
+    assert "class='card lock'" not in files["index.html"]
+    # the ciphertext decrypts with the same params the JS uses (WebCrypto parity)
+    m = re.search(r"data-salt='([^']+)' data-iv='([^']+)' data-ct='([^']+)'",
+                  files["todos.html"])
+    salt, iv, ct = (base64.b64decode(g) for g in m.groups())
+    key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt,
+                     iterations=100_000).derive(b"s3cret-pw")
+    plain = AESGCM(key).decrypt(iv, ct, None).decode()
+    assert "SECRET-TODO-TITLE" in plain and "todo-scroll" in plain
+    # unlock machinery is in the shared JS
+    js = files["agent-site.js"]
+    assert "initLock" in js and "PBKDF2" in js and "AES-GCM" in js
+    # no password → everything plaintext as before
+    open_files = render_site(PROFILE, todos, today=date(2026, 7, 9))
+    assert "SECRET-TODO-TITLE" in open_files["todos.html"]
+
+
 def test_todo_expiry_after_a_month(tmp_path):
     store = TodoStore(tmp_path)
     store.upsert("k-old", title="Stale item", source="github")

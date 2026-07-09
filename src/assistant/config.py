@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     announce_to: str = ""          # owner's WeChat im id
     openclaw_bin: str = "/opt/node24/bin/openclaw"
 
+    # Private website pages (todos/reading/routines) — when set, their content
+    # is AES-GCM-encrypted at render time and unlocked in the browser with
+    # this password (client-side crypto: the published HTML holds ciphertext)
+    website_password: str = ""
+
     # Personal website — "owner/name" GitHub Pages repo; the agent pushes the
     # rendered site directly to the default branch (owner's choice, 2026-07-02)
     website_repo: str = ""
