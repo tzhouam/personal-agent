@@ -115,6 +115,9 @@ def update_todos(store: TodoStore, digest: dict, resume: dict, github=None, llm=
     else:
         store.close_by_key(_RESUME_KEY)
 
-    open_items = store.open_items()
+    from ..urgency import urgency
+
+    # most urgent first — the digest email and website consume this order
+    open_items = sorted(store.open_items(), key=urgency, reverse=True)
     return {"added": added, "closed": closed, "open": open_items,
             "open_count": len(open_items)}

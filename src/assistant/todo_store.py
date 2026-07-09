@@ -7,7 +7,7 @@ CLI: ``assistant todo done t3``.
 """
 
 import subprocess
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -73,25 +73,29 @@ class _YamlItems:
         return [i for i in self.load()["items"] if i["status"] == "open"]
 
     def expire_stale(self, days: int = 30, today: date | None = None) -> list[dict]:
-        """Mark open items older than ``days`` as outdated (never delete — the
-        status change removes them from the open list, website, and email).
-        Items with a due date today or later stay open regardless of age."""
+        """Mark fully-stale open items as outdated (never delete — the status
+        change removes them from the open list, website, and email).
+
+        Urgency-metric semantics (src/assistant/urgency.py): speculative
+        undated items decay out over ``days``; committed items — red
+        priority, blocking someone, or a due date less than a month past —
+        are exempt and age UP instead, so a lingering review request is
+        surfaced, not silently deleted."""
+        # ``days`` is kept for call-site clarity; urgency.FADE_END (30) governs.
+        from .urgency import staleness
+
         today = today or date.today()
-        cutoff = (today - timedelta(days=days)).isoformat()
         data = self.load()
         expired = []
         for item in data["items"]:
-            if item["status"] != "open" or not item.get("created"):
+            if item["status"] != "open":
                 continue
-            if item["created"] > cutoff:
-                continue
-            if item.get("due") and str(item["due"]) >= today.isoformat():
-                continue  # still scheduled — age alone doesn't outdate it
-            item["status"] = "outdated"
-            item["outdated_at"] = today.isoformat()
-            expired.append(item)
+            if staleness(item, today) <= 0.0:
+                item["status"] = "outdated"
+                item["outdated_at"] = today.isoformat()
+                expired.append(item)
         if expired:
-            self._save(data, f"{self.FILENAME}: {len(expired)} item(s) outdated (>{days}d)")
+            self._save(data, f"{self.FILENAME}: {len(expired)} item(s) outdated (>{days}d stale)")
         return expired
 
 

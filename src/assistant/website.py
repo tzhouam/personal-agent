@@ -22,6 +22,8 @@ import calendar as _calendar
 import html
 import subprocess
 from datetime import date, datetime
+
+from .urgency import going_stale, urgency
 from pathlib import Path
 
 import httpx
@@ -204,29 +206,31 @@ def _parse_day(value) -> date | None:
 
 
 _CAL_MAX_PER_DAY = 3
+_CAL_URGENCY = 8.0  # Eisenhower-Q1 gate: priority alone doesn't clear it —
+                    # it takes a deadline or someone waiting on the owner
 
 
-def _cal_important(todos: list[dict]) -> list[dict]:
-    """Only the most important todos earn a calendar cell: red priority or an
-    explicit due date. The full list lives in the scroll list below."""
-    return [t for t in todos if t.get("priority") == "red" or t.get("due")]
+def _cal_important(todos: list[dict], today: date) -> list[dict]:
+    """Only the most important todos earn a calendar cell: anything dated (a
+    calendar is for dates) or urgency above the gate. Everything else lives
+    only in the scroll list below."""
+    return [t for t in todos if t.get("due") or urgency(t, today) >= _CAL_URGENCY]
 
 
-def _todo_sort_key(todo: dict):
-    """Date-ordered: due items first (soonest due at the top), then undated
-    items newest-created first."""
-    due = _parse_day(todo.get("due"))
-    if due:
-        return (0, due.toordinal())
-    created = _parse_day(todo.get("created"))
-    return (1, -(created.toordinal() if created else 0))
+def _todo_sort_key(today: date):
+    """Most urgent first; older-first tiebreak so equal-urgency items keep a
+    stable, seniority-respecting order."""
+    def key(todo: dict):
+        created = _parse_day(todo.get("created"))
+        return (-urgency(todo, today), created.toordinal() if created else 0)
+    return key
 
 
 def _render_calendar(todos: list[dict], today: date) -> str:
     e = html.escape
     # calendar shows only the important todos: due date if set, else created day
     by_day: dict[int, list[dict]] = {}
-    for todo in _cal_important(todos):
+    for todo in _cal_important(todos, today):
         anchor = _parse_day(todo.get("due")) or _parse_day(todo.get("created"))
         if anchor and anchor.year == today.year and anchor.month == today.month:
             by_day.setdefault(anchor.day, []).append(todo)
@@ -253,10 +257,10 @@ def _render_calendar(todos: list[dict], today: date) -> str:
         parts.append("</tr>")
     parts.append("</table>")
 
-    todos = sorted(todos, key=_todo_sort_key)
+    todos = sorted(todos, key=_todo_sort_key(today))
     if todos:
         # same-day todos embed into one collapsible group; group order follows
-        # the date-ordered flat sort (nearest deadlines first, then recency)
+        # the urgency-ordered flat sort (most urgent day first)
         groups: dict[str, list[dict]] = {}
         for todo in todos:
             anchor = _parse_day(todo.get("due")) or _parse_day(todo.get("created"))
@@ -273,7 +277,7 @@ def _render_calendar(todos: list[dict], today: date) -> str:
             parts.append(f"<details class='t-day'{open_attr}><summary>{label} "
                          f"<span class='t-count'>({len(day_todos)})</span></summary>"
                          "<ul class='todos'>")
-            parts.extend(_todo_li(todo, idx + j) for j, todo in enumerate(day_todos))
+            parts.extend(_todo_li(todo, idx + j, today) for j, todo in enumerate(day_todos))
             idx += len(day_todos)
             parts.append("</ul></details>")
         parts.append("</div>")
@@ -283,9 +287,11 @@ def _render_calendar(todos: list[dict], today: date) -> str:
     return "".join(parts)
 
 
-def _todo_li(todo: dict, idx: int) -> str:
+def _todo_li(todo: dict, idx: int, today: date) -> str:
     e = html.escape
     title = f"<b>{e(todo['title'])}</b>"
+    if going_stale(todo, today):  # fading toward the 30-day expiry
+        title += " <span class='t-stale' title='untouched for 3+ weeks — expires at 30 days'>⏳ going stale</span>"
     label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
                       todo.get("type", ""))
     if label:  # short bracketed link; the summary stays plain text
@@ -393,6 +399,8 @@ details.t-day summary{cursor:pointer;font-weight:600;color:#334155;font-size:.92
   user-select:none}
 details.t-day[open] summary{margin-bottom:6px}
 details.t-day summary .t-count{color:#64748b;font-weight:400}
+.t-stale{color:#b45309;background:#fef3c7;border-radius:6px;padding:1px 6px;
+  font-size:.72rem;font-weight:600}
 details.t-day.all-done{display:none}
 body.show-hidden details.t-day.all-done{display:block}
 ul.todos{list-style:none;padding:0;margin:0}

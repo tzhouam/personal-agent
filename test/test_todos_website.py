@@ -229,10 +229,13 @@ def test_todo_expiry_after_a_month(tmp_path):
     assert stale["status"] == "outdated" and stale["outdated_at"] == "2026-07-02"
     # second pass is a no-op
     assert store.expire_stale(days=30, today=date(2026, 7, 2)) == []
-    # a past-due scheduled item does expire once its due date lapses
-    # (the fresh item has aged past 30 days by then too)
+    # two weeks past due the scheduled item is still within its 30-day grace
+    # (the fresh undated item has decayed out by then)
     expired = store.expire_stale(days=30, today=date(2026, 8, 15))
-    assert {t["title"] for t in expired} == {"Old but scheduled", "Fresh item"}
+    assert {t["title"] for t in expired} == {"Fresh item"}
+    # a month past due, even scheduled work is dead
+    expired = store.expire_stale(days=30, today=date(2026, 9, 5))
+    assert {t["title"] for t in expired} == {"Old but scheduled"}
 
 
 def test_update_todos_reports_expired_as_closed(tmp_path):
