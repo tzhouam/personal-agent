@@ -36,7 +36,9 @@ _API = "https://api.github.com"
 
 # ── rendering ────────────────────────────────────────────────────────
 def render_site(profile: dict, todos: list[dict], today: date | None = None,
-                reading: list[dict] | None = None) -> dict[str, str]:
+                reading: list[dict] | None = None,
+                routines: list[dict] | None = None,
+                reminders: list[dict] | None = None) -> dict[str, str]:
     """Returns {filename: content} for the generated site — one page per section.
 
     Every page is always rendered (an empty section shows a placeholder) so a
@@ -66,6 +68,7 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
         ("projects.html", "Projects", _projects_html(actives("projects"))),
         ("todos.html", "Todos", _render_calendar(todos, today)),
         ("reading.html", "Reading", _render_reading(reading or [], today)),
+        ("routines.html", "Routines", _render_routines(routines or [], reminders or [])),
     ]
 
     files = {"agent-site.css": _CSS, "agent-site.js": _JS}
@@ -328,6 +331,40 @@ def _render_reading(reading: list[dict], today: date) -> str:
     return "".join(parts)
 
 
+def _render_routines(routines: list[dict], reminders: list[dict]) -> str:
+    """Recurring routines + pending one-shot reminders — read-only view
+    (create/cancel happens over WeChat: `/routine`, `/remind`)."""
+    e = html.escape
+    parts = ["<section id='routines' class='card'><h2>Routines</h2>"]
+    if not routines and not reminders:
+        parts.append("<p class='empty'>No routines yet — create one over WeChat: "
+                     "“every workday at 8:30 …”</p></section>")
+        return "".join(parts)
+
+    if routines:
+        parts.append("<p class='cal-note'>Recurring work the agent runs by itself — "
+                     "manage via WeChat (<code>/routine</code>).</p><ul class='routines'>")
+        for r in routines:
+            gate = (f"<div class='t-detail'>if: {e(r['condition'])}</div>"
+                    if r.get("condition") else "")
+            checked = (f" · last checked {e(str(r['last_checked']))}"
+                       if r.get("last_checked") else "")
+            parts.append(
+                f"<li><span class='r-when'>🔁 {e(r['days'])} {e(r['time'])}</span> "
+                f"<b>{e(r['task'])}</b>"
+                f"<span class='when'> [{e(str(r.get('id', '')))}]{checked}</span>{gate}</li>")
+        parts.append("</ul>")
+    if reminders:
+        parts.append("<h3>Pending reminders</h3><ul class='routines'>")
+        parts.extend(
+            f"<li><span class='r-when'>⏰ {e(r['due_at'])}</span> {e(r['message'])}"
+            f"<span class='when'> [{e(str(r.get('id', '')))}]</span></li>"
+            for r in reminders)
+        parts.append("</ul>")
+    parts.append("</section>")
+    return "".join(parts)
+
+
 def _todo_li(todo: dict, idx: int, today: date, stale_badge: bool = True) -> str:
     e = html.escape
     title = f"<b>{e(todo['title'])}</b>"
@@ -442,6 +479,10 @@ details.t-day[open] summary{margin-bottom:6px}
 details.t-day summary .t-count{color:#64748b;font-weight:400}
 .t-stale{color:#b45309;background:#fef3c7;border-radius:6px;padding:1px 6px;
   font-size:.72rem;font-weight:600}
+ul.routines{list-style:none;padding:0;margin:6px 0 0}
+ul.routines li{border:1px solid #e2e8f0;border-left:4px solid #6366f1;border-radius:10px;
+  padding:10px 12px;margin-bottom:8px;background:#fff}
+.r-when{color:#4f46e5;font-weight:600;font-size:.88rem;margin-right:6px}
 details.t-day.all-done{display:none}
 body.show-hidden details.t-day.all-done{display:block}
 ul.todos{list-style:none;padding:0;margin:0}
@@ -573,7 +614,16 @@ def _git(workdir: Path, settings: Settings, *args: str,
 
 
 def sync_website(settings: Settings, profile: dict, todos: list[dict],
-                 reading: list[dict] | None = None) -> dict:
+                 reading: list[dict] | None = None,
+                 routines: list[dict] | None = None,
+                 reminders: list[dict] | None = None) -> dict:
+    if routines is None or reminders is None:  # default to the live stores
+        from .notify import ReminderStore
+        from .routines import RoutineStore
+
+        routines = RoutineStore(settings.data_dir).active() if routines is None else routines
+        reminders = (ReminderStore(settings.data_dir).pending()
+                     if reminders is None else reminders)
     if not settings.website_repo or not settings.github_token:
         return {"status": "not_configured", "note": "set WEBSITE_REPO (owner/name) in .env"}
 
@@ -596,7 +646,8 @@ def sync_website(settings: Settings, profile: dict, todos: list[dict],
     _git(workdir, settings, "checkout", "-q", "-B", default_branch,
          f"origin/{default_branch}")
 
-    for filename, content in render_site(profile, todos, reading=reading).items():
+    for filename, content in render_site(profile, todos, reading=reading,
+                                         routines=routines, reminders=reminders).items():
         (workdir / filename).write_text(content)
 
     if not _git(workdir, settings, "status", "--porcelain").stdout.strip():

@@ -236,6 +236,24 @@ def test_reading_page_like_todos():
     assert "Nothing unread" in render_site(PROFILE, [], today=today)["reading.html"]
 
 
+def test_routines_page():
+    routines = [{"id": "rt1", "task": "check Shenzhen storm warnings", "time": "22:00",
+                 "days": "workdays", "condition": "深圳市发布暴雨或台风预警",
+                 "last_checked": "2026-07-09"}]
+    reminders = [{"id": "m4", "message": "submit the report", "due_at": "2026-07-10 09:00"}]
+    files = render_site(PROFILE, [], today=date(2026, 7, 9),
+                        routines=routines, reminders=reminders)
+    page = files["routines.html"]
+    assert "<a href='routines.html' class=active" in page
+    assert "🔁 workdays 22:00" in page and "check Shenzhen storm warnings" in page
+    assert "if: 深圳市发布暴雨或台风预警" in page and "last checked 2026-07-09" in page
+    assert "⏰ 2026-07-10 09:00" in page and "submit the report" in page
+    # nav includes Routines on other pages too; empty state is friendly
+    assert "href='routines.html'" in files["index.html"]
+    empty = render_site(PROFILE, [], today=date(2026, 7, 9))["routines.html"]
+    assert "No routines yet" in empty
+
+
 def test_todo_expiry_after_a_month(tmp_path):
     store = TodoStore(tmp_path)
     store.upsert("k-old", title="Stale item", source="github")
