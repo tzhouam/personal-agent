@@ -57,6 +57,12 @@ const cases = [
    { action: "plan_task", params: { request: "book a dinner for 6 on Friday" }, timeoutMs: 120_000 }],
   ["/search vllm omni releases",
    { action: "web_search", params: { query: "vllm omni releases" }, timeoutMs: 120_000 }],
+  ["/remind", { action: "list_reminders", params: {} }],
+  ["/remind cancel m2", { action: "cancel_reminder", params: { id: "m2" } }],
+  ["/remind +2h follow up with Gaohan",
+   { action: "set_reminder", params: { when: "+2h", message: "follow up with Gaohan" } }],
+  ["/routine", { action: "list_routines", params: {} }],
+  ["/routine cancel rt2", { action: "cancel_routine", params: { id: "rt2" } }],
   ["/new", null],
   ["/todos", null],
 ];

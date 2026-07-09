@@ -102,7 +102,7 @@ async function ask(text, session) {
 /** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
  * (null = not ours, let OpenClaw built-ins have it). */
 export function parseSlash(body) {
-  const m = body.match(/^\/(todo|read|digest|status|run|plan|search)\b\s*(.*)$/s);
+  const m = body.match(/^\/(todo|read|digest|status|run|plan|search|remind|routine)\b\s*(.*)$/s);
   if (!m) return null;
   const [, family, restRaw] = m;
   const rest = restRaw.trim();
@@ -119,6 +119,20 @@ export function parseSlash(body) {
   if (family === "search") {
     if (!rest) return { usage: "usage: /search <query>" };
     return { action: "web_search", params: { query: rest }, timeoutMs: TIMEOUT_MS };
+  }
+  if (family === "routine") {
+    if (!rest || rest === "list") return { action: "list_routines", params: {} };
+    const cancel = rest.match(/^cancel\s+(\S+)$/);
+    if (cancel) return { action: "cancel_routine", params: { id: cancel[1] } };
+    return { usage: "usage: /routine [list] | /routine cancel <id> — create by just telling me, e.g. \"every workday at 8:30 …\"" };
+  }
+  if (family === "remind") {
+    if (!rest || rest === "list") return { action: "list_reminders", params: {} };
+    const cancel = rest.match(/^cancel\s+(\S+)$/);
+    if (cancel) return { action: "cancel_reminder", params: { id: cancel[1] } };
+    const set = rest.match(/^(\S+)\s+(.+)$/s);
+    if (set) return { action: "set_reminder", params: { when: set[1], message: set[2] } };
+    return { usage: "usage: /remind [list] | /remind cancel <id> | /remind <+2h|HH:MM> <message>" };
   }
   if (family === "todo") {
     if (!rest || rest === "list") return { action: "list_todos", params: {} };

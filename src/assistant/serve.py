@@ -226,6 +226,19 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                         log.info("replied via %s (%d chars)", channel.name, len(reply))
                     except Exception:
                         log.exception("failed to answer %s message", channel.name)
+            try:  # proactive path: due reminders go out with no inbound command
+                from .notify import ReminderStore
+
+                for r in ReminderStore(settings.data_dir).deliver_due(settings):
+                    log.info("reminder %s delivered: %.60s", r["id"], r["message"])
+            except Exception:
+                log.exception("reminder delivery failed")
+            try:  # conditional routines (workdays / weather gates / …)
+                from .routines import fire_due
+
+                fire_due(settings)
+            except Exception:
+                log.exception("routine firing failed")
             stop.wait(settings.chat_poll_seconds)
         except Exception:  # the poll thread must never die
             log.exception("chat poll cycle failed")

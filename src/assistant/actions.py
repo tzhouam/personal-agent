@@ -171,6 +171,68 @@ def _web_search(settings: Settings, p: dict) -> str:
     return answer or "top results:\n" + format_results(results)
 
 
+def _set_reminder(settings: Settings, p: dict) -> str:
+    from .notify import ReminderStore, parse_when
+
+    due = parse_when(p.get("when", ""))
+    if due is None:
+        return (f"couldn't parse when={p.get('when')!r} — use '+30m', '+2h', "
+                "'HH:MM', or 'YYYY-MM-DD HH:MM'")
+    reminder = ReminderStore(settings.data_dir).add(str(p.get("message", "")), due)
+    return (f"reminder {reminder['id']} set for {reminder['due_at']} — "
+            "I'll ping you on WeChat")
+
+
+def _list_reminders(settings: Settings, p: dict) -> str:
+    from .notify import ReminderStore
+
+    pending = ReminderStore(settings.data_dir).pending()
+    return "\n".join(f"[{r['id']}] {r['due_at']} — {r['message']}"
+                     for r in pending) or "(no pending reminders)"
+
+
+def _cancel_reminder(settings: Settings, p: dict) -> str:
+    from .notify import ReminderStore
+
+    reminder_id = str(p.get("id", ""))
+    ok = ReminderStore(settings.data_dir).cancel(reminder_id)
+    return (f"reminder {reminder_id} cancelled" if ok
+            else f"no pending reminder {reminder_id!r}")
+
+
+def _create_routine(settings: Settings, p: dict) -> str:
+    from .routines import RoutineStore
+
+    routine = RoutineStore(settings.data_dir).add(
+        task=str(p.get("task", "")), time=str(p.get("time", "")),
+        days=str(p.get("days") or "daily"), condition=str(p.get("condition") or ""))
+    if routine is None:
+        return ("couldn't create routine — time must be HH:MM and days one of "
+                "daily/workdays/weekends or e.g. 'mon,wed,fri'")
+    when = f"{routine['days']} at {routine['time']}"
+    gate = f", only when: {routine['condition']}" if routine["condition"] else ""
+    return f"routine {routine['id']} created — {when}{gate}: {routine['task']}"
+
+
+def _list_routines(settings: Settings, p: dict) -> str:
+    from .routines import RoutineStore
+
+    lines = [f"[{r['id']}] {r['days']} {r['time']}"
+             + (f" (if: {r['condition']})" if r.get("condition") else "")
+             + f" — {r['task']}"
+             for r in RoutineStore(settings.data_dir).active()]
+    return "\n".join(lines) or "(no routines)"
+
+
+def _cancel_routine(settings: Settings, p: dict) -> str:
+    from .routines import RoutineStore
+
+    routine_id = str(p.get("id", ""))
+    ok = RoutineStore(settings.data_dir).cancel(routine_id)
+    return (f"routine {routine_id} cancelled" if ok
+            else f"no active routine {routine_id!r}")
+
+
 _PLAN_SYSTEM = """You are the owner's personal task planner. You get a novel task request (booking,
 arranging, researching, errands). Produce a concrete, realistic plan.
 
@@ -303,6 +365,65 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "web_search", "query": "<what to look up>"}   # for '
                        'questions needing current/external information',
         slash="search",
+    ),
+    Action(
+        name="set_reminder",
+        description="schedule a one-shot WeChat reminder the agent sends by itself",
+        handler=_set_reminder,
+        params={"message": {"required": True, "desc": "what to remind about"},
+                "when": {"required": True,
+                         "desc": "'+30m' / '+2h' / '+1d', 'HH:MM', or 'YYYY-MM-DD HH:MM'"}},
+        llm=True,
+        prompt_example='{"type": "set_reminder", "message": "...", "when": "+2h"}   # '
+                       'agent pings WeChat at the time, unprompted',
+        slash="remind",
+    ),
+    Action(
+        name="list_reminders",
+        description="list pending reminders (cancel: set_reminder is one-shot)",
+        handler=_list_reminders,
+        slash="remind",
+    ),
+    Action(
+        name="cancel_reminder",
+        description="cancel a pending reminder by id",
+        handler=_cancel_reminder,
+        params={"id": {"required": True, "desc": "reminder id, e.g. m2"}},
+        llm=True,
+        prompt_example='{"type": "cancel_reminder", "id": "m2"}',
+        slash="remind",
+    ),
+    Action(
+        name="create_routine",
+        description="recurring work: at a time on chosen days, optionally gated on a "
+                    "real-world condition, the agent runs a task and messages WeChat",
+        handler=_create_routine,
+        params={"task": {"required": True, "desc": "what to do/say each time"},
+                "time": {"required": True, "desc": "HH:MM"},
+                "days": {"required": False,
+                         "desc": "daily|workdays|weekends|'mon,wed,fri' (default daily)"},
+                "condition": {"required": False,
+                              "desc": "free-text gate checked at fire time via web "
+                                      "search, e.g. 'there is a weather alert in Shenzhen'"}},
+        llm=True,
+        prompt_example='{"type": "create_routine", "task": "...", "time": "08:30", '
+                       '"days": "workdays", "condition": "<optional real-world gate>"}',
+        slash="routine",
+    ),
+    Action(
+        name="list_routines",
+        description="list active routines",
+        handler=_list_routines,
+        slash="routine",
+    ),
+    Action(
+        name="cancel_routine",
+        description="cancel a routine by id",
+        handler=_cancel_routine,
+        params={"id": {"required": True, "desc": "routine id, e.g. rt2"}},
+        llm=True,
+        prompt_example='{"type": "cancel_routine", "id": "rt2"}',
+        slash="routine",
     ),
     Action(
         name="plan_task",
