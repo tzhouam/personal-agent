@@ -94,7 +94,10 @@ def cmd_todo(settings: Settings, args) -> int:
         print(run_action("add_todo", params, settings))
         return 0
     if args.action == "done":
-        result = run_action("done_todo", {"id": args.value or ""}, settings)
+        if not args.value:
+            print("usage: assistant todo done <id>")
+            return 1
+        result = run_action("done_todo", {"id": args.value}, settings)
         print(result)
         return 0 if "marked done" in result else 1
     return 1
@@ -106,14 +109,14 @@ def cmd_reading(settings: Settings, args) -> int:
     if args.action == "list":
         print(run_action("list_reading", {}, settings))
         return 0
-    if args.action == "done":
-        result = run_action("done_reading", {"id": args.value or ""}, settings)
+    if args.action in ("done", "unrelated"):
+        if not args.value:
+            print(f"usage: assistant reading {args.action} <id>")
+            return 1
+        action = "done_reading" if args.action == "done" else "unrelated_reading"
+        result = run_action(action, {"id": args.value}, settings)
         print(result)
-        return 0 if "marked read" in result else 1
-    if args.action == "unrelated":
-        result = run_action("unrelated_reading", {"id": args.value or ""}, settings)
-        print(result)
-        return 0 if "marked unrelated" in result else 1
+        return 0 if "marked" in result else 1
     return 1
 
 
