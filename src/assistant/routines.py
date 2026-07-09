@@ -142,8 +142,16 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
             log.info("routine %s: condition not met (%s)", routine["id"], why)
             outcomes.append({"id": routine["id"], "fired": False, "note": why})
             continue
+        # frame the task as immediate execution — without this the chat agent
+        # pattern-matches recurring tasks to plan_task and replies with a PLAN
+        # (and a junk todo) instead of doing the work
+        framed = ("[Scheduled routine firing NOW — execute the task immediately. "
+                  "Use web_search for current information. Do NOT use plan_task, "
+                  "create_routine, or add_todo; reply with the actual result.]\n"
+                  + routine["task"]
+                  + (f"\n[Condition already verified true: {why}]" if why else ""))
         try:
-            reply = handle_message(routine["task"], settings)
+            reply = handle_message(framed, settings)
         except Exception as exc:  # one broken routine must not block the rest
             log.exception("routine %s task failed", routine["id"])
             reply = f"(routine task failed: {exc})"

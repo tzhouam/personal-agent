@@ -77,8 +77,12 @@ def test_fire_due_gates_and_sends(settings, monkeypatch):
     outcomes = fire_due(settings, now=MON_9)
     assert {o["id"]: o["fired"] for o in outcomes} == {gated["id"]: False,
                                                        plain["id"]: True}
-    assert handled == ["send me my top todos"]
-    assert sent == [f"🔁 [{plain['id']}] reply to: send me my top todos"]
+    # the task is framed as execute-now so the chat agent doesn't plan_task it
+    assert len(handled) == 1
+    assert "execute the task immediately" in handled[0]
+    assert "Do NOT use plan_task" in handled[0]
+    assert handled[0].endswith("send me my top todos")
+    assert len(sent) == 1 and sent[0].startswith(f"🔁 [{plain['id']}] reply to:")
     # both marked checked — nothing due again today, even the gated one
     assert fire_due(settings, now=MON_9) == []
 
