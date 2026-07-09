@@ -79,46 +79,37 @@ def cmd_show(settings: Settings) -> int:
 
 
 def cmd_todo(settings: Settings, args) -> int:
-    from .todo_store import TodoStore
+    from .actions import run_action
 
-    store = TodoStore(settings.profile_dir)
     if args.action == "list":
-        for item in store.open_items():
-            due = f" due:{item['due']}" if item.get("due") else ""
-            print(f"[{item['id']}] {item['title']} ({item.get('source', '')}, "
-                  f"since {item.get('created', '')}{due})")
+        print(run_action("list_todos", {}, settings))
         return 0
     if args.action == "add":
         if not args.value:
             print("usage: assistant todo add \"<title>\" [--due YYYY-MM-DD]")
             return 1
-        item = store.upsert(f"manual:{args.value}", title=args.value, source="manual",
-                            priority="yellow", **({"due": args.due} if args.due else {}))
-        print(f"added [{item['id']}]" if item else "already tracked (open item with same title)")
+        params = {"title": args.value, "source": "manual"}
+        if args.due:
+            params["due"] = args.due
+        print(run_action("add_todo", params, settings))
         return 0
     if args.action == "done":
-        if store.mark_done(args.value or ""):
-            print(f"{args.value} done")
-            return 0
-        print(f"no open todo with id {args.value!r}")
-        return 1
+        result = run_action("done_todo", {"id": args.value or ""}, settings)
+        print(result)
+        return 0 if "marked done" in result else 1
     return 1
 
 
 def cmd_reading(settings: Settings, args) -> int:
-    from .todo_store import ReadingList
+    from .actions import run_action
 
-    store = ReadingList(settings.profile_dir)
     if args.action == "list":
-        for item in store.open_items():
-            print(f"[{item['id']}] {item['title']}  {item.get('url', '')}")
+        print(run_action("list_reading", {}, settings))
         return 0
     if args.action == "done":
-        if store.mark_done(args.value or ""):
-            print(f"{args.value} marked read")
-            return 0
-        print(f"no unread item with id {args.value!r}")
-        return 1
+        result = run_action("done_reading", {"id": args.value or ""}, settings)
+        print(result)
+        return 0 if "marked read" in result else 1
     return 1
 
 
@@ -224,6 +215,17 @@ def main() -> None:
                             help="answer owner messages from email/WeCom (foreground loop)")
     chat_p.add_argument("--once", action="store_true", help="single poll cycle, then exit")
 
+    sub.add_parser("serve", help="local HTTP daemon: chat/actions/run endpoints "
+                                 "for the OpenClaw bridge + email chat polling")
+
+    cons_p = sub.add_parser("consolidate",
+                            help="weekly profile consolidation: merge fragments, "
+                                 "promote evidence into contribution highlights")
+    cons_p.add_argument("--section", choices=["projects", "skills", "interests"],
+                        help="consolidate one section only (default: all)")
+    cons_p.add_argument("--dry-run", action="store_true",
+                        help="show what would be applied, change nothing")
+
     ask_p = sub.add_parser("ask", help="ask the chat agent one question locally")
     ask_p.add_argument("text", help="the message, quoted")
 
@@ -258,6 +260,30 @@ def main() -> None:
         from .chat.service import run_listener
 
         sys.exit(run_listener(settings, once=args.once))
+    elif args.command == "serve":
+        from .serve import run_serve
+
+        sys.exit(run_serve(settings))
+    elif args.command == "consolidate":
+        import logging
+
+        from .llm import LLM
+        from .tasks.profile_consolidate import consolidate_profile
+
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        store = ProfileStore(settings.profile_dir)
+        if not store.exists():
+            print("no profile yet — run `assistant bootstrap` first")
+            sys.exit(1)
+        result = consolidate_profile(LLM(settings), store, settings,
+                                     section=args.section, dry_run=args.dry_run)
+        print(f"{len(result['applied'])} ops applied, {len(result['rejected'])} rejected"
+              + (" (dry-run)" if args.dry_run else "")
+              + (f"\nnotes: {result['notes']}" if result["notes"] else ""))
+        if args.dry_run and result["applied"]:
+            for op in result["applied"]:
+                print(f"  would apply: {op.get('op')} {op.get('name') or op.get('into', '')}")
+        sys.exit(0)
     elif args.command == "ask":
         from .chat.agent import handle_message
 

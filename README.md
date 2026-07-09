@@ -34,6 +34,25 @@ toolchain is installed, and commits **locally only** — the daily email shows t
 nothing reaches Overleaf until you run `assistant approve-resume` (which pulls/rebases
 remote edits first and never force-pushes).
 
+### Profile v2: initiatives + weekly consolidation
+
+The daily updater is deliberately additive; the editorial power lives in a
+**weekly consolidation pass** (`assistant consolidate`, cron job
+`weekly-consolidate`, Sun 08:00 HKT) that sees each profile section in full
+and may merge fragmented entries, move misfiled evidence, and rewrite
+scattered bullets into resume-voice contribution highlights (style reference:
+the hand-written `experience:` section). Design + the research behind it:
+[doc/RESEARCH_AGENT_MEMORY_2026.md](doc/RESEARCH_AGENT_MEMORY_2026.md).
+
+- **Initiatives** (`~/.personal-agent/profile/aliases.yaml`, owner-editable)
+  are the join keys: repos/keywords that belong to one line of work, so
+  correlated activity converges on one entry instead of fragmenting.
+- Safety: superseded highlights land in each entry's `history` (never
+  deleted); entries re-confirmed ≥3 times reject rewrites citing fewer
+  sources; every run is one git commit in the profile repo and the diff is
+  emailed. Rollback: `git -C ~/.personal-agent/profile revert HEAD`.
+- `assistant consolidate --dry-run [--section projects]` previews the ops.
+
 Data lives in `~/.personal-agent/`:
 - `profile/` — git repo holding `profile.yaml` (source of truth) + `PROFILE.md` (render).
   Every daily update is a commit; `git -C ~/.personal-agent/profile log -p` is the audit trail.
@@ -44,15 +63,26 @@ Data lives in `~/.personal-agent/`:
 
 ## Chat with the agent
 
-A background listener answers messages from the owner and can execute typed
-actions (add/close todos, mark reading done, trigger a digest run):
+The `assistant serve` daemon answers messages from the owner and can execute
+typed actions (add/close todos, mark reading done, trigger a digest run). It
+exposes a loopback-only HTTP API consumed by the OpenClaw bridge — `POST
+/chat` (with per-conversation memory, spilled to `~/.personal-agent/
+sessions/`), `POST /actions/<name>` (the typed action registry, no LLM),
+`POST /run`, `GET /status`, `GET /healthz` — and runs the email chat poll as
+a background thread. `Settings`/`LLM` are rebuilt per request, so `.env`
+edits (e.g. an API-key rotation) apply on the next message with no restart.
 
 ```bash
-assistant ask "what's due this week?"     # one-off, local
-assistant chat-listen                     # foreground loop (normally you don't run
+assistant ask "what's due this week?"     # one-off, local, no daemon needed
+assistant serve                           # the daemon (normally you don't run
                                           # this yourself — the OpenClaw gateway
                                           # supervises it as a plugin service)
+assistant chat-listen                     # legacy standalone email poller; use
+                                          # only for debugging (--once)
 ```
+
+Optional `.env` knobs: `SERVE_PORT` (default 8377), `SERVE_TOKEN` (bearer
+auth for the loopback API; the bridge reads it from the same `.env`).
 
 - **Email (works out of the box)**: mail the digest mailbox from one of your
   own addresses with a subject starting `agent` — e.g. "agent: add a todo to
@@ -61,9 +91,12 @@ assistant chat-listen                     # foreground loop (normally you don't 
 - **WeChat via OpenClaw (live)**: Tencent's official
   `@tencent-weixin/openclaw-weixin` plugin runs in an OpenClaw Gateway on this
   machine, and our [`openclaw-plugin/`](openclaw-plugin/) bridge (a
-  `before_agent_reply` hook) routes every inbound message straight to
-  `assistant ask` — the gateway's own LLM never runs, OpenClaw is transport
-  only. Setup, restart runbook, and troubleshooting:
+  `before_agent_reply` hook) routes every inbound message to the serve
+  daemon's `/chat` (session memory; exec `assistant ask` as fallback) — the
+  gateway's own LLM never runs, OpenClaw is transport only. The bridge also
+  answers `/todo [add <title> [due:YYYY-MM-DD]] [done <id>]`, `/read [done
+  <id>]`, `/digest`, and `/status` straight from `/actions/…` with no LLM
+  call. Setup, restart runbook, and troubleshooting:
   [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md).
 - **WeChat via WeCom (企业微信, alternative)**: register a free WeCom org +
   self-built app, enable the WeChat plugin (我→设置→插件→企业微信, scan QR) —
@@ -78,8 +111,11 @@ assistant chat-listen                     # foreground loop (normally you don't 
 The OpenClaw gateway is the single runtime: its SQLite-persisted **command
 cron** runs [`scripts/daily-run.sh`](scripts/daily-run.sh) (`run || run
 --resume`, full logs → `~/.personal-agent/daily-run.log`, stdout = the one-line
-WeChat announce) at 07:00 Asia/Hong_Kong, and the bridge plugin supervises the
-chat listener as a gateway service. Job management:
+WeChat announce) at 07:00 Asia/Hong_Kong, and the bridge plugin supervises
+`assistant serve` as a gateway service. The deliver phase can also announce
+to WeChat itself (`WECHAT_ANNOUNCE=true` + `ANNOUNCE_ACCOUNT`/`ANNOUNCE_TO`
+in `.env`) so manual and chat-triggered runs ping too — enable it only after
+removing `--announce` from the cron job, or 07:00 pings twice. Job management:
 
 ```bash
 export PATH=/opt/node24/bin:$PATH
