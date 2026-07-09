@@ -251,6 +251,20 @@ def build_graph(deps: Deps):
         except Exception as exc:
             log.exception("curator failed")
             curated, errors = {"decayed": []}, [f"curate: {exc}"]
+        try:  # daily context-window hygiene: chat turns expire after 48h
+            from .serve import SessionStore
+
+            pruned = SessionStore(
+                settings.data_dir,
+                max_age_hours=settings.chat_history_max_age_hours).prune()
+            if pruned["turns"] or pruned["files"]:
+                log.info("chat sessions pruned: %d turns, %d files (>%dh old)",
+                         pruned["turns"], pruned["files"],
+                         settings.chat_history_max_age_hours)
+            deps.events.record_metrics(state["run_id"], "curate",
+                                       {"chat_turns_pruned": pruned["turns"]})
+        except Exception:
+            log.exception("session pruning failed")
         _advance("done")
         return {"curated": curated, "phase": "done", "errors": errors}
 

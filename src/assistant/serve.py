@@ -26,6 +26,7 @@ import json
 import logging
 import signal
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -41,38 +42,72 @@ _MAX_BODY = 64 * 1024
 
 class SessionStore:
     """Rolling chat history per session id, spilled to disk so multi-turn
-    context survives a daemon restart."""
+    context survives a daemon restart.
 
-    def __init__(self, data_dir: Path, keep: int = 10):
+    Turns expire after ``max_age_hours`` (default 48): expired turns never
+    enter a prompt (read-time filter — the context-window budget), and the
+    daily curate phase calls ``prune()`` to delete them from disk."""
+
+    def __init__(self, data_dir: Path, keep: int = 10, max_age_hours: int = 48):
         self.dir = data_dir / "sessions"
         self.keep = keep
+        self.max_age_hours = max_age_hours
 
     def _path(self, session_id: str) -> Path:
         return self.dir / (hashlib.sha1(session_id.encode()).hexdigest()[:16] + ".json")
+
+    def _fresh(self, turns: list[dict]) -> list[dict]:
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(hours=self.max_age_hours)).isoformat()
+        # turns without a ts predate the expiry feature — treat as expired
+        return [t for t in turns if t.get("ts", "") >= cutoff]
 
     def history(self, session_id: str) -> list[dict]:
         path = self._path(session_id)
         if not path.exists():
             return []
         try:
-            return json.loads(path.read_text()).get("turns", [])
+            return self._fresh(json.loads(path.read_text()).get("turns", []))
         except ValueError:
             return []
 
     def append(self, session_id: str, owner: str, assistant: str) -> None:
         turns = self.history(session_id)
-        turns.append({"owner": owner[:2000], "assistant": assistant[:2000]})
+        turns.append({"ts": datetime.now(timezone.utc).isoformat(),
+                      "owner": owner[:2000], "assistant": assistant[:2000]})
         self.dir.mkdir(parents=True, exist_ok=True)
         self._path(session_id).write_text(json.dumps(
             {"session": session_id, "turns": turns[-self.keep:]},
             ensure_ascii=False))
+
+    def prune(self) -> dict:
+        """Drop expired turns from disk; delete session files left empty.
+        Returns counts for the curate log/metrics."""
+        removed_turns = removed_files = 0
+        for path in self.dir.glob("*.json") if self.dir.exists() else []:
+            try:
+                data = json.loads(path.read_text())
+            except ValueError:
+                path.unlink(missing_ok=True)
+                removed_files += 1
+                continue
+            turns = data.get("turns", [])
+            fresh = self._fresh(turns)
+            removed_turns += len(turns) - len(fresh)
+            if not fresh:
+                path.unlink(missing_ok=True)
+                removed_files += 1
+            elif len(fresh) != len(turns):
+                path.write_text(json.dumps({**data, "turns": fresh}, ensure_ascii=False))
+        return {"turns": removed_turns, "files": removed_files}
 
 
 def make_server(settings_factory=Settings, llm_factory=None, port: int | None = None):
     """Build (but don't start) the HTTP server. Factories are per-request —
     that is the stale-credential fix — and injectable for tests."""
     boot = settings_factory()
-    sessions = SessionStore(boot.data_dir, keep=boot.serve_session_turns)
+    sessions = SessionStore(boot.data_dir, keep=boot.serve_session_turns,
+                            max_age_hours=boot.chat_history_max_age_hours)
     make_llm = llm_factory or (lambda s: LLM(s))
 
     class Handler(BaseHTTPRequestHandler):

@@ -101,5 +101,42 @@ def test_session_store_trims_and_survives_corruption(settings):
     for i in range(5):
         store.append("s", f"q{i}", f"a{i}")
     assert [t["owner"] for t in store.history("s")] == ["q2", "q3", "q4"]
+    assert all(t.get("ts") for t in store.history("s"))  # turns are timestamped
     store._path("s").write_text("{corrupt")
     assert store.history("s") == []
+
+
+def test_session_turns_expire_after_48h(settings):
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    store = SessionStore(settings.data_dir, max_age_hours=48)
+    store.append("s", "fresh question", "fresh answer")
+    store.append("other", "old only", "old answer")
+    # age one turn in each file past the cutoff
+    for sid, make_all_old in (("s", False), ("other", True)):
+        path = store._path(sid)
+        data = json.loads(path.read_text())
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=49)).isoformat()
+        if make_all_old:
+            for t in data["turns"]:
+                t["ts"] = old_ts
+        else:
+            data["turns"].insert(0, {"ts": old_ts, "owner": "stale q", "assistant": "stale a"})
+        path.write_text(json.dumps(data))
+
+    # read-time filter: stale turns never reach a prompt
+    assert [t["owner"] for t in store.history("s")] == ["fresh question"]
+    assert store.history("other") == []
+    # legacy turns without ts are treated as expired
+    store._path("legacy").parent.mkdir(parents=True, exist_ok=True)
+    store._path("legacy").write_text(json.dumps(
+        {"session": "legacy", "turns": [{"owner": "x", "assistant": "y"}]}))
+    assert store.history("legacy") == []
+
+    # daily prune: stale turns leave disk, empty sessions are deleted
+    pruned = store.prune()
+    assert pruned == {"turns": 3, "files": 2}  # 1 stale turn + 2 all-stale files
+    assert store._path("s").exists()
+    assert not store._path("other").exists() and not store._path("legacy").exists()
+    assert store.prune() == {"turns": 0, "files": 0}  # idempotent
