@@ -42,7 +42,12 @@ class LLM:
         }
         if system:
             kwargs["system"] = system
-        resp = self.client.messages.create(**kwargs)
+        from . import tracing
+
+        with tracing.span("llm", model=kwargs["model"], max_tokens=max_tokens) as _sp:
+            resp = self.client.messages.create(**kwargs)
+            tracing.set_usage(_sp, getattr(resp, "usage", None),
+                              stop_reason=getattr(resp, "stop_reason", "") or "")
         if resp.stop_reason == "max_tokens":
             import logging
 

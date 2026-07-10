@@ -12,6 +12,7 @@ from .deliver.announce import announce_digest
 from .deliver.email import render_html, send_email
 from .events_store import EventsStore
 from .llm import LLM
+from . import tracing
 from .metrics import EXTRACTORS, build_health, render_health_html
 from .profile_store import ProfileStore
 from .research.pipeline import run_research
@@ -282,7 +283,8 @@ def build_graph(deps: Deps):
         (metrics.EXTRACTORS) into events.db — doc/PIPELINE_METRICS.md."""
         def wrapped(state: AssistantState) -> dict:
             start = time.monotonic()
-            out = fn(state)
+            with tracing.span("phase", phase=name):
+                out = fn(state)
             try:
                 values = {"duration_s": round(time.monotonic() - start, 2),
                           "errors": len(out.get("errors") or [])}
@@ -336,6 +338,8 @@ def run(settings: Settings, dry_run: bool = False, resume: bool = False) -> int:
 
     persist_state(settings.state_file, run_id=run_id, phase=start_phase)
     deps = Deps(settings, run_id)
+    # Trace recorder: timed spans (phases + every LLM call) → runs/<id>/trace.jsonl
+    tracing.init(run_id, deps.run_dir / "trace.jsonl")
 
     initial: AssistantState = {"run_id": run_id, "phase": start_phase,
                                "dry_run": dry_run, "errors": []}
