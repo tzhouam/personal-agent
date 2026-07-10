@@ -1,0 +1,313 @@
+"""Static asset constants for the generated site: the stylesheet (`_CSS`) and
+the client-side script (`_JS`). Pure data — the two largest literals in the
+website subsystem, kept apart from the renderers so those read as logic.
+
+`_JS` implements the owner-only localStorage marks (pin/done/unrelated), the
+background push of marks to the private marks repo, and the WebCrypto unlock of
+the AES-GCM-encrypted private pages (PBKDF2-SHA256, 100k iterations — the count
+must match `render._PBKDF2_ITERATIONS`).
+"""
+
+_CSS = """*{box-sizing:border-box}
+body{font-family:'Inter',-apple-system,'Segoe UI',sans-serif;color:#1e293b;margin:0;
+  background:#f1f5f9}
+a{color:#4f46e5;text-decoration:none}a:hover{text-decoration:underline}
+
+/* ── hero overlay ── */
+.hero{background:linear-gradient(135deg,#0f172a 0%,#312e81 55%,#6d28d9 100%);
+  color:#fff;padding:72px 20px 96px;text-align:center;position:relative;overflow:hidden}
+.hero::after{content:'';position:absolute;inset:auto 0 -1px 0;height:70px;
+  background:#f1f5f9;clip-path:ellipse(75% 100% at 50% 100%)}
+.hero-inner{position:relative;z-index:1;max-width:820px;margin:0 auto}
+.avatar{width:148px;height:148px;border-radius:50%;object-fit:cover;
+  border:4px solid rgba(255,255,255,.85);box-shadow:0 0 0 8px rgba(255,255,255,.12),
+  0 18px 40px rgba(0,0,0,.45)}
+.hero h1{font-size:2.6rem;font-weight:800;margin:18px 0 4px;letter-spacing:-.02em}
+.tagline{color:#c7d2fe;font-size:1.05rem;margin:0 0 18px}
+.pills{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-bottom:22px}
+.pill{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.28);color:#fff;
+  border-radius:999px;padding:6px 16px;font-size:.9rem;backdrop-filter:blur(4px);
+  transition:background .2s}
+.pill:hover{background:rgba(255,255,255,.25);text-decoration:none}
+.anchors{display:flex;gap:22px;justify-content:center;flex-wrap:wrap}
+.anchors a{color:#e0e7ff;font-weight:600;font-size:.92rem;text-transform:uppercase;
+  letter-spacing:.08em;padding-bottom:3px;border-bottom:2px solid transparent}
+.anchors a.active{color:#fff;border-bottom-color:#a5b4fc}
+.anchors a:hover{text-decoration:none;color:#fff}
+
+/* compact banner on section pages — its own shallower curve and card offset:
+   the full hero's 70px curve + -48px main pull would swallow the title/nav */
+.hero.compact{padding:26px 20px 84px}
+.hero.compact::after{height:38px}
+.hero.compact+main{margin-top:-26px}
+.hero.compact h1{font-size:1.5rem;margin:0 0 14px}
+.hero.compact h1 a{color:#fff}
+.hero.compact h1 a:hover{text-decoration:none;color:#c7d2fe}
+.empty{color:#94a3b8;margin:0}
+.bio{color:#475569;line-height:1.65;margin:0 0 10px}
+.bio:last-child{margin-bottom:0}
+
+/* ── content cards ── */
+main{max-width:860px;margin:-48px auto 0;padding:0 20px 40px;position:relative;z-index:2}
+.card{background:#fff;border-radius:18px;box-shadow:0 8px 28px rgba(15,23,42,.08);
+  padding:28px 30px;margin-bottom:26px}
+h2{margin:0 0 16px;font-size:1.35rem;letter-spacing:-.01em}
+h2::after{content:'';display:block;width:44px;height:4px;border-radius:2px;margin-top:8px;
+  background:linear-gradient(90deg,#6366f1,#a855f7)}
+.chips{margin:0}.chip{display:inline-block;background:linear-gradient(135deg,#eef2ff,#f5f3ff);
+  border:1px solid #e0e7ff;color:#4338ca;border-radius:999px;padding:5px 14px;margin:3px;
+  font-size:.9rem;font-weight:600}
+.when{color:#94a3b8;font-size:.85rem;float:right}
+.hl{color:#475569;font-size:.92rem;margin-top:4px;padding-left:14px;position:relative}
+.hl::before{content:'›';position:absolute;left:0;color:#a855f7;font-weight:700}
+
+/* timeline */
+ul.timeline{list-style:none;margin:0;padding:0 0 0 22px;border-left:2px solid #e0e7ff}
+ul.timeline li{margin-bottom:18px;position:relative;padding-left:16px}
+ul.timeline li::before{content:'';position:absolute;left:-28px;top:6px;width:10px;height:10px;
+  border-radius:50%;background:#6366f1;box-shadow:0 0 0 4px #eef2ff}
+.t-head{font-size:1rem}
+
+/* project grid */
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.proj{border:1px solid #e2e8f0;border-radius:14px;padding:16px 18px;
+  transition:transform .18s,box-shadow .18s;background:linear-gradient(180deg,#fff,#fafaff)}
+.proj:hover{transform:translateY(-4px);box-shadow:0 12px 26px rgba(79,70,229,.14)}
+.proj h3{margin:0 0 2px;font-size:1.02rem}
+.role{color:#94a3b8;font-size:.82rem;text-transform:uppercase;letter-spacing:.06em}
+
+/* calendar + todos */
+table.cal{border-collapse:collapse;width:100%;margin-top:6px}
+.cal th{color:#64748b;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;
+  padding-bottom:6px}
+.cal td{border:1px solid #eef2f7;vertical-align:top;padding:5px;height:56px;width:14%;
+  font-size:.82rem;border-radius:4px}
+.cal td.off{background:#f8fafc}
+.cal td.today{background:linear-gradient(135deg,#fef9c3,#fef3c7);outline:2px solid #f59e0b}
+.cal .todo{background:linear-gradient(135deg,#e0e7ff,#ede9fe);border-left:3px solid #6366f1;
+  border-radius:5px;padding:2px 5px;margin-top:3px;font-size:.72rem}
+.cal .todo.due{background:linear-gradient(135deg,#fee2e2,#fce7f3);border-left-color:#ef4444}
+.cal-note{color:#64748b;font-size:.85rem;margin:2px 0 0}
+.cal .more{color:#6366f1;font-size:.72rem;font-weight:600;margin-top:2px}
+.todo-scroll{max-height:480px;overflow-y:auto;padding-right:6px;margin-top:6px;
+  scrollbar-width:thin;border-bottom:1px solid #e2e8f0}
+.todo-scroll.tall{max-height:78vh}  /* reading list holds far more items */
+details.t-day{margin:0 0 8px}
+details.t-day summary{cursor:pointer;font-weight:600;color:#334155;font-size:.92rem;
+  padding:6px 8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+  user-select:none}
+details.t-day[open] summary{margin-bottom:6px}
+details.t-day summary .t-count{color:#64748b;font-weight:400}
+.t-stale{color:#b45309;background:#fef3c7;border-radius:6px;padding:1px 6px;
+  font-size:.72rem;font-weight:600}
+.lock-form{display:flex;gap:8px;margin-top:10px}
+.lock-form input{flex:0 1 220px;padding:8px 10px;border:1px solid #cbd5e1;
+  border-radius:8px;font:inherit}
+.lock-form button{padding:8px 14px;border:none;border-radius:8px;background:#4f46e5;
+  color:#fff;font-weight:600;cursor:pointer}
+.lock-err{color:#dc2626;font-size:.85rem;align-self:center}
+ul.routines{list-style:none;padding:0;margin:6px 0 0}
+ul.routines li{border:1px solid #e2e8f0;border-left:4px solid #6366f1;border-radius:10px;
+  padding:10px 12px;margin-bottom:8px;background:#fff}
+.r-when{color:#4f46e5;font-weight:600;font-size:.88rem;margin-right:6px}
+details.t-day.all-done{display:none}
+body.show-hidden details.t-day.all-done{display:block}
+ul.todos{list-style:none;padding:0;margin:0}
+ul.todos li{border:1px solid #e2e8f0;border-left:4px solid #ef4444;border-radius:10px;
+  padding:10px 14px;margin-bottom:8px;background:#fff}
+ul.todos .when{float:none;display:inline}
+.t-detail{color:#64748b;font-size:.86rem;margin-top:4px}
+
+/* pin / done controls (state lives in this browser's localStorage);
+   owner-only — hidden until body.owner is set via the #owner hash */
+.t-actions{display:none}
+body.owner .t-actions{float:right;display:flex;gap:6px;margin:-2px 0 4px 10px}
+.t-actions button,#todo-show-hidden{border:1px solid #e2e8f0;background:#f8fafc;
+  border-radius:8px;cursor:pointer;font:inherit;font-size:.78rem;padding:2px 10px;
+  color:#64748b;white-space:nowrap;transition:background .15s,color .15s}
+.t-actions button:hover,#todo-show-hidden:hover{background:#eef2ff;color:#4338ca}
+ul.todos li.pinned{border-left-color:#f59e0b;
+  background:linear-gradient(135deg,#fffbeb,#fff)}
+ul.todos li.pinned .b-pin{background:#fef3c7;border-color:#fcd34d;color:#92400e}
+ul.todos li.done-item{display:none}
+body.show-hidden ul.todos li.done-item{display:block;opacity:.55}
+ul.todos li.unrel-item{display:none}
+body.show-hidden ul.todos li.unrel-item{display:block;opacity:.4;border-left-color:#9ca3af}
+.b-unrel{color:#6b7280}
+.cal .todo.done-chip{display:none}
+#todo-hidden-bar{display:none;color:#94a3b8;font-size:.85rem;margin-top:10px}
+footer{text-align:center;color:#94a3b8;font-size:.8rem;margin-top:36px}
+
+@media (max-width:600px){.hero h1{font-size:2rem}.when{float:none;display:block}
+main{margin-top:-36px}.card{padding:20px 18px}.grid{grid-template-columns:1fr}}
+"""
+
+
+_JS = """(function () {
+  var DONE = 'agent-todos-done', PIN = 'agent-todos-pinned', OWNER = 'agent-owner';
+  var UNREL = 'agent-reading-unrelated';
+  function load(k) { try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch (e) { return []; } }
+  function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+  function toggle(k, id) {
+    var v = load(k), i = v.indexOf(id);
+    if (i < 0) v.push(id); else v.splice(i, 1);
+    save(k, v);
+  }
+  // owner mode: visit any page with #owner once to enable in this browser
+  // (#guest disables). Guests never see the buttons and their stored marks
+  // are ignored, so everyone else always sees the canonical list.
+  function readHash() {
+    if (location.hash === '#owner') localStorage.setItem(OWNER, '1');
+    if (location.hash === '#guest') localStorage.removeItem(OWNER);
+  }
+  readHash();
+  window.addEventListener('hashchange', function () { readHash(); apply(); });
+  function isOwner() { return localStorage.getItem(OWNER) === '1'; }
+
+  function apply() {
+    var owner = isOwner();
+    document.body.classList.toggle('owner', owner);
+    var done = owner ? load(DONE) : [], pinned = owner ? load(PIN) : [];
+    var unrel = owner ? load(UNREL) : [];
+    // calendar chips of done todos disappear too
+    document.querySelectorAll('.cal [data-tid]').forEach(function (el) {
+      el.classList.toggle('done-chip', done.indexOf(el.dataset.tid) >= 0);
+    });
+    var lists = Array.prototype.slice.call(document.querySelectorAll('ul.todos'));
+    if (!lists.length) return;
+    var hidden = 0;
+    lists.forEach(function (list) {  // one ul per embedded day group
+      var items = Array.prototype.slice.call(list.querySelectorAll('li[data-tid]'));
+      // pinned first within their day (keeping relative order), rest as rendered
+      items.sort(function (a, b) {
+        var pa = pinned.indexOf(a.dataset.tid) >= 0 ? 0 : 1;
+        var pb = pinned.indexOf(b.dataset.tid) >= 0 ? 0 : 1;
+        return pa - pb || (+a.dataset.idx) - (+b.dataset.idx);
+      }).forEach(function (li) { list.appendChild(li); });
+
+      var allDone = items.length > 0;
+      items.forEach(function (li) {
+        var id = li.dataset.tid;
+        var isDone = done.indexOf(id) >= 0, isPin = pinned.indexOf(id) >= 0;
+        var isUnrel = unrel.indexOf(id) >= 0;
+        if (isDone || isUnrel) hidden++; else allDone = false;
+        li.classList.toggle('done-item', isDone);
+        li.classList.toggle('unrel-item', isUnrel);
+        li.classList.toggle('pinned', isPin);
+        var pb = li.querySelector('.b-pin'), db = li.querySelector('.b-done');
+        var ub = li.querySelector('.b-unrel');
+        if (pb) pb.textContent = isPin ? '\\ud83d\\udccc Unpin' : '\\ud83d\\udccc Pin';
+        if (db) db.textContent = isDone ? '\\u21a9 Restore' : '\\u2713 Done';
+        if (ub) ub.textContent = isUnrel ? '\\u21a9 Undo unrelated' : '\\ud83d\\udeab Unrelated';
+      });
+      // a day whose todos are all done disappears with them
+      var group = list.closest ? list.closest('details.t-day') : null;
+      if (group) group.classList.toggle('all-done', allDone);
+    });
+    var bar = document.getElementById('todo-hidden-bar');
+    if (bar) {
+      bar.style.display = owner && hidden ? 'block' : 'none';
+      bar.querySelector('span').textContent =
+        hidden + ' done todo' + (hidden === 1 ? '' : 's') + ' hidden';
+    }
+  }
+
+  document.addEventListener('click', function (ev) {
+    if (!isOwner()) return;
+    var btn = ev.target.closest ? ev.target.closest('button') : null;
+    if (!btn) return;
+    if (btn.id === 'todo-show-hidden') {
+      var shown = document.body.classList.toggle('show-hidden');
+      btn.textContent = shown ? 'hide' : 'show';
+      return;
+    }
+    var li = btn.closest('li[data-tid]');
+    if (!li) return;
+    if (btn.classList.contains('b-pin')) toggle(PIN, li.dataset.tid);
+    else if (btn.classList.contains('b-done')) {
+      var marking = load(DONE).indexOf(li.dataset.tid) < 0;
+      toggle(DONE, li.dataset.tid);
+      if (marking) enqueueMark(li.dataset.tid, 'done');
+    }
+    else if (btn.classList.contains('b-unrel')) {
+      var unrelMarking = load(UNREL).indexOf(li.dataset.tid) < 0;
+      toggle(UNREL, li.dataset.tid);
+      if (unrelMarking) enqueueMark(li.dataset.tid, 'unrelated');
+    }
+    else return;
+    apply();
+  });
+
+  // ── marks sync: clicks act locally & instantly; the mark also queues and
+  // pushes to the private marks repo, where the agent collects it each run.
+  // The repo/token config lives INSIDE the encrypted page body (#marks-cfg),
+  // so only the unlocked page can sync; without it the queue just waits. ──
+  var MQ = 'agent-marks-queue';
+  var marksBusy = false;
+  function enqueueMark(id, action) {
+    var q = load(MQ);
+    q.push({ id: id, action: action, ts: new Date().toISOString() });
+    save(MQ, q);
+    flushMarks();
+  }
+  function flushMarks() {
+    var cfg = document.getElementById('marks-cfg');
+    var q = load(MQ);
+    if (!cfg || !cfg.dataset.repo || !cfg.dataset.token || !q.length || marksBusy) return;
+    marksBusy = true;
+    var name = 'marks/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.json';
+    fetch('https://api.github.com/repos/' + cfg.dataset.repo + '/contents/' + name, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + cfg.dataset.token,
+                 Accept: 'application/vnd.github+json' },
+      body: JSON.stringify({ message: 'website marks',
+                             content: btoa(unescape(encodeURIComponent(JSON.stringify(q)))) }),
+    }).then(function (res) { if (res.ok) save(MQ, []); marksBusy = false; })
+      .catch(function () { marksBusy = false; /* offline — queue waits for the next visit */ });
+  }
+  // ── encrypted private pages (todos/reading/routines) ──
+  // content ships as AES-GCM ciphertext; WebCrypto decrypts with the owner's
+  // password (PBKDF2-SHA256, 100k iterations — must match the Python side).
+  var PW = 'agent-site-pw';
+  function b64bytes(s) { return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); }); }
+  function unlock(el, pw) {
+    var enc = new TextEncoder();
+    return crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey'])
+      .then(function (mat) {
+        return crypto.subtle.deriveKey(
+          { name: 'PBKDF2', salt: b64bytes(el.dataset.salt), iterations: 100000, hash: 'SHA-256' },
+          mat, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+      })
+      .then(function (key) {
+        return crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64bytes(el.dataset.iv) },
+                                     key, b64bytes(el.dataset.ct));
+      })
+      .then(function (pt) {
+        var host = document.createElement('div');
+        host.innerHTML = new TextDecoder().decode(pt);
+        el.replaceWith(host);
+        apply();  // wire pin/done/unrelated buttons on the decrypted content
+        flushMarks();  // marks-cfg is inside the ciphertext — retry any queued marks now
+      });
+  }
+  function initLock() {
+    var el = document.querySelector('section.lock');
+    if (!el || !window.crypto || !crypto.subtle) return;
+    var saved = localStorage.getItem(PW);
+    if (saved) unlock(el, saved).catch(function () { localStorage.removeItem(PW); });
+    el.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var pw = el.querySelector('input').value;
+      unlock(el, pw).then(function () { localStorage.setItem(PW, pw); })
+        .catch(function () { el.querySelector('.lock-err').textContent = 'wrong password'; });
+    });
+  }
+
+  function boot() { apply(); initLock(); }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();
+"""

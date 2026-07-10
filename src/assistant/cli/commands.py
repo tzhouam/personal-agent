@@ -1,14 +1,18 @@
-import argparse
-import sys
+"""CLI command handlers: one `cmd_*(settings, ...) -> int` per subcommand,
+each returning a process exit code. These carry the actual work (profile
+bootstrap/backfill, todo/reading management, standalone phase runs, resume repo
+setup, consolidation); `main` only parses argv and dispatches to them.
+"""
+
 from datetime import date
 
-from .config import Settings
-from .profile_store import ProfileStore, render_summary
+from ..config import Settings
+from ..profile_store import ProfileStore, render_summary
 
 
 def cmd_bootstrap(settings: Settings) -> int:
     """Seed profile.yaml from the GitHub account. Never overwrites an existing profile."""
-    from .collectors.github import GitHubCollector
+    from ..collectors.github import GitHubCollector
 
     store = ProfileStore(settings.profile_dir)
     if store.exists():
@@ -69,6 +73,7 @@ def cmd_bootstrap(settings: Settings) -> int:
 
 
 def cmd_show(settings: Settings) -> int:
+    """Print a summary of the current profile (≤20 items/section) + its path."""
     store = ProfileStore(settings.profile_dir)
     if not store.exists():
         print("no profile yet — run `assistant bootstrap`")
@@ -79,7 +84,9 @@ def cmd_show(settings: Settings) -> int:
 
 
 def cmd_todo(settings: Settings, args) -> int:
-    from .actions import run_action
+    """`assistant todo list|add|done` — dispatch to the corresponding action.
+    Returns non-zero on a usage error or a failed `done`."""
+    from ..actions import run_action
 
     if args.action == "list":
         print(run_action("list_todos", {}, settings))
@@ -104,7 +111,9 @@ def cmd_todo(settings: Settings, args) -> int:
 
 
 def cmd_reading(settings: Settings, args) -> int:
-    from .actions import run_action
+    """`assistant reading list|done|unrelated` — dispatch to the corresponding
+    action. Returns non-zero on a usage error or a failed mark."""
+    from ..actions import run_action
 
     if args.action == "list":
         print(run_action("list_reading", {}, settings))
@@ -133,10 +142,10 @@ def cmd_enrich_profile(settings: Settings, args) -> int:
     from collections import Counter
     from datetime import datetime, timezone
 
-    from .collectors.github import GitHubCollector, summarize_commits
-    from .events_store import EventsStore
-    from .llm import LLM
-    from .tasks.profile_update import update_profile
+    from ..collectors.github import GitHubCollector, summarize_commits
+    from ..events_store import EventsStore
+    from ..llm import LLM
+    from ..tasks.profile_update import update_profile
 
     if not _re.fullmatch(r"\d{4}-\d{2}", args.since):
         print(f"invalid --since {args.since!r} — expected YYYY-MM (e.g. 2025-07)")
@@ -214,7 +223,7 @@ def cmd_enrich_profile(settings: Settings, args) -> int:
 
     print(f"backfill done: {total_ops} ops total")
     if not args.no_consolidate:
-        from .tasks.profile_consolidate import consolidate_profile
+        from ..tasks.profile_consolidate import consolidate_profile
 
         result = consolidate_profile(llm, store, settings)
         print(f"consolidation: {len(result['applied'])} ops applied, "
@@ -233,11 +242,11 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
     (collect/profile/digest/deliver) belong to the full `assistant run`."""
     import logging
 
-    from .events_store import EventsStore
-    from .llm import LLM
-    from .todo_store import ReadingList, TodoStore
-    from .urgency import urgency
-    from .website import sync_website
+    from ..events_store import EventsStore
+    from ..llm import LLM
+    from ..todo_store import ReadingList, TodoStore
+    from ..urgency import urgency
+    from ..website import sync_website
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     store = ProfileStore(settings.profile_dir)
@@ -251,7 +260,7 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
         return result.get("status", "?")
 
     if phase == "research":
-        from .research.pipeline import run_research
+        from ..research.pipeline import run_research
 
         events = EventsStore(settings.events_db)
         try:
@@ -270,9 +279,9 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
         print(f"website: {_push_site()}")
         return 0
     if phase == "todos":
-        from .collectors.github import GitHubCollector
-        from .marks import collect_marks
-        from .tasks.todos import update_todos
+        from ..collectors.github import GitHubCollector
+        from ..marks import collect_marks
+        from ..tasks.todos import update_todos
 
         events = EventsStore(settings.events_db)
         try:
@@ -288,19 +297,19 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
               f"website {_push_site()}")
         return 0
     if phase == "resume":
-        from .tasks.resume import sync_resume
+        from ..tasks.resume import sync_resume
 
         result = sync_resume(llm, settings, store.load(), "")
         print(f"resume: {result.get('status')} {result.get('note', '')}".strip())
         return 0
     if phase == "curate":
-        from .tasks.curate import curate
+        from ..tasks.curate import curate
 
         curated = curate(store)
         print(f"curate: {len(curated.get('decayed', []))} entries decayed")
         return 0
     if phase == "consolidate":
-        from .tasks.profile_consolidate import consolidate_profile
+        from ..tasks.profile_consolidate import consolidate_profile
 
         result = consolidate_profile(llm, store, settings)
         print(f"consolidate: {len(result['applied'])} ops applied; website {_push_site()}")
@@ -329,6 +338,8 @@ def cmd_resume_init(settings: Settings) -> int:
 
 
 def cmd_resume_status(settings: Settings) -> int:
+    """Print any résumé update awaiting owner approval (summary, compile status,
+    diff), or note that none is pending."""
     import json
 
     pending_file = settings.data_dir / "resume_pending.json"
@@ -343,7 +354,8 @@ def cmd_resume_status(settings: Settings) -> int:
 
 
 def cmd_test_email(settings: Settings) -> int:
-    from .deliver.email import send_email
+    """Send a test email to verify delivery; reports the transport used."""
+    from ..deliver.email import send_email
 
     transport = send_email(
         settings,
@@ -354,136 +366,26 @@ def cmd_test_email(settings: Settings) -> int:
     return 0
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="assistant", description="Personal self-assistant agent")
-    sub = parser.add_subparsers(dest="command", required=True)
+def cmd_consolidate(settings: Settings, args) -> int:
+    """Weekly profile consolidation: merge fragments and promote evidence into
+    contribution highlights, for one `--section` or all. `--dry-run` prints the
+    ops that would apply and changes nothing."""
+    import logging
 
-    run_p = sub.add_parser("run", help="execute a daily run")
-    run_p.add_argument("--dry-run", action="store_true", help="write digest to disk, send no email")
-    run_p.add_argument("--resume", action="store_true", help="resume the last incomplete run")
+    from ..llm import LLM
+    from ..tasks.profile_consolidate import consolidate_profile
 
-    init_p = sub.add_parser("init", help="guided first-run setup (writes .env, "
-                                         "validates each section, seeds the profile)")
-    init_p.add_argument("--check", action="store_true",
-                        help="no prompts — validate the current config and report")
-
-    sub.add_parser("bootstrap", help="seed the profile from GitHub (first run only)")
-    sub.add_parser("show-profile", help="print a summary of the current profile")
-    sub.add_parser("send-test-email", help="verify email delivery")
-
-    enrich_p = sub.add_parser("enrich-profile",
-                              help="backfill the profile from GitHub history "
-                                   "(authored + reviewed + commits + repo context)")
-    enrich_p.add_argument("--since", default="2025-07", metavar="YYYY-MM",
-                          help="start of the backfill window (default 2025-07)")
-    enrich_p.add_argument("--include-comments", action="store_true",
-                          help="also sweep commented-not-reviewed PRs/issues (noisier)")
-    enrich_p.add_argument("--no-consolidate", action="store_true",
-                          help="skip the final editorial consolidation pass")
-    sub.add_parser("resume-init", help="clone/init the resume repo (Overleaf git bridge)")
-    sub.add_parser("resume-status", help="show any resume update pending approval")
-    sub.add_parser("approve-resume", help="push the pending resume update to the remote")
-
-    todo_p = sub.add_parser("todo", help="manage todos: list / add / done")
-    todo_p.add_argument("action", choices=["list", "add", "done"])
-    todo_p.add_argument("value", nargs="?", help="title for add, id (t3) for done")
-    todo_p.add_argument("--due", help="due date YYYY-MM-DD (add only)")
-
-    reading_p = sub.add_parser("reading",
-                               help="manage the reading list: list / done / unrelated")
-    reading_p.add_argument("action", choices=["list", "done", "unrelated"])
-    reading_p.add_argument("value", nargs="?", help="id (r3) for done/unrelated")
-
-    chat_p = sub.add_parser("chat-listen",
-                            help="answer owner messages from email/WeCom (foreground loop)")
-    chat_p.add_argument("--once", action="store_true", help="single poll cycle, then exit")
-
-    sub.add_parser("serve", help="local HTTP daemon: chat/actions/run endpoints "
-                                 "for the OpenClaw bridge + email chat polling")
-
-    phase_p = sub.add_parser("run-phase",
-                             help="run one standalone pipeline phase now")
-    phase_p.add_argument("phase", choices=["research", "website", "todos", "resume",
-                                           "curate", "consolidate"])
-
-    cons_p = sub.add_parser("consolidate",
-                            help="weekly profile consolidation: merge fragments, "
-                                 "promote evidence into contribution highlights")
-    cons_p.add_argument("--section", choices=["projects", "skills", "interests"],
-                        help="consolidate one section only (default: all)")
-    cons_p.add_argument("--dry-run", action="store_true",
-                        help="show what would be applied, change nothing")
-
-    ask_p = sub.add_parser("ask", help="ask the chat agent one question locally")
-    ask_p.add_argument("text", help="the message, quoted")
-
-    args = parser.parse_args()
-    settings = Settings()
-
-    if args.command == "init":
-        from .init_wizard import run_init
-
-        sys.exit(run_init(settings, check_only=args.check))
-    elif args.command == "run":
-        from .orchestrator import run
-
-        sys.exit(run(settings, dry_run=args.dry_run, resume=args.resume))
-    elif args.command == "bootstrap":
-        sys.exit(cmd_bootstrap(settings))
-    elif args.command == "show-profile":
-        sys.exit(cmd_show(settings))
-    elif args.command == "send-test-email":
-        sys.exit(cmd_test_email(settings))
-    elif args.command == "enrich-profile":
-        sys.exit(cmd_enrich_profile(settings, args))
-    elif args.command == "resume-init":
-        sys.exit(cmd_resume_init(settings))
-    elif args.command == "resume-status":
-        sys.exit(cmd_resume_status(settings))
-    elif args.command == "approve-resume":
-        from .tasks.resume import approve_resume
-
-        sys.exit(approve_resume(settings))
-    elif args.command == "todo":
-        sys.exit(cmd_todo(settings, args))
-    elif args.command == "reading":
-        sys.exit(cmd_reading(settings, args))
-    elif args.command == "chat-listen":
-        from .chat.service import run_listener
-
-        sys.exit(run_listener(settings, once=args.once))
-    elif args.command == "serve":
-        from .serve import run_serve
-
-        sys.exit(run_serve(settings))
-    elif args.command == "run-phase":
-        sys.exit(cmd_run_phase(settings, args.phase))
-    elif args.command == "consolidate":
-        import logging
-
-        from .llm import LLM
-        from .tasks.profile_consolidate import consolidate_profile
-
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-        store = ProfileStore(settings.profile_dir)
-        if not store.exists():
-            print("no profile yet — run `assistant bootstrap` first")
-            sys.exit(1)
-        result = consolidate_profile(LLM(settings), store, settings,
-                                     section=args.section, dry_run=args.dry_run)
-        print(f"{len(result['applied'])} ops applied, {len(result['rejected'])} rejected"
-              + (" (dry-run)" if args.dry_run else "")
-              + (f"\nnotes: {result['notes']}" if result["notes"] else ""))
-        if args.dry_run and result["applied"]:
-            for op in result["applied"]:
-                print(f"  would apply: {op.get('op')} {op.get('name') or op.get('into', '')}")
-        sys.exit(0)
-    elif args.command == "ask":
-        from .chat.agent import handle_message
-
-        print(handle_message(args.text, settings))
-        sys.exit(0)
-
-
-if __name__ == "__main__":
-    main()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    store = ProfileStore(settings.profile_dir)
+    if not store.exists():
+        print("no profile yet — run `assistant bootstrap` first")
+        return 1
+    result = consolidate_profile(LLM(settings), store, settings,
+                                 section=args.section, dry_run=args.dry_run)
+    print(f"{len(result['applied'])} ops applied, {len(result['rejected'])} rejected"
+          + (" (dry-run)" if args.dry_run else "")
+          + (f"\nnotes: {result['notes']}" if result["notes"] else ""))
+    if args.dry_run and result["applied"]:
+        for op in result["applied"]:
+            print(f"  would apply: {op.get('op')} {op.get('name') or op.get('into', '')}")
+    return 0

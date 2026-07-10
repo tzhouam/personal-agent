@@ -17,7 +17,8 @@ def test_registry_covers_the_llm_action_set():
 
 
 def test_run_phase_validation_and_dispatch(settings, monkeypatch):
-    from assistant import actions as actions_mod
+    # subprocess + _trigger_run live in the actions.handlers submodule
+    from assistant.actions import handlers as actions_mod
 
     # unknown phase → helpful error, nothing spawned
     result = run_action("run_phase", {"phase": "frobnicate"}, settings)
