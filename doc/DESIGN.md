@@ -1,366 +1,360 @@
-# Personal Self-Assistant Agent — Design
+# personal-agent — Design & Architecture
 
-Owner: Taichang Zhou (tzhouam)
-Status: draft v0.1 (2026-07-02)
+This document is the map for anyone who wants to understand, operate, or extend
+the system. For *using* it, see the [User Guide](USER_GUIDE.md); for setup, see
+the [README](../README.md).
 
-A daily-scheduled personal agent that (1) maintains a living profile of the owner,
-(2) refreshes that profile from activity traces (GitHub, Chrome, email, …),
-(3) keeps the Overleaf resume in sync with the profile, (4) digests GitHub
-notifications, and (5) delivers a daily research/industry digest (arXiv +
-company/people blogs + Chinese AI media 新智元 / 机器之心 / 量子位) by email.
-
-It deliberately reuses the architecture that already works in
-`../vllm-omni-rebase-agent/` (LangGraph StateGraph + Anthropic SDK agent loop +
-SQLite/FTS5 memory + markdown skills + curator) and the strongest ideas mined
-from `../reference-agents/` (Hermes prompt caching & archive-only curator,
-SWE-agent deterministic history pruning, Cline tool-call loop detection,
-OpenClaw pluggable collector registry).
+Deep-dives on specific subsystems live in their own docs and are linked inline:
+[service layer](DESIGN_SERVICE_LAYER.md), [pipeline metrics](PIPELINE_METRICS.md),
+[agent-memory research](RESEARCH_AGENT_MEMORY_2026.md),
+[WeChat gateway](WECHAT_OPENCLAW.md).
 
 ---
 
-## 1. Top-level architecture
+## 1. Philosophy
 
-One daily run = one LangGraph `StateGraph(AssistantState)` invocation, driven by
-cron/systemd-timer on the local machine (must be local: Chrome history and the
-logged-in browser profile live here).
+Three ideas shape every decision in the codebase:
 
-```
-            ┌─────────────────────────────────────────────┐
-            │ Phase 1 · COLLECT  (parallel, asyncio.gather)│
-            │  github · chrome · gmail · [plugins…]        │
-            └──────────────────┬──────────────────────────┘
-                               ▼  observations[]
-            ┌─────────────────────────────────────────────┐
-            │ Phase 2 · PROFILE UPDATE (LLM merge)         │
-            │  observations → profile.yaml diff (git)      │
-            └──────────────────┬──────────────────────────┘
-                               ▼  profile
-       ┌───────────────────────┼───────────────────────────┐
-       ▼                       ▼                           ▼
-┌──────────────┐    ┌──────────────────┐        ┌────────────────────┐
-│ Phase 3a     │    │ Phase 3b         │        │ Phase 3c           │
-│ RESUME SYNC  │    │ GITHUB DIGEST    │        │ RESEARCH DIGEST    │
-│ (Overleaf)   │    │ (notifications)  │        │ (arXiv/blogs/中文)  │
-└──────┬───────┘    └────────┬─────────┘        └─────────┬──────────┘
-       └───────────────────────┼───────────────────────────┘
-                               ▼
-            ┌─────────────────────────────────────────────┐
-            │ Phase 4 · DELIVER  (one HTML email)          │
-            └──────────────────┬──────────────────────────┘
-                               ▼
-            ┌─────────────────────────────────────────────┐
-            │ Phase 5 · CURATE  (dedup, decay, learn)      │
-            └─────────────────────────────────────────────┘
-```
+1. **You are not fabricated.** The agent maintains a picture of a real person.
+   Every claim it stores about you must cite an observation; anything shown
+   publicly (website, résumé) is either deterministic or gated on your approval.
+   The constrained-write-surface pattern below is how this is enforced
+   mechanically, not just by prompt.
 
-Same resume discipline as the rebase agent: `state.json` mirror on disk, the
-`phase` marker names the phase to *re-enter*, advanced only at phase
-completion, so a crashed run resumes instead of restarting. Phases 3a/3b/3c
-are independent — a failure in one degrades the email, never blocks the others
-(errors accumulate into `errors[]`, Phase 4 renders what it has).
+2. **Two-layer memory.** An immutable evidence log beneath a small, curated,
+   human-readable, git-versioned profile. Summarize *over* evidence, never
+   *instead of* it. This is the pattern the 2026 agent-memory literature
+   converged on ([research notes](RESEARCH_AGENT_MEMORY_2026.md)), and it makes
+   the profile auditable and every change revertible.
 
-### AssistantState (TypedDict, mirrors RebaseState conventions)
-
-```python
-class AssistantState(TypedDict, total=False):
-    run_id: str
-    phase: str                      # collect|profile|tasks|deliver|done
-    observations: list[Observation] # normalized activity events from collectors
-    profile_diff: str               # unified diff applied to profile.yaml this run
-    resume: ResumeTaskState         # status, diff, pushed|pending_approval
-    github_digest: DigestSection
-    research_digest: DigestSection
-    errors: Annotated[list, add]
-```
+3. **Degrade, never crash.** A daily run touches a dozen flaky external services.
+   Each phase catches its own failures into an error list and the run continues;
+   the digest renders whatever it has. A crashed run resumes at the phase it
+   stopped, not from scratch.
 
 ---
 
-## 2. Profile store (requirement 1)
+## 2. The pipeline
 
-The profile is the hub — every downstream task reads it; only Phase 2 writes it.
+One daily run is a [LangGraph](https://langchain-ai.github.io/langgraph/)
+`StateGraph(AssistantState)` invocation — nine phases, each a node:
 
-**Storage: a git repo at `~/.personal-agent/profile/`** (private, local; optionally
-pushed to a private GitHub repo for backup).
-
-- `profile.yaml` — the structured source of truth:
-
-```yaml
-identity:   {name, emails, github: yourname, affiliations: [ExampleU], links: []}
-skills:     # every entry carries evidence — no unsourced claims
-  - name: "vLLM internals / LLM inference"
-    level: expert           # emerging|working|expert (LLM-assessed, evidence-based)
-    evidence: ["vllm-omni rebase automation", "PR vllm-omni#4709"]
-    first_seen: 2025-11-02
-    last_seen: 2026-07-01
-    status: active           # active|dormant — decayed by curator, never deleted
-interests:
-  - {topic: "multi-agent orchestration", weight: 0.9, last_seen: 2026-07-01, status: active}
-projects:
-  - name: vllm-omni-rebase-agent
-    role: owner/author
-    period: {start: 2026-03, end: null}
-    highlights: ["LangGraph 5-phase orchestrator", "autonomous CI debugging"]
-    evidence: [commit ranges, PR links]
-publications: []             # arXiv/DBLP entries, auto-discovered + confirmed
-education: []                # seeded manually from current resume, rarely touched
-experience: []
-preferences: {digest_language: zh+en, email_time: "08:00 HKT"}
+```
+                observations[]              profile
+   ┌─────────┐  ┌─────────┐  ┌────────┐  ┌────────┐  ┌───────┐
+   │ collect │→ │ profile │→ │ resume │→ │ digest │→ │ todos │→ ┐
+   └─────────┘  └─────────┘  └────────┘  └────────┘  └───────┘  │
+   ┌──────────┐  ┌─────────┐  ┌─────────┐  ┌────────┐           │
+ ┌←│ research │← │ website │← │ deliver │← │ curate │←──────────┘
+ │ └──────────┘  └─────────┘  └─────────┘  └────────┘
+ └→ (reading list, digest email, published site, dormancy decay)
 ```
 
-- `PROFILE.md` — human-readable render, regenerated each run.
-- `events.db` — SQLite+FTS5 raw observation log (same pattern as
-  `debug_memory_store.py`): every observation is appended with source, timestamp,
-  and extracted entities. The profile is the *curated* layer; events.db is the
-  *evidence* layer. Profile entries link back to event ids.
+`agent/orchestrator.py` builds and runs it. Phase responsibilities:
 
-**Why git:** every daily update is a reviewable, revertible diff. The daily email
-includes the profile diff, so silent drift is impossible.
+| Phase | What it does | Key module(s) |
+|---|---|---|
+| **collect** | Run every registered collector (GitHub, Chrome, Gmail) → normalized `Observation`s; fetch GitHub notifications; pull website marks | `collectors/`, `marks.py` |
+| **profile** | LLM emits typed patch ops against the profile; code applies them; git commit | `tasks/profile_update.py`, `profile_store.py` |
+| **resume** | If profile changes are résumé-worthy, edit the LaTeX (approval-gated) | `tasks/resume.py` |
+| **digest** | Triage GitHub notifications 🔴/🟡/⚪ against the profile; dedupe via seen-store | `tasks/github_digest.py` |
+| **todos** | Age out stale todos; auto-close finished ones; derive new from red notifications | `tasks/todos.py`, `todo_store.py`, `urgency.py` |
+| **research** | Gather arXiv + feeds, score for relevance, select, summarize; feed the reading list | `research/`, `tasks/` |
+| **website** | Render the profile + todos + reading + routines to HTML; push to Pages | `website.py` |
+| **deliver** | Render and send the digest email; announce success to WeChat | `deliver/` |
+| **curate** | Decay dormant entries; prune old chat sessions | `tasks/curate.py` |
 
-**Bootstrap:** first run ingests the current resume PDF/LaTeX + GitHub profile
-(repos, languages, pinned) + a short interview (the agent emails questions, owner
-replies once). Education/experience are seeded manually — collectors can't infer
-those reliably.
+### State & resume
 
-### Profile updater (Phase 2)
+`AssistantState` (a `TypedDict`, `agent/state.py`) is the shared bag threaded
+through the graph. Resilience follows one discipline, borrowed from the parent
+rebase-agent project:
 
-A single LLM call (not an open-ended agent loop) with a strict contract:
+- A `state.json` on disk holds the **phase to re-enter**, advanced only when a
+  phase completes successfully.
+- Each phase writes its output as a JSON artifact under `runs/<run_id>/`.
+- `assistant run --resume` rehydrates artifacts from the interrupted run and
+  restarts at the saved phase.
+- A single `flock` around the whole run prevents cron, a chat-triggered run, and
+  a manual run from interleaving.
 
-- Input: current `profile.yaml` + today's normalized observations (capped,
-  SWE-agent-style deterministic truncation — no LLM summarization needed at this
-  volume).
-- Output: a **list of typed patch operations** (`add_evidence`, `bump_last_seen`,
-  `add_skill{status: emerging}`, `add_project`, `update_highlight`,
-  `mark_dormant_candidate`) — applied by code, not free-form YAML rewriting.
-  This is the same insight as the rebase agent's plan-review gate: constrain the
-  LLM's write surface.
-- Invariants (Hermes curator, copied verbatim): **never delete** (only
-  `status: dormant`), manual/pinned entries (education, experience) are never
-  auto-modified, every new claim must cite ≥1 observation id.
+### Error handling
+
+Phases 3–9 each wrap their body in try/except and accumulate failures into
+`state["errors"]` (a reducer-merged list). A failure degrades the output — a
+broken collector means fewer observations, a failed research phase means no
+papers — but never blocks the run. The seen-store is only updated *after* the
+email actually sends, so a delivery failure doesn't silently swallow items.
 
 ---
 
-## 3. Collectors (requirement 2)
+## 3. Memory: the profile
 
-Pluggable registry (OpenClaw context-engine pattern): each collector implements
-`collect(since: datetime) -> list[Observation]` and registers itself; adding
-Slack/WeChat/calendar later touches no orchestrator code.
+The profile is the hub — every downstream phase reads it, only the profile phase
+writes it.
+
+### Two layers
+
+- **Evidence (`events.db`)** — a SQLite + FTS5 append-only log of every
+  observation, plus a seen-store for dedup and a metrics table. Immutable.
+- **Curated (`profile/profile.yaml`)** — a small, structured, human-readable
+  document in its own **git repo**. Skills, projects, interests; each entry
+  carries cited evidence, timestamps, a `confirmations` count, and a `status`
+  (active/dormant/merged). `PROFILE.md` is a regenerated render.
+
+Because the curated layer is git, every daily update is a reviewable, revertible
+commit and silent drift is impossible.
+
+### Constrained writes (the safety core)
+
+The profile is never freely rewritten by an LLM. `profile_store.apply_ops`
+accepts only a fixed set of **typed patch operations** and applies them in code:
+
+```
+bump_last_seen · add_evidence · add_skill · add_interest · add_project
+update_highlight · mark_dormant · merge_projects · move_evidence   (daily)
++ rewrite_entry                                                     (weekly only)
+```
+
+Invariants enforced by code, not prompt:
+
+- **Protected sections** (`identity`, `education`, `experience`, `preferences`)
+  reject every op — the owner owns those.
+- **Never delete** — entries go `dormant`/`merged`/`outdated`; superseded
+  highlights move to a `history` list (audit rows).
+- **Stability gate** — an entry confirmed ≥3 times rejects a `rewrite_entry`
+  that would cite fewer source URLs than it currently has.
+- **Initiative-owning entries** can't be merged away (a fragment merges *into*
+  the canonical entry, never the reverse).
+
+### Daily vs weekly
+
+- **Daily** (`tasks/profile_update.py`) is deliberately additive: a single
+  constrained LLM call, given the profile + initiatives + last-7-days of ops +
+  today's observations, emits ops. New skills start `emerging`; a write gate
+  drops transient noise.
+- **Weekly** (`tasks/profile_consolidate.py`) is the editorial pass: it sees a
+  whole section at once and may `merge_projects`, `move_evidence`, and
+  `rewrite_entry` to promote clustered evidence into résumé-voice highlights
+  (following the [writing rules](../src/assistant/writing.py) and the owner's
+  hand-written `experience` section as the style reference). It also runs an
+  **LLM judge audit** — contradictions, stale claims, unsupported highlights —
+  recorded as metrics and emailed, never auto-fixed.
+
+### Initiatives
+
+`aliases.yaml` maps repos/keywords → initiative umbrellas. This is the join key
+that stops correlated work from fragmenting into separate entries: every daily
+op names the initiative it advances, and consolidation merges fragments into the
+initiative's canonical entry. Owner-editable.
+
+Background and citations: [RESEARCH_AGENT_MEMORY_2026.md](RESEARCH_AGENT_MEMORY_2026.md).
+
+---
+
+## 4. Collectors
+
+A pluggable registry (`collectors/__init__.py`): each collector implements
+`collect(since) -> list[Observation]` and registers itself. Adding a source
+(calendar, Slack, …) is one self-contained module; the orchestrator never
+changes.
 
 ```python
 class Observation(TypedDict):
-    source: str        # github|chrome|gmail|...
+    source: str        # github | chrome | gmail | …
     ts: str
-    kind: str          # commit|pr|review|visit|email|star|...
+    kind: str          # commit | pr | review | visit | email | …
     title: str
     url: str | None
-    entities: list[str]  # repos, people, topics (extracted)
-    raw_ref: str         # pointer back into events.db, raw payload never in prompts
+    entities: list[str]
+    raw: dict
 ```
 
-### 3.1 GitHub collector
-- Auth: fine-grained PAT (read-only: repo metadata, notifications, events).
-- Pulls since last run: authored commits/PRs/issues/reviews across all repos,
-  starred repos, `GET /notifications` (feeds Phase 3b too — fetched once, used twice).
-- Cheap and reliable; this is the MVP collector.
-
-### 3.2 Chrome collector
-- Reads `~/.config/google-chrome/Default/History` (SQLite). The file is locked
-  while Chrome runs → **copy to scratchpad, query the copy** (`urls`,
-  `visits` tables; Chrome epoch = µs since 1601-01-01).
-- Extracts last-24h visits, aggregates by domain, keeps titles for an
-  **allowlisted domain set** (arxiv.org, github.com, docs sites, HF, scholar…)
-  and only domain-level counts for everything else.
-- **Privacy rule: denylist > allowlist > domain-count-only.** Raw URLs outside
-  the allowlist never enter an LLM prompt. Denylist (banking, health, personal)
-  is dropped at read time, never written to events.db.
-
-### 3.3 Gmail collector
-- Gmail API, OAuth with `gmail.readonly` scope (token cached locally; one-time
-  browser consent).
-- Reads last-24h headers + snippets; a cheap-model classifier tags
-  {academic, github-notice, industry-newsletter, personal, other}. Full bodies
-  are fetched **only** for classes that feed the profile/digest (academic,
-  newsletters). Personal mail contributes at most counts.
-- Also the **feedback channel**: replies to the daily digest addressed to the
-  agent (e.g. "more RL papers, less agents") are parsed into preference updates.
-
-### 3.4 Future plugins (same interface, not in MVP)
-Shell/Claude-Code history, Zotero/Scholar library, calendar, WeChat readouts,
-Slack. Each is a self-contained module under `collectors/`.
+- **GitHub** — the richest source: authored + reviewed PRs/issues (search API,
+  paginated), commit summaries, and `GET /notifications` (fetched once, used by
+  both collect and digest). `enrich-profile` uses the same code for history
+  backfill, adding per-repo README/description context.
+- **Chrome** — reads the History SQLite (copied first, since Chrome locks it).
+  **Privacy-tiered**: a denylist is dropped at read time; only an allowlist of
+  domains keeps full titles/URLs; everything else is domain-level counts. Raw
+  URLs outside the allowlist never enter a prompt.
+- **Gmail** — IMAP, headers/snippets only, reusing the SMTP credentials. Also
+  the email chat channel's inbound side.
 
 ---
 
-## 4. Resume sync — Overleaf (requirement 3)
+## 5. Service layer & chat
 
-**Hard constraint: Overleaf has no public API.** "With my Google account" means
-the Overleaf login is Google OAuth — that only matters for browser automation.
-Three viable integration paths:
+The chat surface is a **typed action registry** (`actions.py`) — one table that
+is the single source of truth for what the agent can *do*. It drives three
+consumers: the chat LLM's prompt (which actions it may emit), the executor, and
+the CLI/HTTP entry points. Handlers return one human-readable line describing
+what the code actually did — replies are built from those, never from LLM claims.
 
-| Path | Needs | Reliability |
-|---|---|---|
-| **A. Overleaf Git bridge** (recommended) | Overleaf premium; per-project git URL + Overleaf auth token | High — plain git |
-| B. Overleaf ↔ GitHub Sync | Premium; resume repo on GitHub | High, but sync is manual-click or needs A anyway |
-| C. Playwright browser automation with the logged-in Chrome profile | Nothing paid | Brittle; breaks on UI changes; last resort |
+Actions: todo/reading management, `trigger_run`, `run_phase`, `plan_task`,
+`web_search`, reminders, routines, status/profile queries.
 
-**Recommended design (path A):**
+`assistant serve` is a loopback-only HTTP daemon exposing `/chat` (with
+per-session memory), `/actions/<name>`, `/run`, `/status`, `/healthz`. It
+rebuilds `Settings`/`LLM` per request (so a `.env` edit applies immediately) and
+runs the email chat poll and the reminder/routine schedulers as background
+threads. The [WeChat bridge](WECHAT_OPENCLAW.md) calls this daemon over HTTP,
+with an `assistant ask` subprocess as the degraded fallback.
 
-1. Canonical resume lives in a local git repo `~/.personal-agent/resume/`
-   (LaTeX), with the Overleaf project's git URL as a remote.
-2. When Phase 2 produced a profile diff that *matters for the resume* (new
-   project milestone, publication, skill promotion — a small LLM relevance
-   check), a resume-editor agent (the shared `_run_agent_loop` engine, tools:
-   `read_file`/`edit_file`/`run_shell` for `latexmk`) edits the LaTeX.
-   Constraints in prompt: never fabricate, only surface facts present in
-   `profile.yaml` with evidence, preserve document style, **must compile**
-   (`latexmk -pdf` is the verification gate — a resume edit that doesn't
-   compile is a failed task).
-3. **Approval gate — the resume is outward-facing, so it is never auto-pushed.**
-   The daily email includes the LaTeX diff + rendered PDF attachment; pushing
-   to Overleaf happens on explicit approval: `assistant approve resume` (CLI),
-   or an approval reply parsed by the Gmail collector next run. Pre-push, the
-   agent pulls Overleaf's remote first (owner may have edited in the web UI)
-   and rebases; conflicts → surfaced in email, never force-pushed.
-   (Same philosophy as the rebase agent's "never push to main" rule.)
+Full rationale and the migration that produced this shape:
+[DESIGN_SERVICE_LAYER.md](DESIGN_SERVICE_LAYER.md).
 
-Decision needed from owner: is the Overleaf account premium? If not: path B via
-a free GitHub-synced template workflow, or path C.
+### Proactive messaging
+
+`notify.py` (`send_wechat`) pushes messages to the owner without an inbound
+command. It backs the deliver-phase success announce, one-shot **reminders**
+(`ReminderStore`), and conditional **routines** (`routines.py` — WHEN + optional
+LLM-judged CONDITION + a TASK run through the chat agent). The serve daemon's
+poll loop fires due reminders and routines each cycle.
 
 ---
 
-## 5. GitHub notification digest (requirement 4)
+## 6. Digests
 
-- Input: `GET /notifications` (all since last run) + the day's activity
-  observations for context.
-- Deterministic pre-classification (no LLM): reason field →
-  {review_requested, mention, assign, ci_activity, author, subscribed}.
-- LLM pass ranks and summarizes **relative to the profile** ("you own this PR",
-  "this touches vllm-omni scheduler which you rebased last week"), producing:
-  - 🔴 **Action needed** — review requests, mentions, CI red on own PRs
-  - 🟡 **Worth knowing** — activity on subscribed threads, releases of tracked deps
-  - ⚪ **FYI counts** — everything else, one line per repo
-- Each item: one-sentence summary + suggested action + link. Threads already
-  seen and unchanged are suppressed (seen-store, §7).
-- Ships inside the daily email. Optional later: a separate immediate email when
-  a `review_requested` arrives (would need a second, lighter cron).
+### GitHub triage
 
----
+Deterministic pre-classification by notification `reason`
+(review_requested/mention/…), then an LLM pass ranks and summarizes **relative
+to the profile** ("you own this PR", "this touches the scheduler you rebased"),
+bucketing into 🔴 action / 🟡 worth-knowing / ⚪ FYI. A seen-store suppresses
+unchanged, already-shown threads.
 
-## 6. Research & industry digest (requirement 5)
+### Research
 
-### 6.1 arXiv
-- Query set is **generated from the profile** each run: interests + project
-  topics → arXiv categories (cs.CL, cs.LG, cs.DC, cs.MA…) + keyword queries
-  via the arXiv API (last 1–2 days window).
-- Pipeline: fetch (~100–300 abstracts) → dedupe vs seen-store → cheap-model
-  relevance scoring against a rendered profile summary (batch, haiku-class)
-  → top ~10 get a full-model read: 3-sentence summary + explicit
-  "why this matters to *you*" line tied to a profile interest/project.
-
-### 6.2 Company / people blogs & social media (English)
-- **RSS-first**: Anthropic, OpenAI, DeepMind, Meta AI, HF blog, vLLM blog,
-  lmsys, key personal blogs (Karpathy, Lilian Weng, …) — plain RSS/Atom fetch.
-- Hacker News front page + `lobste.rs`, filtered by profile relevance.
-- X/Twitter has no viable free API — **out of MVP scope**; revisit via a paid
-  aggregator or Nitter instance if the owner wants it. (Silent-cap rule: the
-  digest footer states which sources were configured vs actually fetched.)
-- The follow list (`sources.yaml`: feeds, people, companies) is owner-editable
-  and also grows by suggestion: the curator proposes additions when an entity
-  keeps appearing in high-ranked items.
-
-### 6.3 Chinese AI media — 新智元, 机器之心, 量子位
-(assuming 新智源/机械之心 meant 新智元 and 机器之心)
-- These publish primarily on WeChat 公众号 — no official API. Strategy, in order:
-  1. **机器之心**: jiqizhixin.com is a real website — direct scrape/RSS.
-  2. **新智元 / 量子位**: self-hosted **RSSHub** instance with its WeChat routes;
-     flaky by nature, so wrapped in per-source health tracking — a source that
-     fails 3 consecutive days is flagged in the digest footer instead of
-     silently vanishing.
-  3. Fallback: aggregator sites that mirror 公众号 content.
-- Same relevance pipeline as 6.2; summaries written in Chinese (per
-  `preferences.digest_language`).
-
-### 6.4 Digest email (Phase 4)
-One daily HTML email, sections: **Action needed (GitHub)** → **Papers** →
-**Industry** → **中文媒体** → **Profile changes today** (the yaml diff) →
-**Resume pending approval** (if any) → footer (source health, items scanned/
-selected counts). Delivery via Gmail API send (same OAuth app) — reusing the
-SMTP config pattern from the rebase agent as fallback.
+Query set generated from the profile → arXiv fetch + RSS/Atom feeds → dedupe vs
+seen-store → cheap-model relevance scoring → select → one full-model call writes
+all summaries with a per-item "why this matters to you." Papers feed a
+persistent reading list. The 中文 section has a score floor so it's never empty
+when a source works, and per-source health tracking surfaces any feed dead 3
+days running in the digest footer (rather than silently vanishing). An
+**adaptive quota** throttles how many papers surface to ~1.5× the rate you
+actually act on them.
 
 ---
 
-## 7. Memory, dedup, and learning (Phase 5)
+## 7. Website
 
-- **seen.db** (SQLite): every surfaced item's normalized id (arXiv id, notif id,
-  URL hash) + shown date — the dedup backbone for all digests.
-- **Feedback loop**: digest replies parsed by the Gmail collector become
-  preference observations ("less X, more Y" → interest weight nudges;
-  clicked/starred papers later, if we add tracking links).
-- **Curator** (post-run, Hermes invariants): decays interests/skills not
-  evidenced in N=30 days to `dormant`, merges near-duplicate interests,
-  proposes new sources for `sources.yaml`, archives — never deletes.
-- **Skills dir** (`skills/*/SKILL.md`, same format as the rebase agent):
-  operational runbooks the agent writes for itself after resolving failures
-  (e.g. "gmail token refresh dance", "RSSHub WeChat route workaround",
-  "overleaf git 409 conflict recovery").
+`website.py` renders the profile + todos + reading + routines to a static site
+and pushes to a GitHub Pages repo. **Deterministic — no LLM in the loop**, so
+nothing fabricated can reach a public page.
 
----
-
-## 8. Engine & implementation notes
-
-- **Language/stack**: Python 3.12, LangGraph, Anthropic SDK — direct code reuse
-  from `vllm-omni-rebase-agent` (`_run_agent_loop`, dispatcher pattern,
-  `persist_state_fields`, FTS5 store, skills store, curator skeleton).
-- **Improvements over the rebase agent** (the deferred Hermes items, worth doing
-  here from day 1 since this runs daily forever):
-  - **Prompt caching** (`system_and_3`): cache breakpoints on system prompt +
-    last 3 messages in the agent-loop calls.
-  - **Loop detection** (Cline): hash tool-call signatures, abort after 3
-    identical consecutive calls.
-  - Deterministic observation truncation (SWE-agent `LastNObservations`) instead
-    of max_turns hard-stops.
-- **Model tiering** (mirrors the rebase agent's L1–L4): haiku-class for
-  classification/relevance scoring (hundreds of items/day), sonnet-class for
-  digest writing and profile patching, opus-class only for resume editing.
-  Estimated cost: the cheap tier dominates volume; expect low single-digit
-  $/day.
-- **Scheduling**: systemd timer (better logging/retry than cron), 07:00 HKT
-  daily; `--resume` on failure retry at 07:30. Manual: `assistant run`,
-  `assistant run --only research`, `assistant approve resume`.
-- **Config**: Pydantic `Settings` + `.env` (ANTHROPIC_API_KEY, GITHUB_TOKEN,
-  Gmail OAuth client, Overleaf git token, SMTP fallback) + `sources.yaml`.
-
-### Security & privacy
-- Everything runs and stays local; the only egress is (a) LLM API calls,
-  (b) the digest email, (c) approved resume pushes.
-- Chrome/Gmail data is filtered *before* prompt assembly (denylist at read
-  time); raw payloads live only in local SQLite.
-- Tokens: fine-grained read-only PAT, `gmail.readonly` + `gmail.send` scopes
-  only, Overleaf token scoped to the resume project.
-- The resume approval gate is the only human gate — everything else is
-  read-only or reversible (git-versioned profile).
+- Public pages (About/Experience/Education/Projects) render from the profile.
+- Private pages (Todos/Reading/Routines) are **AES-GCM encrypted at render
+  time**; the published HTML holds ciphertext, decrypted in-browser with the
+  owner's password (WebCrypto, PBKDF2). Owner-only action buttons are gated by a
+  localStorage flag.
+- **Todos** use the [urgency metric](../src/assistant/urgency.py) (a
+  Taskwarrior-style polynomial over priority/due/blocking/age × staleness) for
+  calendar eligibility, ordering, and expiry.
+- **Marks sync** (`marks.py`): Done/Unrelated clicks act locally and push to a
+  private marks repo via a repo-scoped token embedded *only inside the encrypted
+  payload*; the agent collects them each run (idempotent via the seen-store).
 
 ---
 
-## 9. Build order
+## 8. Metrics
 
-| Milestone | Delivers | Requirements covered |
-|---|---|---|
-| **M1** | profile store + GitHub collector + notification digest + email delivery + systemd timer | 1, 4, 2(partial) |
-| **M2** | Chrome + Gmail collectors, LLM profile updater with patch ops, profile diff in email | 2 |
-| **M3** | arXiv + RSS blogs + 机器之心/新智元 (RSSHub) digest, seen-store, feedback parsing | 5 |
-| **M4** | Overleaf resume sync with approval gate | 3 |
-| **M5** | curator, skills, prompt caching polish, source suggestions | quality |
+Every phase is wrapped to record duration, error count, and its headline numbers
+into an `events.db` metrics table. `metrics.py` derives a 7-day health view —
+step success, profile-ops acceptance rate, notification action rate (SRE
+alerting-precision proxy), reading done-rate, todo flow, publish/delivery,
+weekly profile-audit findings — rendered as a **Health footer** in the digest.
+Everything is computable from artifacts already written plus the owner's implicit
+actions; no explicit ratings. Full catalog and the research behind each metric:
+[PIPELINE_METRICS.md](PIPELINE_METRICS.md).
 
-M1 is deliberately the GitHub slice end-to-end (collector → profile → digest →
-email → schedule): it exercises every architectural seam with the most reliable
-data source before the flaky ones (WeChat scraping, browser history locks,
-OAuth dances) enter the picture.
+---
 
-## 10. Open decisions for the owner
+## 9. Configuration
 
-1. **Overleaf**: premium (→ git bridge, path A) or not (→ path B/C)?
-2. **Resume pushes**: keep the approval gate (recommended) or fully automatic?
-3. **Digest language**: 中文, English, or mixed (default: mixed — Chinese for
-   中文媒体 section, English elsewhere)?
-4. **Where it runs**: this H200 dev box, or a personal always-on machine?
-   (Chrome history must be read on the machine where you browse.)
-5. X/Twitter monitoring: skip (default), Nitter, or paid API?
+`config.py` is a Pydantic `Settings` reading `.env` (repo root, then CWD).
+`config/sources.yaml` holds the research follow-list. Secrets never live in
+code. `assistant init` writes `.env` interactively with live validation;
+`assistant init --check` (`init_wizard.py`) is the config doctor — the same
+probes run non-interactively with a ✅/⚠️/❌ report.
+
+Data lives under `DATA_DIR` (default `~/.personal-agent/`): `profile/` (git),
+`events.db`, `runs/<id>/`, `state.json`, `sessions/`, plus `todos.yaml`,
+`reading_list.yaml`, `reminders.yaml`, `routines.yaml`, `aliases.yaml` in the
+profile repo.
+
+---
+
+## 10. Safety & privacy
+
+- **Local-first.** Everything runs and stores on your machine. The only egress
+  is (a) LLM API calls, (b) the digest email, (c) explicitly-configured
+  sites/repos, (d) approved résumé pushes.
+- **Filtered before prompting.** Chrome/Gmail data is denylist-filtered at read
+  time; raw payloads live only in local SQLite.
+- **Constrained writes.** The profile's only write surface is the typed op set;
+  the website render is deterministic; résumé edits only surface profile facts.
+- **Protected sections & approval gates.** `identity`/`education`/`experience`
+  are never auto-edited; résumé pushes need `approve-resume`; private pages are
+  client-side encrypted.
+- **Everything reversible.** The profile is git; nothing is deleted; every run
+  is a commit.
+- **Least-privilege tokens.** The GitHub collector token can be read-only; the
+  marks token is scoped to one repo (and `--check` warns if it isn't).
+
+---
+
+## 11. Extending it
+
+- **A new collector** — add a module under `collectors/`, implement
+  `collect(since)`, decorate with `@register("name")`. Done.
+- **A new chat action** — add an `Action` to the registry in `actions.py`
+  (name, params, handler, LLM-exposed?, slash alias). It becomes available over
+  chat, slash commands, and HTTP automatically.
+- **A new pipeline phase** — add a node in `orchestrator.py`, insert it into the
+  `_PHASES` list, give it an artifact and a `metrics.EXTRACTORS` entry.
+- **A new research source** — add it to `config/sources.yaml` (RSS/Atom URL,
+  language). Per-source health tracking and the score floor handle the rest.
+- **A new metric** — record it from the phase node; add it to `build_health`.
+
+The codebase favors small, testable, pure functions and a large test suite
+(`test/`, run with `pytest`). When you resolve a recurring operational failure,
+distill it into `skills/<name>/SKILL.md` — the growing runbook library.
+
+---
+
+## 12. Project layout
+
+```
+src/assistant/
+├── orchestrator.py     the 9-phase graph, run loop, resume, metrics wrapper
+├── state.py            AssistantState + state.json persistence
+├── config.py           Pydantic Settings (all .env knobs)
+├── init_wizard.py      `init` wizard + `--check` doctor
+├── cli.py              argparse entry points
+├── llm.py              Anthropic client wrapper (retry, JSON parsing)
+├── profile_store.py    the profile: apply_ops, git, aliases, render
+├── events_store.py     evidence log + seen-store + metrics (SQLite/FTS5)
+├── todo_store.py       todos + reading list (YAML in the profile repo)
+├── urgency.py          the todo urgency metric
+├── metrics.py          per-phase extractors + the Health footer
+├── marks.py            website marks collection
+├── notify.py           proactive WeChat + reminders
+├── routines.py         recurring conditional routines
+├── search.py           web search backends
+├── writing.py          résumé-voice rules (shared prompt block)
+├── website.py          site render + publish
+├── actions.py          the typed action registry
+├── serve.py            the loopback HTTP daemon
+├── collectors/         github, chrome, gmail
+├── deliver/            email render/send, wechat announce
+├── research/           arxiv, feeds, ranking pipeline
+├── chat/               agent, email/wecom channels, session service
+└── tasks/              profile_update, profile_consolidate, github_digest,
+                        todos, research, resume, curate
+openclaw-plugin/        the WeChat bridge (Node)
+config/sources.yaml     research follow-list
+doc/                    this doc + the sub-docs
+skills/                 operational runbooks
+test/                   pytest suite
+```

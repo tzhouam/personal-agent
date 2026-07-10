@@ -1,197 +1,173 @@
 # personal-agent
 
-Daily self-assistant agent. See [DESIGN.md](DESIGN.md) for the full design;
-this is **Milestone 1**: profile store + GitHub collector + notification digest + email + timer.
+A daily self-assistant that keeps a living picture of *you* and turns your own
+activity into something useful every morning. It reads what you did (GitHub,
+email, browser history), maintains an evidence-backed profile of your skills
+and projects, publishes a personal website and résumé from it, and emails you
+a triaged digest — action-needed notifications, new papers worth reading, and
+industry news — with a chat interface (email, WeChat) for asking it things and
+handing it tasks.
 
-## Install
+Everything runs locally and stores your data on your own machine; the only
+things that leave are LLM API calls, the digest email, and the sites/repos you
+explicitly point it at.
 
-```bash
-source /rebase/.venv/bin/activate
-pip install -e /rebase/personal-agent
+- **New here?** → [`assistant init`](#quickstart) walks you through setup.
+- **Using it day to day?** → [**User Guide**](doc/USER_GUIDE.md)
+- **Understanding or extending it?** → [**Design & Architecture**](doc/DESIGN.md)
+
+---
+
+## What it does
+
+| | |
+|---|---|
+| 🧠 **Living profile** | Builds and maintains `profile.yaml` — skills, projects, interests, every claim backed by a cited observation — from your daily activity. A weekly editorial pass merges fragmented work into résumé-grade contribution highlights. |
+| 📥 **Activity collectors** | Pluggable: GitHub (authored + reviewed PRs/issues, commits, notifications), Chrome history (privacy-tiered), Gmail (headers only). Adding a source is one module. |
+| 📰 **Daily digest email** | GitHub notifications triaged 🔴/🟡/⚪ against your profile, new arXiv papers + industry/中文 news ranked by relevance, your open todos and reading list, and a 7-day health footer. |
+| 🌐 **Personal website** | Renders your profile to a GitHub Pages site (about, experience, projects) plus private, password-encrypted todos / reading / routines pages. Deterministic — no LLM can fabricate a public page. |
+| 📄 **Résumé sync** | Edits your LaTeX résumé from the profile (Overleaf git-bridge or any git remote), gated on a compile and your explicit approval — never auto-pushed. |
+| 💬 **Chat + tasks** | Message it from email or WeChat: ask questions, manage todos/reading, run pipeline phases on demand, set reminders and recurring routines, search the web, or hand it a novel multi-step task (“book a dinner for six Friday”) that it plans and tracks. |
+| 📊 **Self-measuring** | Per-step metrics (success, latency, acceptance rates, triage precision, reading done-rate) in a local SQLite table, surfaced in the digest and used to auto-tune how much it surfaces. |
+
+## How it works, in one breath
+
+One daily run is a 9-phase [LangGraph](https://langchain-ai.github.io/langgraph/)
+pipeline with crash-resume:
+
+```
+collect → profile → resume → digest → todos → research → website → deliver → curate
 ```
 
-## New user? Start here
+Each phase reads and writes a shared state, persists per-run artifacts, and can
+be re-entered if a run crashes. The profile is a two-layer memory: an immutable
+evidence log (`events.db`) beneath a small curated, git-versioned `profile.yaml`
+— the same pattern the 2026 agent-memory literature converged on
+([research notes](doc/RESEARCH_AGENT_MEMORY_2026.md)). Full architecture in the
+[Design doc](doc/DESIGN.md).
+
+---
+
+## Requirements
+
+- **Python 3.11+**
+- An **Anthropic-compatible LLM API key** (real Anthropic, or any compatible
+  endpoint such as DeepSeek — set a base URL)
+- A **GitHub token** (fine-grained, read-only is enough for the collector)
+- An **email delivery path**: a [Resend](https://resend.com) API key (easiest)
+  or SMTP credentials (a Gmail app password also unlocks the Gmail collector
+  and the email chat channel)
+- *Optional*: a GitHub Pages repo (website), an Overleaf premium account
+  (résumé git bridge), an OpenClaw gateway (WeChat), web-search API keys.
+
+## Quickstart
 
 ```bash
-assistant init           # guided setup: walks every config group, writes .env,
-                         # live-validates each section (LLM ping, token scopes,
-                         # repo access), then seeds your profile from GitHub
-assistant init --check   # no prompts: ✅/⚠️/❌ report on the current config —
-                         # run it any time something feels off
-```
-
-The wizard covers: LLM key/endpoint, GitHub token, email delivery (Resend or
-SMTP — SMTP also unlocks the gmail collector + email chat), the GitHub Pages
-website + private-page password, website marks sync (repo-scoped token —
-the wizard warns if yours is over-scoped), optional Overleaf resume remote,
-and web-search keys. It finishes by printing the remaining manual steps
-(test email, dry run, scheduling). Prefer doing it by hand? `cp .env.template
-.env` and edit — the template documents every knob — then `assistant init
---check` to verify.
-
-## Usage
-
-```bash
-assistant bootstrap        # first time only: seed profile.yaml from GitHub
-assistant show-profile
+pip install -e .            # from the repo root
+assistant init             # guided setup — see below
 assistant run --dry-run    # full pipeline, digest written to disk, no email
-assistant run              # daily: collect → profile → resume → digest → research → email → curate
-assistant run --resume     # re-enter the phase where a crashed run stopped
-assistant send-test-email
-assistant resume-init      # clone the Overleaf project (set RESUME_REMOTE_URL first)
-assistant resume-status    # show a resume update awaiting approval
-assistant approve-resume   # push the approved update to Overleaf
+assistant run              # the real thing: collect → … → email → curate
 ```
 
-### Resume sync (Overleaf)
+`assistant init` is an interactive wizard that walks every configuration group
+(LLM, GitHub, email, website, résumé, web search), writes your `.env` as you
+go, and **validates each section live** — it pings the LLM, checks the GitHub
+token identity, confirms repo push access, and warns if a token is
+over-scoped. It finishes by seeding your profile from GitHub and printing the
+remaining steps.
 
-Requires the Overleaf **git bridge** (premium): set `RESUME_REMOTE_URL` in `.env` to the
-project's git URL and run `assistant resume-init`. The agent edits the LaTeX locally with
-exact search/replace edits grounded in the profile, gates on a LaTeX compile when a
-toolchain is installed, and commits **locally only** — the daily email shows the diff and
-nothing reaches Overleaf until you run `assistant approve-resume` (which pulls/rebases
-remote edits first and never force-pushes).
-
-### Profile v2: initiatives + weekly consolidation
-
-The daily updater is deliberately additive; the editorial power lives in a
-**weekly consolidation pass** (`assistant consolidate`, cron job
-`weekly-consolidate`, Sun 08:00 HKT) that sees each profile section in full
-and may merge fragmented entries, move misfiled evidence, and rewrite
-scattered bullets into resume-voice contribution highlights (style reference:
-the hand-written `experience:` section). Design + the research behind it:
-[doc/RESEARCH_AGENT_MEMORY_2026.md](doc/RESEARCH_AGENT_MEMORY_2026.md).
-
-- **Initiatives** (`~/.personal-agent/profile/aliases.yaml`, owner-editable)
-  are the join keys: repos/keywords that belong to one line of work, so
-  correlated activity converges on one entry instead of fragmenting.
-- Safety: superseded highlights land in each entry's `history` (never
-  deleted); entries re-confirmed ≥3 times reject rewrites citing fewer
-  sources; every run is one git commit in the profile repo and the diff is
-  emailed. Rollback: `git -C ~/.personal-agent/profile revert HEAD`.
-- `assistant consolidate --dry-run [--section projects]` previews the ops.
-
-Data lives in `~/.personal-agent/`:
-- `profile/` — git repo holding `profile.yaml` (source of truth) + `PROFILE.md` (render).
-  Every daily update is a commit; `git -C ~/.personal-agent/profile log -p` is the audit trail.
-  **Fill in `education:` / `experience:` manually — the agent never edits those sections.**
-- `events.db` — SQLite+FTS5 raw observation log + surfaced-item dedup store.
-- `runs/<run_id>/` — per-run artifacts (observations, digest JSON/HTML) used by `--resume`.
-- `state.json` — phase marker (named phase = phase to re-enter).
-
-## Chat with the agent
-
-The `assistant serve` daemon answers messages from the owner and can execute
-typed actions (add/close todos, mark reading done, trigger a digest run). It
-exposes a loopback-only HTTP API consumed by the OpenClaw bridge — `POST
-/chat` (with per-conversation memory, spilled to `~/.personal-agent/
-sessions/`), `POST /actions/<name>` (the typed action registry, no LLM),
-`POST /run`, `GET /status`, `GET /healthz` — and runs the email chat poll as
-a background thread. `Settings`/`LLM` are rebuilt per request, so `.env`
-edits (e.g. an API-key rotation) apply on the next message with no restart.
-
-```bash
-assistant ask "what's due this week?"     # one-off, local, no daemon needed
-assistant serve                           # the daemon (normally you don't run
-                                          # this yourself — the OpenClaw gateway
-                                          # supervises it as a plugin service)
-assistant chat-listen                     # legacy standalone email poller; use
-                                          # only for debugging (--once)
-```
-
-Optional `.env` knobs: `SERVE_PORT` (default 8377), `SERVE_TOKEN` (bearer
-auth for the loopback API; the bridge reads it from the same `.env`).
-
-- **Email (works out of the box)**: mail the digest mailbox from one of your
-  own addresses with a subject starting `agent` — e.g. "agent: add a todo to
-  review X, due Friday". The reply comes back by email. Non-owner senders and
-  other subjects are ignored; a UID watermark prevents replays.
-- **WeChat via OpenClaw (live)**: Tencent's official
-  `@tencent-weixin/openclaw-weixin` plugin runs in an OpenClaw Gateway on this
-  machine, and our [`openclaw-plugin/`](openclaw-plugin/) bridge (a
-  `before_agent_reply` hook) routes every inbound message to the serve
-  daemon's `/chat` (session memory; exec `assistant ask` as fallback) — the
-  gateway's own LLM never runs, OpenClaw is transport only. The bridge also
-  answers `/todo [add <title> [due:YYYY-MM-DD]] [done <id>]`, `/read [done
-  <id>]`, `/digest`, `/status`, `/run <phase>`, `/plan <task>`, and
-  `/search <query>` straight from `/actions/…`. Setup, restart runbook, and
-  troubleshooting: [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md).
-
-Beyond the typed store actions, chat can **run standalone pipeline phases**
-(`run_phase`: research/website/todos/resume/curate/consolidate), **plan novel
-multi-step tasks** (`plan_task`: LLM plan with agent/owner steps, tracked as
-a todo, enriched with live search results), and **search the web**
-(`web_search`: keyless DuckDuckGo Lite via [src/assistant/search.py]
-(src/assistant/search.py), or Tavily if `TAVILY_API_KEY` is set; answers are
-LLM-synthesized with source URLs).
-- **WeChat via WeCom (企业微信, alternative)**: register a free WeCom org +
-  self-built app, enable the WeChat plugin (我→设置→插件→企业微信, scan QR) —
-  the agent then messages you *inside WeChat*. Set
-  `WECOM_CORP_ID/SECRET/AGENT_ID/OWNER_USERID` for push; receiving your replies
-  additionally needs the app's callback URL publicly routed to this machine
-  (`WECOM_TOKEN`/`WECOM_AES_KEY`, port 8329 — a tunnel or small VPS). See
-  `.env.template`.
-
-## Schedule (daily 07:00 HKT)
-
-The OpenClaw gateway is the single runtime: its SQLite-persisted **command
-cron** runs [`scripts/daily-run.sh`](scripts/daily-run.sh) (`run || run
---resume`, full logs → `~/.personal-agent/daily-run.log`) at 07:00
-Asia/Hong_Kong, and the bridge plugin supervises `assistant serve` as a
-gateway service. Announce split (since 2026-07-09): the **deliver phase
-announces successes** to WeChat itself (`WECHAT_ANNOUNCE=true` in `.env`, so
-manual and chat-triggered runs ping too), while the cron job's `--announce`
-carries **failures only** — `daily-run.sh` is silent on success and emits a
-line only when a run gets stuck. Job management:
-
-```bash
-export PATH=/opt/node24/bin:$PATH
-openclaw cron list                 # the job is named daily-digest
-openclaw cron run <jobId> --wait   # force a run now (sends the real digest!)
-openclaw cron runs --id <jobId>    # run history + captured summary lines
-```
-
-Fallbacks when not using OpenClaw — systemd host:
-
-```bash
-sudo cp systemd/personal-agent.{service,timer} /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now personal-agent.timer
-```
-
-or the loop scheduler (`nohup ./scheduler.sh &`, logs `~/.personal-agent/scheduler.log`).
-
-### Restart runbook (after a container restart)
-
-Usually **zero lines**: a guarded block in `~/.bashrc` revives the gateway the
-first time any interactive shell opens after a restart (verified by drill).
-Manual equivalent — the gateway brings cron, the chat listener, and WeChat
-back with it:
-
-```bash
-nohup ~/.openclaw/start-gateway.sh >> ~/.openclaw/logs/gateway-nohup.log 2>&1 &
-```
-
-(Restart-only variant: `pkill -x openclaw` first — the process is titled `openclaw`.)
-Dead-man signal: if the 07:00 digest email/WeChat ping doesn't arrive, the
-gateway is down — run the line above.
-
-⚠️ After a container **rebuild**, reinstall tzdata (`apt-get install -y
-tzdata`): the base image sets `TZ=Asia/Shanghai` but ships **no zoneinfo
-files**, so everything silently falls back to UTC — digest dates shift a day
-and wall-clock schedules drift 8 h. OpenClaw's cron is immune (Node bundles
-ICU), and `daily-run.sh` + the bridge pin `TZ` for the Python side, but the
-pin only works when tzdata exists. Logs: `/tmp/openclaw/openclaw-<date>.log`
-(gateway incl. chat listener), `~/.personal-agent/daily-run.log` (daily runs),
-`~/.personal-agent/chat.log` (legacy standalone listener only).
-
-## Architecture (M1 slice)
+Prefer editing by hand? `cp .env.template .env`, fill it in (every knob is
+documented inline), then run **`assistant init --check`** — the no-prompt
+config doctor — to verify. Run `--check` any time something feels off; it
+reports ✅/⚠️/❌ across every integration.
 
 ```
-collect (GitHub events + notifications, pluggable registry)
-  → profile update (LLM emits typed patch ops; code applies; git commit)
-  → digest (deterministic reason-buckets + LLM triage vs profile; seen-dedup)
-  → deliver (HTML email via Resend, SMTP fallback)
+$ assistant init --check
+personal-agent config check
+──────────────────────────────────────────────
+✅ LLM                  model claude-sonnet-4-6 answers
+✅ GitHub               authenticated as your-username
+✅ Email                Resend configured → you@example.com
+✅ Website              push access ok
+◌  Résumé sync          RESUME_REMOTE_URL unset — disabled
+⚠️  Web search           no search key — falls back to DuckDuckGo Lite
+──────────────────────────────────────────────
+all required config healthy 🎉
 ```
 
-Later milestones (see DESIGN.md §9): Chrome + Gmail collectors (M2), arXiv/blog/中文媒体
-research digest (M3), Overleaf resume sync with approval gate (M4), curator + skills (M5).
+## Scheduling
+
+The agent is meant to run once a day (e.g. early morning). Point any scheduler
+at `assistant run || assistant run --resume`:
+
+- **cron**: `0 7 * * *  cd /path/to/personal-agent && assistant run || assistant run --resume`
+- **systemd timer**: templates in [`systemd/`](systemd/)
+- **OpenClaw gateway** (required for the WeChat channel — see
+  [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md))
+
+See the [User Guide → Scheduling](doc/USER_GUIDE.md#scheduling) for the exact
+setup and the timezone caveat.
+
+## Command reference
+
+| Command | What it does |
+|---|---|
+| `assistant init [--check]` | Guided setup wizard, or config doctor |
+| `assistant run [--dry-run] [--resume]` | Execute a daily run |
+| `assistant run-phase <phase>` | Run one phase standalone (`research`/`website`/`todos`/`resume`/`curate`/`consolidate`) |
+| `assistant bootstrap` | Seed `profile.yaml` from GitHub (first run) |
+| `assistant enrich-profile --since YYYY-MM` | Backfill the profile from GitHub history |
+| `assistant consolidate [--dry-run] [--section …]` | Weekly editorial profile pass |
+| `assistant show-profile` | Print a profile summary |
+| `assistant todo list\|add\|done` · `assistant reading list\|done\|unrelated` | Manage todos / reading list |
+| `assistant ask "…"` | Ask the chat agent one question locally |
+| `assistant serve` | Local HTTP daemon (chat/actions API for the WeChat bridge) |
+| `assistant send-test-email` | Verify email delivery |
+| `assistant resume-init\|resume-status\|approve-resume` | Résumé sync + approval gate |
+
+## Where your data lives
+
+Everything is under `~/.personal-agent/` (override with `DATA_DIR`):
+
+```
+~/.personal-agent/
+├── profile/          git repo: profile.yaml (source of truth) + PROFILE.md render
+│   ├── aliases.yaml    your initiative groupings (owner-editable)
+│   ├── todos.yaml  reading_list.yaml
+│   └── …
+├── events.db         SQLite: raw observation log, seen-store, metrics
+├── runs/<run_id>/    per-run artifacts (for --resume and audit)
+├── state.json        phase marker (which phase to re-enter)
+└── sessions/         chat session memory
+```
+
+The profile is a git repo, so every daily change is a reviewable, revertible
+commit: `git -C ~/.personal-agent/profile log -p`.
+
+## Safety model (the short version)
+
+- **You are never fabricated.** Every profile claim cites an observation; the
+  website render is deterministic (no LLM output reaches a public page); résumé
+  edits only surface facts already in the profile.
+- **Protected sections.** The agent never edits `education`/`experience`/
+  `identity` in your profile — you own those.
+- **Human gates on outward actions.** Résumé pushes need explicit approval;
+  private website pages are client-side encrypted with your password.
+- **Everything reversible.** The profile is git-versioned; nothing is deleted
+  (stale entries go dormant/outdated), and every run is one commit.
+
+Full detail in [Design → Safety & privacy](doc/DESIGN.md#safety--privacy).
+
+## Documentation
+
+- [**User Guide**](doc/USER_GUIDE.md) — setup and everyday use, per integration
+- [**Design & Architecture**](doc/DESIGN.md) — how the system is built, extension points
+- [WeChat via OpenClaw](doc/WECHAT_OPENCLAW.md) — the chat gateway, setup & runbook
+- [Pipeline metrics](doc/PIPELINE_METRICS.md) — what's measured, per step
+- [Agent-memory research](doc/RESEARCH_AGENT_MEMORY_2026.md) — the thinking behind the profile design
+- [`skills/`](skills/) — operational runbooks the agent has accumulated for recurring failures
+
+## License
+
+No license file is included yet — add one before distributing. Until a license
+is chosen, all rights are reserved by the author.
