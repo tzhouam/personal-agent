@@ -69,12 +69,13 @@ def test_reading_page_unrelated_button(settings):
     files = render_site(PROFILE, [], today=date(2026, 7, 9), reading=reading)
     page = files["reading.html"]
     assert "b-unrel" in page and "🚫 Unrelated" in page
-    assert "data-agent-mail='me@example.com'" in page
     # todos page never shows the unrelated button
     todos = [{"id": "t1", "title": "T", "source": "manual",
               "created": "2026-07-09", "status": "open"}]
     assert "b-unrel" not in render_site(PROFILE, todos,
                                         today=date(2026, 7, 9))["todos.html"]
-    # the JS carries the unrelated storage + mail bridge
+    # the JS handles marks locally + queues for the agent — the mailto
+    # handoff is gone (owner decision 2026-07-10)
     js = files["agent-site.js"]
-    assert "agent-reading-unrelated" in js and "reading unrelated" in js
+    assert "agent-reading-unrelated" in js and "agent-marks-queue" in js
+    assert "mailto" not in js and "data-agent-mail" not in page

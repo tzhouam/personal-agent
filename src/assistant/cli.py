@@ -271,8 +271,16 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
         return 0
     if phase == "todos":
         from .collectors.github import GitHubCollector
+        from .marks import collect_marks
         from .tasks.todos import update_todos
 
+        events = EventsStore(settings.events_db)
+        try:
+            marks = collect_marks(settings, events)
+        finally:
+            events.close()
+        if marks["applied"]:
+            print(f"website marks: {marks['applied']} applied")
         github = GitHubCollector(settings) if settings.github_token else None
         todos = update_todos(TodoStore(settings.profile_dir), digest={}, resume={},
                              github=github, llm=llm)

@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     # this password (client-side crypto: the published HTML holds ciphertext)
     website_password: str = ""
 
+    # Website marks sync: done/unrelated clicks queue in the browser and push
+    # to this private repo; the agent pulls them each run. marks_push_token is
+    # a fine-grained PAT scoped to ONLY this repo (Contents: RW) — it ships to
+    # the browser inside the password-encrypted page payload, so scope it
+    # minimally and never reuse GITHUB_TOKEN here.
+    marks_repo: str = ""
+    marks_push_token: str = ""
+
     # Personal website — "owner/name" GitHub Pages repo; the agent pushes the
     # rendered site directly to the default branch (owner's choice, 2026-07-02)
     website_repo: str = ""

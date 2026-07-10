@@ -69,7 +69,8 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
                 reading: list[dict] | None = None,
                 routines: list[dict] | None = None,
                 reminders: list[dict] | None = None,
-                password: str = "") -> dict[str, str]:
+                password: str = "",
+                marks_cfg: dict | None = None) -> dict[str, str]:
     """Returns {filename: content} for the generated site — one page per section.
 
     Every page is always rendered (an empty section shows a placeholder) so a
@@ -98,7 +99,7 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
         ("education.html", "Education", _education_html(profile.get("education", []))),
         ("projects.html", "Projects", _projects_html(actives("projects"))),
         ("todos.html", "Todos", _render_calendar(todos, today)),
-        ("reading.html", "Reading", _render_reading(reading or [], today, agent_mail=(ident.get('emails') or [''])[0])),
+        ("reading.html", "Reading", _render_reading(reading or [], today)),
         ("routines.html", "Routines", _render_routines(routines or [], reminders or [])),
     ]
 
@@ -139,6 +140,12 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
             )
         body = body or "<section class='card'><p class='empty'>Nothing here yet.</p></section>"
         if password and filename in _PROTECTED_PAGES:
+            # marks config (incl. the repo-scoped push token) ships ONLY inside
+            # the ciphertext — a page without the password never reveals it
+            if marks_cfg and marks_cfg.get("repo") and marks_cfg.get("token") \
+                    and filename in ("todos.html", "reading.html"):
+                body = (f"<div id='marks-cfg' hidden data-repo='{e(marks_cfg['repo'])}'"
+                        f" data-token='{e(marks_cfg['token'])}'></div>" + body)
             body = _encrypt_body(body, password)
         files[filename] = (
             head + hero + "<main>" + body
@@ -325,16 +332,14 @@ def _render_calendar(todos: list[dict], today: date) -> str:
     return "".join(parts)
 
 
-def _render_reading(reading: list[dict], today: date, agent_mail: str = "") -> str:
+def _render_reading(reading: list[dict], today: date) -> str:
     """The reading list, presented like the todo list: a scrollable list of
     collapsible day groups (by surfaced date, newest first) with owner-only
     pin/done buttons — reading ids (r#) share the todos' localStorage marks.
-    The extra 🚫 Unrelated button hides the item immediately AND opens a
-    prefilled "agent: …" mail so the mark reaches the canonical store and
-    biases the research scorer (the page itself is static — mail is the
-    existing owner→agent channel)."""
-    parts = [f"<section id='reading' class='card' data-agent-mail='{html.escape(agent_mail)}'>"
-             "<h2>Reading list</h2>"]
+    Done/Unrelated act locally and instantly; the marks also queue and push
+    to the private marks repo in the background, where the agent collects
+    them each run (owner decision 2026-07-10: no more mailto handoff)."""
+    parts = ["<section id='reading' class='card'><h2>Reading list</h2>"]
     if not reading:
         parts.append("<p class='empty'>Nothing unread. 📚</p></section>")
         return "".join(parts)
@@ -647,24 +652,47 @@ _JS = """(function () {
     var li = btn.closest('li[data-tid]');
     if (!li) return;
     if (btn.classList.contains('b-pin')) toggle(PIN, li.dataset.tid);
-    else if (btn.classList.contains('b-done')) toggle(DONE, li.dataset.tid);
+    else if (btn.classList.contains('b-done')) {
+      var marking = load(DONE).indexOf(li.dataset.tid) < 0;
+      toggle(DONE, li.dataset.tid);
+      if (marking) enqueueMark(li.dataset.tid, 'done');
+    }
     else if (btn.classList.contains('b-unrel')) {
-      var id = li.dataset.tid;
-      var marking = load(UNREL).indexOf(id) < 0;
-      toggle(UNREL, id);
-      if (marking) {
-        // the static page can't reach the agent's store directly — hand the
-        // mark to the existing owner->agent mail channel, prefilled
-        var sec = li.closest('section');
-        var addr = sec && sec.dataset.agentMail;
-        if (addr) location.href = 'mailto:' + addr +
-          '?subject=' + encodeURIComponent('agent: reading unrelated ' + id) +
-          '&body=' + encodeURIComponent('Recorded from the website. Just hit send.');
-      }
+      var unrelMarking = load(UNREL).indexOf(li.dataset.tid) < 0;
+      toggle(UNREL, li.dataset.tid);
+      if (unrelMarking) enqueueMark(li.dataset.tid, 'unrelated');
     }
     else return;
     apply();
   });
+
+  // ── marks sync: clicks act locally & instantly; the mark also queues and
+  // pushes to the private marks repo, where the agent collects it each run.
+  // The repo/token config lives INSIDE the encrypted page body (#marks-cfg),
+  // so only the unlocked page can sync; without it the queue just waits. ──
+  var MQ = 'agent-marks-queue';
+  var marksBusy = false;
+  function enqueueMark(id, action) {
+    var q = load(MQ);
+    q.push({ id: id, action: action, ts: new Date().toISOString() });
+    save(MQ, q);
+    flushMarks();
+  }
+  function flushMarks() {
+    var cfg = document.getElementById('marks-cfg');
+    var q = load(MQ);
+    if (!cfg || !cfg.dataset.repo || !cfg.dataset.token || !q.length || marksBusy) return;
+    marksBusy = true;
+    var name = 'marks/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.json';
+    fetch('https://api.github.com/repos/' + cfg.dataset.repo + '/contents/' + name, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + cfg.dataset.token,
+                 Accept: 'application/vnd.github+json' },
+      body: JSON.stringify({ message: 'website marks',
+                             content: btoa(unescape(encodeURIComponent(JSON.stringify(q)))) }),
+    }).then(function (res) { if (res.ok) save(MQ, []); marksBusy = false; })
+      .catch(function () { marksBusy = false; /* offline — queue waits for the next visit */ });
+  }
   // ── encrypted private pages (todos/reading/routines) ──
   // content ships as AES-GCM ciphertext; WebCrypto decrypts with the owner's
   // password (PBKDF2-SHA256, 100k iterations — must match the Python side).
@@ -687,6 +715,7 @@ _JS = """(function () {
         host.innerHTML = new TextDecoder().decode(pt);
         el.replaceWith(host);
         apply();  // wire pin/done/unrelated buttons on the decrypted content
+        flushMarks();  // marks-cfg is inside the ciphertext — retry any queued marks now
       });
   }
   function initLock() {
@@ -757,9 +786,12 @@ def sync_website(settings: Settings, profile: dict, todos: list[dict],
     _git(workdir, settings, "checkout", "-q", "-B", default_branch,
          f"origin/{default_branch}")
 
+    marks_cfg = ({"repo": settings.marks_repo, "token": settings.marks_push_token}
+                 if settings.marks_repo and settings.marks_push_token else None)
     for filename, content in render_site(profile, todos, reading=reading,
                                          routines=routines, reminders=reminders,
-                                         password=settings.website_password).items():
+                                         password=settings.website_password,
+                                         marks_cfg=marks_cfg).items():
         (workdir / filename).write_text(content)
 
     if not _git(workdir, settings, "status", "--porcelain").stdout.strip():

@@ -128,6 +128,15 @@ def build_graph(deps: Deps):
         return {"digest": digest, "phase": "todos", "errors": errors}
 
     def node_todos(state: AssistantState) -> dict:
+        try:  # website clicks first, so done-marks feed the monitor + quota
+            from .marks import collect_marks
+
+            marks = collect_marks(settings, deps.events)
+            if marks["applied"]:
+                deps.events.record_metrics(state["run_id"], "todos",
+                                           {"website_marks": marks["applied"]})
+        except Exception:
+            log.exception("website marks collection failed")
         try:
             from .collectors.github import GitHubCollector
 
