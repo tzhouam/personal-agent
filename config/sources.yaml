@@ -26,16 +26,15 @@ sources:
   - name: 量子位
     url: https://www.qbitai.com/feed
     lang: zh
-  # 机器之心's /rss endpoint now redirects to an HTML SPA (verified 2026-07-02)
-  # and the public rsshub.app instance is Cloudflare-blocked. Point at a
-  # self-hosted RSSHub (route /jiqizhixin/daily) and enable:
+  # Both publish primarily on WeChat 公众号. Served via anyfeeder's public
+  # WeChat mirror (verified fresh 2026-07-10; RSSHub was a dead end — the
+  # current npm build ships no jiqizhixin route and rsshub.app is
+  # Cloudflare-blocked). If anyfeeder dies (3-day health flag), candidates:
+  # wechat2rss (now partly paid), feedx.net, or a self-hosted RSSHub with a
+  # custom route.
   - name: 机器之心
-    url: https://rsshub.example.com/jiqizhixin/daily
+    url: https://plink.anyfeeder.com/weixin/almosthuman2014
     lang: zh
-    enabled: false
-  # 新智元 publishes on WeChat 公众号 only — needs a RSSHub instance.
-  # Point this at your own RSSHub deployment and enable it:
   - name: 新智元
-    url: https://rsshub.app/wechat/mp/msgalbum/MzI3MTA0MTk1MA==
+    url: https://plink.anyfeeder.com/weixin/AI_era
     lang: zh
-    enabled: false
