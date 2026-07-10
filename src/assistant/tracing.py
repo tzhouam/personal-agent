@@ -47,6 +47,7 @@ class Span:
     __slots__ = ("name", "trace_id", "span_id", "parent", "start", "end", "attr", "_ttft")
 
     def __init__(self, name: str, trace_id: str, parent: Optional[str], attr: dict):
+        """Open a span with its name, trace/parent ids, and initial attributes."""
         self.name = name
         self.trace_id = trace_id
         self.span_id = uuid.uuid4().hex[:12]
@@ -58,6 +59,7 @@ class Span:
 
     @property
     def elapsed_s(self) -> float:
+        """Wall seconds from start to end (or now, if still open)."""
         return (self.end or time.time()) - self.start
 
     @property
@@ -67,10 +69,12 @@ class Span:
         return (self.end or time.time()) - base
 
     def set(self, **attrs: Any) -> "Span":
+        """Merge attributes into the span; returns self for chaining."""
         self.attr.update(attrs)
         return self
 
     def mark_ttft(self) -> None:
+        """Stamp the first-token time (once), recording ttft_ms."""
         if self._ttft is None:
             self._ttft = time.time()
             self.attr["ttft_ms"] = round((self._ttft - self.start) * 1000, 1)
@@ -82,17 +86,21 @@ class _NullSpan:
     __slots__ = ()
 
     def set(self, **attrs: Any) -> "_NullSpan":
+        """No-op attribute setter; returns self for chaining."""
         return self
 
     def mark_ttft(self) -> None:
+        """No-op first-token marker."""
         pass
 
     @property
     def gen_s(self) -> float:
+        """Always 0.0 — nothing is timed when disabled."""
         return 0.0
 
     @property
     def elapsed_s(self) -> float:
+        """Always 0.0 — nothing is timed when disabled."""
         return 0.0
 
 
@@ -100,7 +108,10 @@ _NULL = _NullSpan()
 
 
 class Tracer:
+    """Per-run recorder that opens spans and appends closed ones to the JSONL file."""
+
     def __init__(self, run_id: str, out_path: os.PathLike | str):
+        """Bind the tracer to a run id and the JSONL output path."""
         self.run_id = run_id
         self.path = Path(out_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,6 +119,7 @@ class Tracer:
         self._inflight = 0  # concurrent llm spans — the effective batch size
 
     def _write(self, span: Span) -> None:
+        """Serialize one closed span as a JSONL line, appended under the lock."""
         rec = {
             "t": "span",
             "trace_id": span.trace_id,
@@ -125,6 +137,7 @@ class Tracer:
 
     @contextlib.contextmanager
     def span(self, name: str, **attr: Any) -> Iterator[Any]:
+        """Open a child span under the current one, writing it on exit."""
         if not _ENABLED:
             yield _NULL
             return
@@ -173,6 +186,7 @@ def span(name: str, **attr: Any):
 
 
 def enabled() -> bool:
+    """True when tracing is on and a default tracer is installed."""
     return _ENABLED and _default is not None
 
 
@@ -181,6 +195,7 @@ def set_usage(sp: Any, usage: Any, stop_reason: str = "") -> None:
     derive tokens/sec. Accepts the SDK usage object or a plain dict; tolerant of
     missing fields (cache token names differ across providers)."""
     def _g(name: str) -> int:
+        """Read one token count from the usage object/dict, defaulting to 0."""
         if usage is None:
             return 0
         if isinstance(usage, dict):
@@ -203,6 +218,7 @@ def set_usage(sp: Any, usage: Any, stop_reason: str = "") -> None:
 
 # ── reporting ─────────────────────────────────────────────────────────────────
 def load_spans(trace_path: os.PathLike | str) -> list[dict]:
+    """Read span records from a JSONL trace, skipping blank/corrupt lines."""
     spans = []
     p = Path(trace_path)
     if not p.exists():
@@ -221,6 +237,7 @@ def load_spans(trace_path: os.PathLike | str) -> list[dict]:
 
 
 def _pctl(values: list[float], q: float) -> float:
+    """Nearest-rank q-quantile of values (0.0 when empty)."""
     if not values:
         return 0.0
     s = sorted(values)
@@ -251,6 +268,7 @@ def report(trace_path: os.PathLike | str) -> str:
         span_by_id = {s["span_id"]: s for s in spans}
 
         def _phase_of(s: dict) -> Optional[str]:
+            """Walk parents (bounded) to find the enclosing phase name, if any."""
             cur = s
             seen = 0
             while cur and seen < 12:
@@ -300,6 +318,7 @@ def report(trace_path: os.PathLike | str) -> str:
 
 
 def _main() -> int:
+    """CLI entry: resolve a trace path or run_id and print its report."""
     import sys
 
     if len(sys.argv) < 2:

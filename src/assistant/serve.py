@@ -49,20 +49,30 @@ class SessionStore:
     daily curate phase calls ``prune()`` to delete them from disk."""
 
     def __init__(self, data_dir: Path, keep: int = 10, max_age_hours: int = 48):
+        """Store under `data_dir/sessions`, retaining at most `keep` turns per
+        session on disk and treating turns older than `max_age_hours` as
+        expired."""
         self.dir = data_dir / "sessions"
         self.keep = keep
         self.max_age_hours = max_age_hours
 
     def _path(self, session_id: str) -> Path:
+        """Map a session id to its spill file via a short sha1 hash, so
+        arbitrary channel:peer ids become safe fixed-length filenames."""
         return self.dir / (hashlib.sha1(session_id.encode()).hexdigest()[:16] + ".json")
 
     def _fresh(self, turns: list[dict]) -> list[dict]:
+        """Keep only turns newer than the `max_age_hours` cutoff; turns lacking
+        a `ts` predate the expiry feature and are dropped as expired."""
         cutoff = (datetime.now(timezone.utc)
                   - timedelta(hours=self.max_age_hours)).isoformat()
         # turns without a ts predate the expiry feature — treat as expired
         return [t for t in turns if t.get("ts", "") >= cutoff]
 
     def history(self, session_id: str) -> list[dict]:
+        """Load the session's non-expired turns for prompt context, returning
+        `[]` when the file is absent or corrupt — history is best-effort, a bad
+        spill must never break a reply (degrade, never crash)."""
         path = self._path(session_id)
         if not path.exists():
             return []
@@ -72,6 +82,9 @@ class SessionStore:
             return []
 
     def append(self, session_id: str, owner: str, assistant: str) -> None:
+        """Record one owner/assistant exchange, capping each side at 2000 chars
+        and writing back only the newest `keep` turns so the file stays
+        bounded."""
         turns = self.history(session_id)
         turns.append({"ts": datetime.now(timezone.utc).isoformat(),
                       "owner": owner[:2000], "assistant": assistant[:2000]})
@@ -111,12 +124,19 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
     make_llm = llm_factory or (lambda s: LLM(s))
 
     class Handler(BaseHTTPRequestHandler):
+        """Loopback JSON request handler closed over this server's per-request
+        `settings_factory`, shared `sessions`, and `make_llm` — the closure is
+        what gives every request fresh Settings/LLM (the stale-credential fix)."""
+
         server_version = "personal-agent"
 
         def log_message(self, fmt, *args):  # route to our logger, not stderr
+            """Send stdlib access logs to our debug logger instead of stderr."""
             log.debug("serve: " + fmt, *args)
 
         def _send(self, code: int, payload: dict) -> None:
+            """Write `payload` as a JSON response with `code` and the matching
+            content-type/length headers."""
             body = json.dumps(payload, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -125,12 +145,18 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             self.wfile.write(body)
 
         def _authorized(self, settings: Settings) -> bool:
+            """Gate a request on the bearer token: open when no `serve_token` is
+            configured, else require an exact `Authorization: Bearer <token>`."""
             if not settings.serve_token:
                 return True
             header = self.headers.get("Authorization", "")
             return header == f"Bearer {settings.serve_token}"
 
         def _body(self) -> dict:
+            """Read and JSON-parse the request body as a dict, capped at
+            `_MAX_BODY` to bound memory; `{}` for an empty body and a
+            non-object payload. Malformed JSON raises `ValueError` for the
+            caller to turn into a 400."""
             length = min(int(self.headers.get("Content-Length") or 0), _MAX_BODY)
             raw = self.rfile.read(length) if length else b""
             if not raw:
@@ -139,6 +165,8 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             return data if isinstance(data, dict) else {}
 
         def do_GET(self):
+            """Route GETs: `/healthz` (always open) and, behind auth,
+            `/status` → the run-status action; anything else is a 404."""
             settings = settings_factory()
             if self.path == "/healthz":
                 return self._send(200, {"ok": True})
@@ -149,6 +177,11 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             return self._send(404, {"error": f"no route {self.path}"})
 
         def do_POST(self):
+            """Route authenticated POSTs: `/chat` (run one turn with rolling
+            history and record it), `/run` (trigger a pipeline run, optionally
+            resuming), and `/actions/<name>` (dispatch a named action, mapping
+            KeyError→404 and ValueError→400). Any unhandled exception becomes a
+            JSON 500 so a handler bug never hangs the client."""
             settings = settings_factory()
             if not self._authorized(settings):
                 return self._send(401, {"error": "bad or missing bearer token"})
@@ -246,6 +279,11 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
 
 
 def run_serve(settings: Settings) -> int:
+    """`assistant serve`: the long-lived daemon. Takes the shared inbox pid
+    lock (so it can never race the standalone chat-listener on the watermark),
+    starts the HTTP server plus the background chat-poll thread, wires
+    SIGTERM/SIGINT to a clean shutdown, and blocks in `serve_forever`. Returns
+    1 if the pid lock is already held, else 0 after shutdown."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from .chat.service import _acquire_pid_lock
 
@@ -262,6 +300,7 @@ def run_serve(settings: Settings) -> int:
     poller.start()
 
     def _shutdown(signum, frame):
+        """Signal handler: log the signal and trigger a graceful shutdown."""
         log.info("serve: signal %d — shutting down", signum)
         stop.set()
         threading.Thread(target=server.shutdown, daemon=True).start()

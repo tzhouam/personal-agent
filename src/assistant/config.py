@@ -1,3 +1,9 @@
+"""Central configuration for the assistant.
+
+Exports `Settings`, the single Pydantic-settings object that gathers every
+secret, feature toggle, and path from `.env` (repo root, then CWD) and env
+vars, plus derived-path/model properties the rest of the package reads."""
+
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -131,28 +137,37 @@ class Settings(BaseSettings):
 
     @property
     def cheap_model(self) -> str:
+        """Model id for cheap/bulk calls: the haiku model if configured, else
+        the main model."""
         return self.anthropic_default_haiku_model or self.anthropic_model
 
     @property
     def recipient(self) -> str:
+        """Digest email recipient: explicit `digest_to`, falling back to the
+        SMTP user (self-send)."""
         return self.digest_to or self.smtp_user
 
     @property
     def runs_dir(self) -> Path:
+        """Directory holding per-run artifact/trace subdirectories."""
         return self.data_dir / "runs"
 
     @property
     def profile_dir(self) -> Path:
+        """Directory of the git-versioned profile store (profile, todos, reading)."""
         return self.data_dir / "profile"
 
     @property
     def events_db(self) -> Path:
+        """Path to the SQLite events/metrics database."""
         return self.data_dir / "events.db"
 
     @property
     def state_file(self) -> Path:
+        """Path to the resume checkpoint written by `persist_state`."""
         return self.data_dir / "state.json"
 
     @property
     def resume_dir(self) -> Path:
+        """Working directory for the resume/CV git clone."""
         return self.data_dir / "resume"

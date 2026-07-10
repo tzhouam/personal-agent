@@ -1,3 +1,6 @@
+"""Small shared formatting helpers. Currently exports ``ref_label``, which
+derives short citation labels (PR/Issue/Paper/…) from item URLs."""
+
 import re
 
 _GH_REF = re.compile(r"github\.com/[^/]+/[^/]+/(pull|issues|discussions)/(\d+)")

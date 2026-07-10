@@ -122,6 +122,15 @@ def judge_profile(llm: LLM, store: ProfileStore, settings: Settings) -> dict:
 
 def consolidate_profile(llm: LLM, store: ProfileStore, settings: Settings,
                         section: str | None = None, dry_run: bool = False) -> dict:
+    """Run the weekly editorial pass over one `section` (or all of projects/
+    skills/interests) and return {applied, rejected, judge, notes, diff, emailed}.
+
+    Each section is sent in full so the model may rewrite/merge/dedupe under
+    `CONSOLIDATE_OPS`, using the owner's hand-written experience as the style
+    reference. A read-only LLM-judge audit then records quality metrics; applied
+    ops are committed as one git commit and the diff plus findings are emailed
+    (the audit gate). `dry_run` computes ops and findings but writes/emails
+    nothing."""
     profile = store.load()
     today = date.today().isoformat()
     aliases = load_aliases(store.dir)

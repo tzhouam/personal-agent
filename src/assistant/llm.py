@@ -1,3 +1,10 @@
+"""Thin Anthropic client wrapper for the agent.
+
+Exports the ``LLM`` class: a traced ``messages.create`` call with exponential
+retry on transient API errors and a JSON-coercing convenience method. Keeps
+every call site provider-agnostic and degrade-friendly.
+"""
+
 import json
 import re
 
@@ -14,7 +21,12 @@ _RETRYABLE = (
 
 
 class LLM:
+    """Anthropic chat client carrying the default and cheap model ids, so
+    callers pick a tier without re-reading settings."""
+
     def __init__(self, settings: Settings):
+        """Build the Anthropic client from ``settings`` (honoring an optional
+        ``anthropic_base_url`` for a proxy/router) and cache the two model ids."""
         kwargs: dict = {"api_key": settings.anthropic_api_key}
         if settings.anthropic_base_url:
             kwargs["base_url"] = settings.anthropic_base_url
@@ -35,6 +47,11 @@ class LLM:
         model: str | None = None,
         max_tokens: int = 4000,
     ) -> str:
+        """Send one user ``prompt`` (optional ``system``) and return the
+        concatenated text blocks. ``model`` defaults to ``default_model``. The
+        call is wrapped in a trace span recording usage/stop reason, retried on
+        transient errors (via the decorator), and logs a warning — but does not
+        raise — when the response is cut off at ``max_tokens``."""
         kwargs: dict = {
             "model": model or self.default_model,
             "max_tokens": max_tokens,
@@ -71,6 +88,11 @@ class LLM:
 
 
 def _parse_json(text: str):
+    """Best-effort extraction of a JSON object/array from a model response.
+
+    Tolerates the common ways models wrap JSON: strips a ```json fence, seeks
+    the first ``{`` or ``[``, then shrinks the tail until ``json.loads``
+    succeeds (handling trailing prose). Raises ValueError if nothing parses."""
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
     if fence:

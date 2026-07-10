@@ -1,3 +1,9 @@
+"""Gmail collector — turns recent inbox headers into email/newsletter Observations.
+
+Registers as `@register("gmail")`. Read-only IMAP, headers only: message bodies
+never enter the pipeline, keeping the source privacy-preserving.
+"""
+
 import email
 import email.utils
 import imaplib
@@ -22,6 +28,9 @@ class GmailCollector:
     name = "gmail"
 
     def __init__(self, settings: Settings):
+        """Reuse the SMTP app password for IMAP; disabled unless both the flag
+        and a password are set, so a missing credential makes the collector a
+        no-op rather than an error."""
         self.enabled = settings.gmail_enabled and bool(settings.smtp_password)
         self.host = settings.imap_host
         self.port = settings.imap_port
@@ -29,6 +38,13 @@ class GmailCollector:
         self.password = settings.smtp_password
 
     def collect(self, since: datetime) -> list[dict]:
+        """Return one Observation per inbox message since `since` (headers only).
+
+        Logs into INBOX read-only, fetches the last `_MAX_MESSAGES` matching the
+        date-granular IMAP SINCE search, and maps each header block to an
+        observation. Always logs out in a finally so a mid-fetch error never
+        leaks the connection — the collector degrades, never crashes.
+        """
         if not self.enabled:
             return []
         conn = imaplib.IMAP4_SSL(self.host, self.port)
@@ -54,6 +70,14 @@ class GmailCollector:
                 pass
 
     def _headers_to_observation(self, raw_headers: bytes, since: datetime) -> dict | None:
+        """Map one raw header block to an Observation, or None to drop it.
+
+        Decodes From/Subject, tags the item `newsletter` when a List-Unsubscribe
+        header is present else `email`, and carries the sender's domain as the
+        entity. Returns None for GitHub notification mail (the github collector
+        owns those) and for messages older than `since` — the IMAP SINCE filter
+        is date-granular, so the real timestamp cutoff is enforced here.
+        """
         msg = email.message_from_bytes(raw_headers)
         sender = str(make_header(decode_header(msg.get("From", ""))))
         subject = str(make_header(decode_header(msg.get("Subject", ""))))

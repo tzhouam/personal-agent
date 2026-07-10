@@ -1,3 +1,10 @@
+"""Chrome collector — turns local browsing history into visit Observations.
+
+Registers as `@register("chrome")`. Reads the on-disk Chrome History SQLite and
+applies privacy tiers so untrusted domains only ever leave as aggregate counts,
+never full URLs.
+"""
+
 import shutil
 import sqlite3
 import tempfile
@@ -13,10 +20,12 @@ _CHROME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 
 
 def _to_chrome_time(dt: datetime) -> int:
+    """Convert a datetime to Chrome's visit_time (microseconds since 1601-01-01 UTC)."""
     return int((dt - _CHROME_EPOCH).total_seconds() * 1_000_000)
 
 
 def _from_chrome_time(value: int) -> datetime:
+    """Convert a Chrome visit_time (microseconds since 1601-01-01 UTC) to a datetime."""
     return _CHROME_EPOCH + timedelta(microseconds=value)
 
 
@@ -32,11 +41,22 @@ class ChromeCollector:
     name = "chrome"
 
     def __init__(self, settings: Settings):
+        """Cache the History DB path and the allow/deny domain lists that drive
+        the privacy tiers."""
         self.history_path = settings.chrome_history_path
         self.allowlist = settings.chrome_allowlist
         self.denylist = settings.chrome_denylist
 
     def collect(self, since: datetime) -> list[dict]:
+        """Return visit Observations from history since `since`, privacy-tiered.
+
+        Copies the History DB to a temp file first because Chrome holds a write
+        lock on the live file, then reads the most recent 2000 visits. Denylisted
+        visits are dropped; allowlisted domains yield full `visit` observations
+        (title + URL, deduped by URL); every other domain is collapsed into one
+        `domain_visits` count observation (top 25). A missing History file makes
+        the collector a no-op — it degrades, never crashes.
+        """
         if not self.history_path.exists():
             return []  # no Chrome on this machine — collector is a no-op
 
@@ -96,7 +116,11 @@ class ChromeCollector:
         return observations
 
     def _denied(self, domain: str, url: str) -> bool:
+        """True if any denylist term is a substring of the domain or full URL —
+        a broad match so a single term can suppress a whole site or path."""
         return any(term in domain or term in url for term in self.denylist)
 
     def _allowed(self, domain: str) -> bool:
+        """True if `domain` equals or is a subdomain of an allowlist entry —
+        stricter than the denylist so allowlisting can't leak sibling domains."""
         return any(domain == a or domain.endswith("." + a) for a in self.allowlist)

@@ -79,19 +79,29 @@ def parse_when(when: str, now: datetime | None = None) -> datetime | None:
 
 
 class ReminderStore:
+    """One-shot reminders persisted to reminders.yaml. Each reminder carries a
+    monotonic id, a due time, and a ``sent_at`` marker that flips once delivered
+    (or "cancelled") so it fires at most once."""
+
     def __init__(self, data_dir: Path):
+        """Bind the store to ``data_dir/reminders.yaml`` (created lazily)."""
         self.path = data_dir / "reminders.yaml"
 
     def _load(self) -> dict:
+        """Read the reminders file, returning a fresh empty structure when it's
+        missing or empty."""
         if not self.path.exists():
             return {"next_id": 1, "reminders": []}
         return yaml.safe_load(self.path.read_text()) or {"next_id": 1, "reminders": []}
 
     def _save(self, data: dict) -> None:
+        """Write the reminders structure back, creating the data dir if needed."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
     def add(self, message: str, due_at: datetime) -> dict:
+        """Append a new unsent reminder due at ``due_at`` (message capped at 500
+        chars), assign it the next id, persist, and return the stored record."""
         data = self._load()
         reminder = {"id": f"m{data['next_id']}", "message": message[:500],
                     "due_at": due_at.strftime("%Y-%m-%d %H:%M"), "sent_at": None}
@@ -101,9 +111,12 @@ class ReminderStore:
         return reminder
 
     def pending(self) -> list[dict]:
+        """Reminders not yet sent or cancelled."""
         return [r for r in self._load()["reminders"] if not r.get("sent_at")]
 
     def cancel(self, reminder_id: str) -> bool:
+        """Mark the pending reminder ``reminder_id`` as cancelled so it never
+        fires. True if one was cancelled, False if unknown or already sent."""
         data = self._load()
         for r in data["reminders"]:
             if r["id"] == reminder_id and not r.get("sent_at"):

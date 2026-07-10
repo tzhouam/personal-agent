@@ -23,6 +23,8 @@ WARN_AT = 21                   # "going stale" from here on
 
 
 def _day(value) -> date | None:
+    """Parse the leading ``YYYY-MM-DD`` of ``value`` to a date, or None if
+    empty/unparseable — todo dates are best-effort strings."""
     try:
         return datetime.strptime(str(value)[:10], "%Y-%m-%d").date() if value else None
     except ValueError:
@@ -43,6 +45,9 @@ def _due_ramp(due: date | None, today: date) -> float:
 
 
 def _blocking(todo: dict) -> float:
+    """Weight [0,1] for someone waiting on the owner. Resume approvals block by
+    definition; otherwise the strongest ``_BLOCKING_W`` keyword found in the
+    todo's ``action`` wins (review request > mention/assign), else 0.0."""
     if todo.get("source") == "resume":  # approval gate waits on the owner
         return 0.6
     action = str(todo.get("action") or "").lower()
@@ -50,6 +55,8 @@ def _blocking(todo: dict) -> float:
 
 
 def _priority(todo: dict) -> float:
+    """Priority weight: red 1.0, else yellow 0.5 (the default for an
+    unset/unknown priority)."""
     return _PRIORITY_W.get(str(todo.get("priority", "")).lower(), _PRIORITY_W["yellow"])
 
 

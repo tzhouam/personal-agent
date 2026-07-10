@@ -38,6 +38,8 @@ def _todo_sort_key(today: date):
     """Most urgent first; older-first tiebreak so equal-urgency items keep a
     stable, seniority-respecting order."""
     def key(todo: dict):
+        """Sort key: descending urgency, then ascending creation day (undated
+        items sort as oldest)."""
         created = _parse_day(todo.get("created"))
         return (-urgency(todo, today), created.toordinal() if created else 0)
     return key

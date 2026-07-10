@@ -1,3 +1,8 @@
+"""arXiv Atom API client for the research digest: query, parse, and window
+candidate papers. Exports `search`, `parse_feed`, and `fetch_recent`, and
+enforces the API's 3-second request spacing so a run doesn't get rate-limited
+to zero results."""
+
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -13,6 +18,8 @@ _QUERY_SPACING_SECONDS = 3.0
 
 
 def _retryable(exc: BaseException) -> bool:
+    """True for transient failures worth a retry — 429/5xx responses and
+    transport errors; a 4xx other than 429 is a bad query, not worth retrying."""
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in (429, 500, 502, 503)
     return isinstance(exc, httpx.TransportError)
@@ -25,6 +32,9 @@ def _retryable(exc: BaseException) -> bool:
     reraise=True,
 )
 def search(query: str, max_results: int = 30, timeout: int = 30) -> list[dict]:
+    """One arXiv API query for `query`, newest submissions first, parsed into
+    paper dicts. Retries transient failures (see `_retryable`) with exponential
+    backoff before giving up."""
     resp = httpx.get(
         API,
         params={
@@ -40,6 +50,9 @@ def search(query: str, max_results: int = 30, timeout: int = 30) -> list[dict]:
 
 
 def parse_feed(xml_text: str) -> list[dict]:
+    """Parse an arXiv Atom response into a list of paper dicts (id, title,
+    abstract, published, up to 8 authors, categories, abstract url). Whitespace
+    is collapsed in title/abstract; the version suffix is stripped from the url."""
     papers = []
     for entry in ET.fromstring(xml_text).findall("atom:entry", _NS):
         arxiv_id = (entry.findtext("atom:id", "", _NS)).rsplit("/", 1)[-1]

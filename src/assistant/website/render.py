@@ -68,6 +68,8 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
     )
 
     def actives(section):
+        """The active (non-dormant/non-merged) entries of a profile section —
+        dormant entries never reach a published page."""
         return [x for x in profile.get(section, []) if x.get("status", "active") == "active"]
 
     link_pills = [

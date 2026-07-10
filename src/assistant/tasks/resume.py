@@ -41,6 +41,9 @@ Rules:
 
 
 def find_main_tex(repo: Path) -> Path | None:
+    """Locate the resume's main .tex in `repo`: the largest file containing
+    `\\documentclass` (the entry point among any includes), or None if there is
+    no such file."""
     candidates = [
         p for p in sorted(repo.rglob("*.tex"))
         if "\\documentclass" in p.read_text(errors="ignore")
@@ -74,14 +77,26 @@ def compile_check(repo: Path, tex: Path) -> tuple[bool | None, str]:
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Run a git command in `repo`, capturing output; `check` toggles raising on
+    non-zero exit."""
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=check)
 
 
 def _pending_file(settings: Settings) -> Path:
+    """Path to the JSON record of a resume update awaiting owner approval."""
     return settings.data_dir / "resume_pending.json"
 
 
 def sync_resume(llm: LLM, settings: Settings, profile: dict, profile_diff: str) -> dict:
+    """Propose and locally commit a resume edit from today's profile diff,
+    returning a status dict (never raising into the pipeline).
+
+    The gate chain, most-declining first: no repo / no main .tex →
+    not_configured; empty diff or not resume-worthy per the relevance LLM →
+    no_change; edits that don't apply exactly-once → no_change with the rejected
+    list; edits that break `compile_check` → rolled back, failed. A successful
+    edit is committed locally and recorded as pending_approval — the resume is
+    outward-facing, so it is never auto-pushed (that is `approve_resume`)."""
     repo = settings.resume_dir
     if not (repo / ".git").exists():
         return {"status": "not_configured",

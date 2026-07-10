@@ -1,3 +1,8 @@
+"""GitHub notification triage: sort notifications into red/yellow/white priority
+buckets with one-sentence summaries. The LLM refines a deterministic
+reason-based pre-bucketing and never invents — anything it drops (or the whole
+call on failure) falls back to `_REASON_PRIORITY`. Exports `build_digest`."""
+
 import json
 
 from ..llm import LLM
@@ -38,6 +43,14 @@ Include every notification id you were given exactly once."""
 
 
 def build_digest(llm: LLM, profile: dict, notifications: list[dict], activity: list[dict]) -> dict:
+    """Triage `notifications` into red/yellow/white sections and return them with
+    counts.
+
+    Only the first `_MAX_TO_LLM` go to the model (with `profile` and the owner's
+    recent `activity` as relevance context); the rest are appended to white as
+    FYI so nothing is silently dropped. Each notification falls back to its
+    `_REASON_PRIORITY` bucket and a `[reason] title` summary when the model
+    omits it or the call fails, so triage always covers every id."""
     sections = {"red": [], "yellow": [], "white": []}
     if not notifications:
         return {"sections": sections, "total": 0, "overflow": 0}

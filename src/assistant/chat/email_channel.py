@@ -23,9 +23,16 @@ log = logging.getLogger("assistant")
 
 
 class EmailChannel:
+    """Inbound/outbound email channel over IMAP+SMTP. Enabled only when SMTP
+    creds are present; ``owner_addresses`` is the allow-list of senders whose
+    mail is answered, and a UID watermark (chat_state.json) makes each message
+    fire at most once."""
+
     name = "email"
 
     def __init__(self, settings: Settings, owner_addresses: list[str]):
+        """Normalize the owner allow-list to lowercased addresses and set the
+        watermark file path; ``enabled`` reflects whether SMTP creds exist."""
         self.settings = settings
         self.owner = {a.strip().lower() for a in owner_addresses if a and "@" in a}
         self.state_file = settings.data_dir / "chat_state.json"
@@ -33,6 +40,8 @@ class EmailChannel:
 
     # ── UID watermark ────────────────────────────────────────────────
     def _load_state(self) -> dict:
+        """Read chat_state.json, tolerating a missing or corrupt file (returns
+        an empty dict) so a bad watermark never crashes the poll."""
         if self.state_file.exists():
             try:
                 return json.loads(self.state_file.read_text())
@@ -41,6 +50,8 @@ class EmailChannel:
         return {}
 
     def _save_uid(self, uid: int) -> None:
+        """Advance the processed-mail watermark to ``uid``, preserving other
+        state keys."""
         state = self._load_state()
         state["email_last_uid"] = uid
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +59,11 @@ class EmailChannel:
 
     # ── polling ──────────────────────────────────────────────────────
     def poll(self) -> list[dict]:
+        """Fetch new owner messages since the last watermark, newest UIDs only.
+        On first ever run it seeds the watermark to the inbox tail and returns
+        nothing so history is never replayed; otherwise it returns parsed owner
+        messages and advances the watermark past everything seen. The IMAP
+        connection is always logged out, even on error."""
         if not self.enabled:
             return []
         conn = imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port)
@@ -83,6 +99,11 @@ class EmailChannel:
                 pass
 
     def _parse(self, raw: bytes) -> dict | None:
+        """Turn a raw RFC822 message into a channel message dict, or None to
+        drop it. Rejects any sender not in the owner allow-list and any subject
+        not starting with the chat prefix. The command text combines the
+        after-prefix subject and the plain-text body, so a subject-only mail
+        ("agent: trigger a run") still carries a command."""
         msg = email.message_from_bytes(raw)
         sender = email.utils.parseaddr(str(msg.get("From", "")))[1].lower()
         if sender not in self.owner:
@@ -102,6 +123,8 @@ class EmailChannel:
                 "sender": sender}
 
     def send(self, text: str, in_reply_to: dict | None = None) -> None:
+        """Email ``text`` back to the owner as HTML (each line a paragraph),
+        threading it under the original subject when ``in_reply_to`` is given."""
         subject = f"Re: {in_reply_to['subject']}" if in_reply_to else "[assistant] chat"
         import html as _html
         body = "".join(f"<p>{_html.escape(line)}</p>" if line.strip() else "<br>"

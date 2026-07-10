@@ -1,3 +1,10 @@
+"""SQLite-backed evidence layer for the pipeline.
+
+Owns three tables: an append-only ``observations`` log (with an FTS5 mirror for
+search), a ``seen`` dedup store so an item is surfaced once, and a ``metrics``
+table feeding the digest's Health section. Exports the ``EventsStore`` wrapper.
+"""
+
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -43,6 +50,8 @@ class EventsStore:
     """Raw observation log (evidence layer) + surfaced-item dedup store."""
 
     def __init__(self, db_path: Path):
+        """Open (creating parents) the SQLite db at ``db_path`` and apply the
+        idempotent schema so the store is usable on a fresh checkout."""
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.executescript(_SCHEMA)
@@ -82,6 +91,8 @@ class EventsStore:
         return ids
 
     def filter_unseen(self, item_ids: list[str]) -> list[str]:
+        """Keep only ids absent from ``seen`` — the dedup gate so an item is
+        surfaced once. Order-preserving; empty input short-circuits."""
         if not item_ids:
             return []
         placeholders = ",".join("?" * len(item_ids))
@@ -94,6 +105,9 @@ class EventsStore:
         return [i for i in item_ids if i not in seen]
 
     def mark_seen(self, item_ids: list[str], context: str = "") -> None:
+        """Record ``item_ids`` as surfaced. Upsert: a repeat only advances
+        ``last_seen``, preserving the original ``first_seen``. ``context``
+        notes where it was surfaced."""
         now = datetime.now(timezone.utc).isoformat()
         for item_id in item_ids:
             self.conn.execute(
@@ -119,6 +133,8 @@ class EventsStore:
         self.conn.commit()
 
     def metrics_window(self, days: int = 7) -> list[dict]:
+        """All metric rows from the last ``days``, oldest first — the raw
+        input build_health() rolls into the digest's Health section."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         rows = self.conn.execute(
             "SELECT run_id, ts, step, name, value FROM metrics WHERE ts >= ?"
@@ -127,4 +143,5 @@ class EventsStore:
                 for r in rows]
 
     def close(self) -> None:
+        """Close the underlying SQLite connection."""
         self.conn.close()

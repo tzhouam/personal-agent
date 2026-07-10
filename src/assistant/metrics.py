@@ -17,6 +17,8 @@ from .urgency import going_stale
 # what each phase's returned state-update contributes to the metrics table
 # (duration and error count are recorded generically by the orchestrator wrapper)
 def _collect(out: dict) -> dict:
+    """Metrics for the collect phase: total observations, notifications, and a
+    per-source ``obs_<source>`` breakdown."""
     values = {"observations": len(out.get("observations", [])),
               "notifications": len(out.get("notifications", []))}
     for source, n in Counter(o.get("source", "?")
@@ -26,6 +28,8 @@ def _collect(out: dict) -> dict:
 
 
 def _digest(out: dict) -> dict:
+    """Metrics for the digest phase: red/yellow/white section counts plus how
+    many already-seen items were suppressed."""
     sections = out.get("digest", {}).get("sections", {})
     return {"red": len(sections.get("red", [])),
             "yellow": len(sections.get("yellow", [])),
@@ -57,6 +61,8 @@ EXTRACTORS = {
 # ── the 7-day health summary (rendered into the digest email) ────────
 
 def _day(value) -> date | None:
+    """Parse the leading ``YYYY-MM-DD`` of ``value`` to a date, or None if
+    empty/unparseable — dates in the stores are best-effort."""
     try:
         return datetime.strptime(str(value)[:10], "%Y-%m-%d").date() if value else None
     except ValueError:
@@ -64,10 +70,13 @@ def _day(value) -> date | None:
 
 
 def _series(rows: list[dict], step: str, name: str) -> list[float]:
+    """The values of one ``(step, name)`` metric across ``rows``, in row order."""
     return [r["value"] for r in rows if r["step"] == step and r["name"] == name]
 
 
 def _rate(num: int, den: int) -> str:
+    """Format ``num/den`` with a percentage, omitting the percent on den 0
+    (avoiding division by zero)."""
     return f"{num}/{den}" + (f" ({100 * num // den}%)" if den else "")
 
 
@@ -150,6 +159,9 @@ def build_health(events, profile_dir, days: int = 7) -> list[tuple[str, str]]:
 
 
 def render_health_html(lines: list[tuple[str, str]]) -> str:
+    """Render build_health()'s (label, value) pairs as the digest email's
+    Health table. Empty input yields "" (section omitted); all cells are
+    HTML-escaped."""
     if not lines:
         return ""
     cells = "".join(

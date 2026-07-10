@@ -14,19 +14,30 @@ import yaml
 
 
 class _YamlItems:
+    """Base for the git-versioned YAML item stores. Subclasses set ``FILENAME``
+    and the display-``id`` ``ID_PREFIX``; every mutation rewrites the file and
+    commits it (when the dir is a git repo) so the history is auditable."""
+
     FILENAME = "items.yaml"
     ID_PREFIX = "x"
 
     def __init__(self, repo_dir: Path):
+        """Bind to ``FILENAME`` inside ``repo_dir`` (the profile git repo)."""
         self.repo_dir = repo_dir
         self.path = repo_dir / self.FILENAME
 
     def load(self) -> dict:
+        """Return the parsed store, or an empty ``{next_id, items}`` scaffold
+        when the file is missing or empty."""
         if not self.path.exists():
             return {"next_id": 1, "items": []}
         return yaml.safe_load(self.path.read_text()) or {"next_id": 1, "items": []}
 
     def _save(self, data: dict, message: str) -> None:
+        """Write ``data`` back to the file and, if the dir is a git repo,
+        stage and commit it with ``message`` — keeping items versioned
+        alongside the profile. Git failures are swallowed (capture_output)
+        so persistence never crashes the caller."""
         self.repo_dir.mkdir(parents=True, exist_ok=True)
         self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
         if (self.repo_dir / ".git").exists():  # versioned alongside the profile
@@ -48,6 +59,8 @@ class _YamlItems:
         return item
 
     def mark_done(self, item_id: str) -> bool:
+        """Close the open item with display id ``item_id``, stamping
+        ``done_at``. Returns whether a matching open item was found."""
         data = self.load()
         for item in data["items"]:
             if item["id"] == item_id and item["status"] == "open":
@@ -70,6 +83,7 @@ class _YamlItems:
         return False
 
     def open_items(self) -> list[dict]:
+        """The still-open items (what the CLI, website, and email render)."""
         return [i for i in self.load()["items"] if i["status"] == "open"]
 
     def expire_stale(self, days: int = 30, today: date | None = None) -> list[dict]:
@@ -100,11 +114,16 @@ class _YamlItems:
 
 
 class TodoStore(_YamlItems):
+    """Actionable todos (``todos.yaml``); display ids ``t1``, ``t2``, …"""
+
     FILENAME = "todos.yaml"
     ID_PREFIX = "t"
 
 
 class ReadingList(_YamlItems):
+    """Surfaced reading items (``reading_list.yaml``); ids ``r1``, ``r2``, …
+    Adds negative-feedback tracking the research scorer learns from."""
+
     FILENAME = "reading_list.yaml"
     ID_PREFIX = "r"
 

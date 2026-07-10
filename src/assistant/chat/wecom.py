@@ -35,9 +35,18 @@ _API = "https://qyapi.weixin.qq.com/cgi-bin"
 
 
 class WeComChannel:
+    """WeChat Work channel: pushes agent replies to the owner and, when a
+    callback server is configured, receives their messages. Sending needs only
+    outbound HTTPS (``enabled`` tracks that the corp/secret/agent creds exist);
+    inbound arrives asynchronously via an internal inbox queue fed by the
+    callback HTTP server."""
+
     name = "wecom"
 
     def __init__(self, settings: Settings):
+        """Set ``enabled`` from the presence of corp/secret/agent creds and
+        initialize the empty access-token cache, inbound queue, and (unstarted)
+        callback server handle."""
         self.settings = settings
         self.enabled = bool(settings.wecom_corp_id and settings.wecom_secret
                             and settings.wecom_agent_id)
@@ -48,6 +57,8 @@ class WeComChannel:
 
     # ── sending (outbound HTTPS only) ────────────────────────────────
     def _access_token(self) -> str:
+        """Return a valid WeCom API access token, fetching a fresh one only
+        when the cached token is within 60s of expiry. Raises on an API error."""
         if time.time() < self._token_expiry - 60:
             return self._token
         resp = httpx.get(f"{_API}/gettoken", params={
@@ -62,6 +73,10 @@ class WeComChannel:
         return self._token
 
     def send(self, text: str, in_reply_to: dict | None = None) -> None:
+        """Push ``text`` (capped at 2000 chars) to the owner as a WeCom text
+        message, or to everyone in the app when no owner userid is set.
+        ``in_reply_to`` is unused — WeChat has no reply threading. Raises on an
+        API error."""
         resp = httpx.post(f"{_API}/message/send",
                           params={"access_token": self._access_token()},
                           json={"touser": self.settings.wecom_owner_userid or "@all",
@@ -75,6 +90,8 @@ class WeComChannel:
 
     # ── receiving (callback server; needs a public tunnel to this port) ──
     def poll(self) -> list[dict]:
+        """Drain and return every message the callback server has queued since
+        the last poll (empty list if none) — non-blocking."""
         messages = []
         while True:
             try:
@@ -83,6 +100,10 @@ class WeComChannel:
                 return messages
 
     def start_callback_server(self) -> bool:
+        """Start the background HTTP server that receives WeCom callbacks, so
+        inbound messages land in the inbox queue. Returns False (send-only) when
+        the Token/AESKey needed to decrypt callbacks aren't configured; True
+        once the threaded server is serving on the callback port."""
         if not (self.settings.wecom_token and self.settings.wecom_aes_key):
             return False
         crypto = _MsgCrypto(self.settings.wecom_token, self.settings.wecom_aes_key,
@@ -90,15 +111,26 @@ class WeComChannel:
         channel = self
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args):  # route through our logger
+            """HTTP handler for WeCom's app callback endpoint: GET serves the
+            one-time URL-verification handshake, POST receives owner messages.
+            Closes over ``crypto`` (signature/decrypt) and ``channel`` (inbox)."""
+
+            def log_message(self, *args):
+                """Silence the default stderr access log; route hits to our
+                logger at debug level instead."""
                 log.debug("wecom callback: %s", args)
 
             def _reply(self, code: int, body: str = "") -> None:
+                """Write a bare HTTP response with ``code`` and optional body —
+                the minimal reply WeCom expects (no headers beyond status)."""
                 self.send_response(code)
                 self.end_headers()
                 self.wfile.write(body.encode())
 
-            def do_GET(self):  # URL verification handshake
+            def do_GET(self):
+                """WeCom URL-verification handshake: decrypt the ``echostr`` and
+                echo it back (200) to prove ownership of Token/AESKey, or 400 if
+                verification fails."""
                 q = parse_qs(urlparse(self.path).query)
                 try:
                     echo = crypto.decrypt(
@@ -109,7 +141,12 @@ class WeComChannel:
                     log.warning("wecom verification failed: %s", exc)
                     self._reply(400)
 
-            def do_POST(self):  # incoming message
+            def do_POST(self):
+                """Receive an incoming WeCom message: decrypt the body, verify
+                the sender is the owner, and enqueue the text for ``poll`` to
+                pick up. Always answers an empty 200 (no passive reply — the
+                agent pushes its answer asynchronously via ``send``); a decrypt
+                failure answers 400."""
                 q = parse_qs(urlparse(self.path).query)
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 try:
@@ -142,6 +179,10 @@ class _MsgCrypto:
     """WeCom callback crypto (WXBizMsgCrypt): SHA1 signature + AES-256-CBC."""
 
     def __init__(self, token: str, encoding_aes_key: str, corp_id: str):
+        """Cache the crypto primitives and decode the base64 EncodingAESKey to
+        its 32-byte AES key (raising if it isn't exactly 32 bytes). ``token``
+        signs callbacks and ``corp_id`` is checked against the decrypted
+        payload's receiver."""
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
         self._cipher_parts = (Cipher, algorithms, modes)
@@ -152,6 +193,12 @@ class _MsgCrypto:
         self.corp_id = corp_id
 
     def decrypt(self, encrypted_b64: str, signature: str, timestamp: str, nonce: str) -> str:
+        """Verify a callback's SHA1 signature, then AES-256-CBC decrypt the
+        payload and return its inner message string. Raises ValueError on a bad
+        signature or if the embedded corp id doesn't match — either means the
+        request isn't a genuine WeCom callback. The wire format is a 16-byte
+        random prefix, a 4-byte big-endian length, the message, then the corp
+        id; PKCS#7 padding is stripped first."""
         expected = hashlib.sha1(
             "".join(sorted([self.token, timestamp, nonce, encrypted_b64])).encode()
         ).hexdigest()

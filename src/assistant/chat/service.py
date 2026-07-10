@@ -19,6 +19,8 @@ log = logging.getLogger("assistant")
 
 
 def _owner_addresses(settings: Settings) -> list[str]:
+    """Every address that counts as the owner for sender authentication: the
+    SMTP user and digest recipient, plus any emails recorded in the profile."""
     addresses = [settings.smtp_user, settings.digest_to]
     store = ProfileStore(settings.profile_dir)
     if store.exists():
@@ -46,6 +48,9 @@ def build_channels(settings: Settings, log_wecom: bool = True) -> list:
 
 
 def _acquire_pid_lock(settings: Settings) -> bool:
+    """Claim the single-listener lock so two daemons don't double-process the
+    same inbox. True on success; False if a live listener already holds the pid
+    file — a stale pid (process gone) is overwritten and the lock granted."""
     pid_file = settings.data_dir / "chat_listener.pid"
     if pid_file.exists():
         try:
@@ -61,6 +66,12 @@ def _acquire_pid_lock(settings: Settings) -> bool:
 
 
 def run_listener(settings: Settings, once: bool = False) -> int:
+    """Poll every enabled channel forever, answering each owner message via the
+    chat agent and replying on the same channel. ``once`` runs a single sweep
+    (and skips the pid lock) for testing. Returns a nonzero exit code when it
+    can't start — lock already held, or no channel configured. Per-channel and
+    per-message errors are logged and swallowed so one failure never stops the
+    loop."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not once and not _acquire_pid_lock(settings):
         return 1

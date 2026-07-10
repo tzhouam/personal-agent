@@ -1,3 +1,8 @@
+"""Digest delivery: `render_html` assembles the daily digest email body from all
+pipeline sections (todos, notifications, reading, research, resume, profile
+changes, health), and `send_email` ships it — Resend HTTP API first, SMTP as
+fallback. All interpolated content is HTML-escaped."""
+
 import html
 import smtplib
 from email.mime.text import MIMEText
@@ -18,6 +23,16 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
                 todos: dict, reading: list[dict], website: dict,
                 profile_diff: str, profile_ops: list[dict], stats: dict,
                 health_html: str = "") -> str:
+    """Build the daily-digest HTML body from the pipeline's outputs, returning
+    one self-contained inline-styled string.
+
+    Each argument is one section that renders only when it has content — open
+    `todos` (NEW-badged for today's additions) and auto-closed ones, the
+    red/yellow/white notification `digest`, the `reading` list with the day's
+    `research` summaries, industry/中文 feed items, a footer of failed sources,
+    `website` sync status, a pending/failed `resume`, today's `profile_ops` diff,
+    optional pre-rendered `health_html`, and a `stats` footer. All dynamic text
+    is HTML-escaped."""
     parts = [
         "<div style='font-family:-apple-system,Segoe UI,sans-serif;max-width:720px;margin:auto;color:#1f2937'>",
         f"<h2 style='border-bottom:2px solid #e5e7eb;padding-bottom:8px'>Daily digest — {run_date}</h2>",

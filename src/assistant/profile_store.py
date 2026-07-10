@@ -1,3 +1,14 @@
+"""Git-versioned, two-layer profile memory — the owner's curated self-model.
+
+`ProfileStore` reads/writes profile.yaml in its own git repo, committing every
+change so the history is auditable and revertible. Writes happen only through
+typed patch ops (`apply_ops`) over an evidence log: ops are evidence-gated,
+protected sections are off-limits, and nothing is ever fabricated or hard-deleted
+(entries go dormant/merged instead). Also exports the initiative-alias join key
+(against fragmentation), the ops log helpers that give the daily pass multi-day
+context, and the deterministic markdown/summary renderers.
+"""
+
 import json
 import re
 import subprocess
@@ -39,17 +50,21 @@ class ProfileStore:
     """profile.yaml in its own git repo; every save is a commit → auditable diffs."""
 
     def __init__(self, profile_dir: Path):
+        """Bind the store to `profile_dir` and the profile.yaml / PROFILE.md paths within it."""
         self.dir = profile_dir
         self.yaml_path = profile_dir / "profile.yaml"
         self.md_path = profile_dir / "PROFILE.md"
 
     # ── git plumbing ────────────────────────────────────────────────
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+        """Run a git command in the profile dir, capturing output; `check` raises on failure."""
         return subprocess.run(
             ["git", *args], cwd=self.dir, capture_output=True, text=True, check=check
         )
 
     def ensure_repo(self) -> None:
+        """Create the profile dir and initialize its git repo (with a local
+        agent identity) if it isn't one yet — idempotent, so save() can call it freely."""
         self.dir.mkdir(parents=True, exist_ok=True)
         if not (self.dir / ".git").exists():
             self._git("init", "-q")
@@ -58,9 +73,11 @@ class ProfileStore:
 
     # ── load / save ─────────────────────────────────────────────────
     def exists(self) -> bool:
+        """True if a profile.yaml has been written yet."""
         return self.yaml_path.exists()
 
     def load(self) -> dict:
+        """Return the parsed profile.yaml, or {} when the file is empty/absent."""
         return yaml.safe_load(self.yaml_path.read_text()) or {}
 
     def save(self, profile: dict, message: str) -> str:
@@ -82,6 +99,16 @@ class ProfileStore:
     # ── typed patch ops (the LLM's only write surface) ──────────────
     def apply_ops(self, profile: dict, ops: list[dict], today: str | None = None,
                   allowed: set | None = None):
+        """Apply the LLM's typed patch `ops` to `profile` in place, gated.
+
+        This is the only write surface. `allowed` defaults to DAILY_OPS (the
+        weekly pass widens it to include rewrite_entry); an op is rejected if its
+        kind is outside `allowed`, if it targets a PROTECTED_SECTION, or if it
+        tries to merge away an initiative-owning (canonical, per aliases.yaml)
+        entry. Each surviving op is dispatched to `_apply_one`; a malformed op is
+        caught and rejected rather than allowed to kill the run. Returns the
+        mutated profile plus the applied and rejected (with reasons) op lists.
+        """
         today = today or date.today().isoformat()
         allowed = allowed or DAILY_OPS
         # initiative-owning entries are canonical: fragments merge INTO them,
@@ -111,6 +138,19 @@ class ProfileStore:
         return profile, applied, rejected
 
     def _apply_one(self, profile: dict, op: dict, kind: str, today: str) -> bool:
+        """Execute a single already-vetted op of type `kind`, returning whether it
+        changed anything (False = target missing, duplicate, or a gate refused it).
+
+        Covers the full op vocabulary: touch/confirm entries (bump_last_seen,
+        add_evidence), create entries (add_skill/interest/project, always born
+        active with capped evidence), append highlights, retire (mark_dormant —
+        never delete), and the consolidation ops. merge_projects folds a source
+        into a canonical entry and leaves a "merged" pointer stub; move_evidence
+        shifts matching evidence between projects; rewrite_entry replaces
+        highlights/evidence under strict gates — it must add something, may not
+        drop cited URLs when the entry is stable (>= _STABLE_CONFIRMATIONS), and
+        superseded highlights are archived to `history` rather than deleted.
+        """
         if kind == "bump_last_seen":
             entry = _find(profile, op["section"], op["name"])
             if entry is None:
@@ -298,6 +338,9 @@ initiatives: []
 
 
 def load_aliases(profile_dir: Path) -> list[dict]:
+    """Return the owner-defined initiatives from aliases.yaml (only those with a
+    name), or [] if the file is absent or unparseable — a bad aliases file
+    degrades to "no join key", never an error."""
     path = profile_dir / "aliases.yaml"
     if not path.exists():
         return []
@@ -322,6 +365,9 @@ def render_initiatives(aliases: list[dict]) -> str:
 # ── ops log (profile-v2 P4): the daily pass's multi-day context ──────────
 
 def append_ops_log(profile_dir: Path, ops: list[dict], today: str) -> None:
+    """Append each applied op, stamped with `today`, as a JSONL line to
+    ops_log.jsonl — the durable trail that gives the daily pass multi-day
+    context. No-op when `ops` is empty."""
     if not ops:
         return
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -331,6 +377,9 @@ def append_ops_log(profile_dir: Path, ops: list[dict], today: str) -> None:
 
 
 def recent_ops(profile_dir: Path, days: int = 7, limit: int = 40) -> list[dict]:
+    """Return the most recent op-log records from the last `days` (at most
+    `limit`, newest-trailing), skipping malformed lines. Feeds the daily pass its
+    recent-history context; [] when no log exists."""
     path = profile_dir / "ops_log.jsonl"
     if not path.exists():
         return []
@@ -347,6 +396,9 @@ def recent_ops(profile_dir: Path, days: int = 7, limit: int = 40) -> list[dict]:
 
 
 def _find(profile: dict, section: str, name: str) -> dict | None:
+    """Return the entry in `section` whose key field matches `name`
+    case-insensitively, or None. `section` must be one of the keyed sections
+    (skills/interests/projects); anything else returns None."""
     key = _KEY_FIELD.get(section)
     if key is None:
         return None
@@ -358,6 +410,12 @@ def _find(profile: dict, section: str, name: str) -> dict | None:
 
 
 def render_markdown(profile: dict) -> str:
+    """Render `profile` to the human-readable PROFILE.md committed beside the yaml.
+
+    Deterministic (no LLM): emits an identity header then Skills/Interests/
+    Projects sections, each entry with its level/weight/role and a dormant tag,
+    followed by its highlights. Merged pointer stubs are skipped.
+    """
     ident = profile.get("identity", {})
     lines = [f"# Profile — {ident.get('name', '?')}", ""]
     lines.append(f"GitHub: `{ident.get('github', '?')}` · Emails: {', '.join(ident.get('emails', []))}")
@@ -389,6 +447,7 @@ def render_summary(profile: dict, max_items: int = 8) -> str:
     """Compact plain-text profile summary for LLM prompts."""
 
     def actives(section, key):
+        """Comma-joined `key` values of the active entries in `section` (≤max_items)."""
         items = [e for e in profile.get(section, []) if e.get("status", "active") == "active"]
         return ", ".join(str(e.get(key)) for e in items[:max_items])
 

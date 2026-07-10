@@ -10,7 +10,15 @@ REGISTRY: dict[str, Callable] = {}
 
 
 def register(name: str):
+    """Decorator factory that files a collector class under `name` in REGISTRY.
+
+    Applied as `@register("<name>")` on each collector so importing the module
+    is the only wiring needed — the orchestrator reads REGISTRY and never learns
+    the concrete classes.
+    """
+
     def decorator(factory):
+        """Record `factory` under the captured `name` and return it unchanged."""
         REGISTRY[name] = factory
         return factory
 

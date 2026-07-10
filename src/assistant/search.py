@@ -28,6 +28,7 @@ _DDG_SNIPPET = re.compile(r"<td class='result-snippet'>(.*?)</td>", re.DOTALL)
 
 
 def _clean(text: str) -> str:
+    """Strip HTML tags, collapse whitespace, and unescape entities to plain text."""
     return _html.unescape(" ".join(_TAG.sub(" ", text).split()))
 
 
@@ -41,6 +42,9 @@ def _real_url(ddg_href: str) -> str:
 
 
 def _search_ddg(query: str, max_results: int) -> list[dict]:
+    """The keyless default backend: scrape DuckDuckGo Lite's HTML into up to
+    ``max_results`` ``{title, url, snippet}`` dicts, resolving DDG redirect
+    links to their real targets."""
     resp = httpx.get(f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}",
                      headers=_UA, timeout=20, follow_redirects=True)
     resp.raise_for_status()
@@ -104,6 +108,8 @@ def _search_brave(query: str, max_results: int, api_key: str) -> list[dict]:
 
 
 def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict]:
+    """Tavily's LLM-oriented search API into ``{title, url, snippet}`` dicts
+    (snippet is the returned content, capped at 300 chars)."""
     resp = httpx.post("https://api.tavily.com/search",
                       json={"api_key": api_key, "query": query,
                             "max_results": max_results},
@@ -169,5 +175,7 @@ def fetch_page(url: str, max_chars: int = 3000) -> str:
 
 
 def format_results(results: list[dict], limit: int = 6) -> str:
+    """Render the first ``limit`` results as a bulleted, LLM-readable list, or
+    "(no results)" when empty."""
     return "\n".join(f"- {r['title']} — {r['snippet'][:200]} ({r['url']})"
                      for r in results[:limit]) or "(no results)"

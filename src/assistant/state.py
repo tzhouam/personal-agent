@@ -1,3 +1,9 @@
+"""Shared pipeline state and its on-disk persistence.
+
+Defines `AssistantState`, the TypedDict threaded through every LangGraph node,
+plus `load_state`/`persist_state` for the small `state.json` checkpoint that
+survives across runs so `--resume` knows which phase to re-enter."""
+
 import json
 import operator
 from pathlib import Path
@@ -5,6 +11,11 @@ from typing import Annotated, Any, TypedDict
 
 
 class AssistantState(TypedDict, total=False):
+    """Mutable state passed between pipeline phases; every field is optional
+    (`total=False`) since each node contributes only its own outputs. `phase`
+    names the phase to (re)enter; `errors` uses an `operator.add` reducer so
+    each node's errors accumulate across the graph rather than overwrite."""
+
     run_id: str
     phase: str  # collect | profile | digest | research | deliver | curate | done — phase to (re)enter
     dry_run: bool
@@ -25,6 +36,9 @@ class AssistantState(TypedDict, total=False):
 
 
 def load_state(state_file: Path) -> dict[str, Any] | None:
+    """Read the persisted checkpoint from `state_file`, returning its parsed
+    dict or `None` when the file is missing or unreadable/corrupt — degrading
+    to a fresh run rather than crashing on bad JSON."""
     if not state_file.exists():
         return None
     try:

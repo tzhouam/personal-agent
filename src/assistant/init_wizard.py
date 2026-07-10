@@ -40,18 +40,26 @@ def upsert_env(env_path: Path, key: str, value: str) -> None:
 
 
 def _mask(value: str) -> str:
+    """Redact a secret for on-screen echo: `(unset)` when empty, the value
+    verbatim if short (≤8), else first-four…last-four so the user can confirm
+    which key is set without exposing it."""
     if not value:
         return "(unset)"
     return value if len(value) <= 8 else f"{value[:4]}…{value[-4:]}"
 
 
 def _ask(prompt: str) -> str:  # seam for tests
+    """Prompt on the terminal and return the stripped reply; a single
+    indirection point so tests can stub interactive input."""
     return input(prompt).strip()
 
 
 # ── probes (shared by wizard and doctor) ─────────────────────────────
 
 def probe_llm(s: Settings):
+    """Confirm the agent can actually think: with a key set, fire a one-token
+    completion and report OK on any reply, WARN on an empty one. Returns the
+    `(status, detail)` pair every probe yields for the wizard/doctor report."""
     if not s.anthropic_api_key:
         return FAIL, "ANTHROPIC_API_KEY unset — the agent cannot think without it"
     try:
@@ -65,6 +73,9 @@ def probe_llm(s: Settings):
 
 
 def probe_github(s: Settings):
+    """Validate the GitHub token against `/user`, and WARN when the
+    authenticated login disagrees with a configured `GITHUB_USER` (a common
+    wrong-token mistake). Returns `(status, detail)`."""
     if not s.github_token:
         return FAIL, "GITHUB_TOKEN unset — collectors and website push need it"
     try:
@@ -83,6 +94,9 @@ def probe_github(s: Settings):
 
 
 def probe_email(s: Settings):
+    """Check a digest delivery path exists — Resend key preferred, SMTP creds
+    as fallback — and FAIL if neither is configured. Returns `(status,
+    detail)`."""
     if s.resend_api_key:
         return OK, f"Resend configured → {s.recipient or '(set DIGEST_TO!)'}"
     if s.smtp_user and s.smtp_password:
@@ -91,6 +105,9 @@ def probe_email(s: Settings):
 
 
 def probe_website(s: Settings):
+    """Verify push access to the Pages repo the site renders into (SKIP when
+    disabled), and WARN if `WEBSITE_PASSWORD` is unset since the todos/reading
+    pages would then publish unencrypted. Returns `(status, detail)`."""
     if not s.website_repo:
         return SKIP, "WEBSITE_REPO unset — personal site disabled"
     try:
@@ -109,6 +126,11 @@ def probe_website(s: Settings):
 
 
 def probe_marks(s: Settings):
+    """Vet the marks-sync push token that ships inside the encrypted pages:
+    require `WEBSITE_PASSWORD` (it only travels encrypted), confirm the token
+    reaches the marks repo, and WARN if the token can see *other* repos —
+    since it lands in browsers, its scope should be that repo only. Returns
+    `(status, detail)`."""
     if not (s.marks_repo and s.marks_push_token):
         return SKIP, "marks sync disabled (MARKS_REPO/MARKS_PUSH_TOKEN unset) — website clicks stay browser-local"
     if not s.website_password:
@@ -133,6 +155,9 @@ def probe_marks(s: Settings):
 
 
 def probe_resume(s: Settings):
+    """Check the resume git remote answers an `ls-remote HEAD` (SKIP when
+    unset), with terminal prompts disabled so a bad credential fails fast
+    instead of hanging. Returns `(status, detail)`."""
     if not s.resume_remote_url:
         return SKIP, "RESUME_REMOTE_URL unset — resume sync disabled"
     try:
@@ -146,6 +171,9 @@ def probe_resume(s: Settings):
 
 
 def probe_search(s: Settings):
+    """Report the first configured web-search backend in preference order,
+    else WARN that `/search` falls back to rate-limited keyless DuckDuckGo.
+    Returns `(status, detail)`."""
     for name, key in (("Gemini grounding", s.gemini_api_key), ("Google CSE", s.google_api_key),
                       ("Tavily", s.tavily_api_key), ("Brave", s.brave_api_key)):
         if key:
@@ -154,6 +182,9 @@ def probe_search(s: Settings):
 
 
 def probe_collectors(s: Settings):
+    """Summarise which activity collectors can run — chrome history file,
+    gmail (needs SMTP creds), github token — as one `✓/✗` line; OK only when
+    the github collector is wired, else WARN. Returns `(status, detail)`."""
     bits = []
     bits.append("chrome ✓" if s.chrome_history_path.exists() else "chrome ✗ (no History file)")
     bits.append("gmail ✓" if (s.gmail_enabled and s.smtp_user and s.smtp_password)
@@ -163,6 +194,9 @@ def probe_collectors(s: Settings):
 
 
 def probe_profile(s: Settings):
+    """Report whether the profile has been seeded (WARN with the fix if not)
+    and whether `aliases.yaml` exists, since its absence disables initiative
+    merging. Returns `(status, detail)`."""
     from .profile_store import ProfileStore
 
     store = ProfileStore(s.profile_dir)
@@ -174,6 +208,9 @@ def probe_profile(s: Settings):
 
 
 def probe_schedule(s: Settings):
+    """Check the OpenClaw cron has both the daily-digest and weekly-consolidate
+    jobs registered (WARN, not FAIL, since cron/systemd is a valid alternative
+    when OpenClaw is absent). Returns `(status, detail)`."""
     if not Path(s.openclaw_bin).exists():
         return WARN, ("OpenClaw not found — schedule with cron/systemd instead "
                       "(see README 'Schedule'); WeChat channel unavailable")
@@ -196,6 +233,9 @@ def probe_schedule(s: Settings):
 
 @dataclass
 class Step:
+    """One config group the wizard walks and the doctor checks: `title`/`intro`
+    frame it, `fields` are the `(ENV_KEY, prompt, secret)` tuples to ask for,
+    and `probe` (optional) validates the group once its values are in."""
     title: str
     intro: str
     fields: list = field(default_factory=list)  # (ENV_KEY, prompt, secret)
@@ -258,6 +298,9 @@ EXTRA_CHECKS = [("Collectors", probe_collectors), ("Profile", probe_profile),
 # ── doctor ───────────────────────────────────────────────────────────
 
 def run_check(settings: Settings) -> int:
+    """The doctor (`assistant init --check`): run every step's probe plus the
+    doctor-only extras against the live config, print a status line each, and
+    return exit code 1 if any probe reported FAIL else 0."""
     print("personal-agent config check\n" + "─" * 46)
     failures = 0
     for title, probe in [(s.title, s.probe) for s in STEPS if s.probe] + EXTRA_CHECKS:
@@ -275,6 +318,12 @@ def run_check(settings: Settings) -> int:
 # ── wizard ───────────────────────────────────────────────────────────
 
 def run_wizard(settings: Settings, env_path: Path | None = None) -> int:
+    """Interactive first-run setup. Seeds `.env` from the template if missing,
+    then walks each `Step`: prompts per field (Enter keeps, `-` clears),
+    upserts answers into `.env` immediately so later steps see them, and runs
+    the step's probe when values changed or the user opts in. Finally seeds
+    `profile.yaml` + `aliases.yaml` and ends by returning `run_check`'s code.
+    `env_path` overrides the default repo `.env` (a test seam)."""
     env_path = env_path or (_REPO_ROOT / ".env")
     if not env_path.exists():
         template = _REPO_ROOT / ".env.template"
@@ -328,6 +377,9 @@ next steps (see README for detail):
 
 
 def run_init(settings: Settings, check_only: bool = False) -> int:
+    """Entry point for `assistant init`: dispatch to the doctor when
+    `check_only`, and otherwise to the wizard — but fall back to the doctor
+    when stdin is not a TTY, since the wizard cannot prompt without one."""
     if check_only:
         return run_check(settings)
     if not sys.stdin.isatty():

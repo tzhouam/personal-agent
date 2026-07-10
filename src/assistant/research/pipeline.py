@@ -1,3 +1,8 @@
+"""The daily research pipeline: gather arXiv papers and RSS/Atom feed items,
+score them against the owner profile with the cheap model, select the top of
+each pool, then write all summaries in one full-model call. `run_research` is the
+entry point; the module also owns the engagement-driven adaptive paper quota."""
+
 import hashlib
 import logging
 
@@ -65,6 +70,15 @@ def adaptive_paper_quota(settings: Settings, reading_items: list[dict],
 
 
 def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Settings) -> dict:
+    """Run the full research digest and return its sections (papers, industry,
+    chinese) plus source_health and the seen_ids to record.
+
+    Threads the owner's reading-list feedback into scoring: items marked
+    unrelated become negative examples in the prompt, and the done/unrelated
+    rate tunes the adaptive paper quota. Candidates are deduped against
+    everything ever surfaced (`events.filter_unseen`), scored one batch per pool
+    (English feeds and Chinese feeds separately, since 中文媒体 is a required
+    section with a lower bar and a floor), and only then summarized."""
     profile_summary = render_summary(profile)
     health: dict[str, str] = {}
 
@@ -118,6 +132,10 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
 
 def _gather_papers(llm: LLM, profile: dict, profile_summary: str,
                    settings: Settings, health: dict) -> list[dict]:
+    """Generate arXiv queries from the profile and fetch recent candidates,
+    tagging each with a `seen_id`. The LLM proposes ≤6 search phrases; on failure
+    it falls back to the profile's active interest topics, and to no papers if
+    even that is empty. `health` is annotated with what happened for the footer."""
     try:
         result = llm.complete_json(
             f"## Owner profile\n{profile_summary}", system=_QUERY_SYSTEM, max_tokens=1500
@@ -146,6 +164,10 @@ def _gather_papers(llm: LLM, profile: dict, profile_summary: str,
 
 
 def _gather_feed_items(settings: Settings, health: dict) -> list[dict]:
+    """Fetch every configured feed source (≤15 items each), tagging items with
+    their source name, language, and a url-hashed `seen_id`. A failing source is
+    recorded as FAILED in `health` (surfaced in the email footer) and skipped, so
+    one broken scraper never kills the sweep."""
     items = []
     for source in feeds.load_sources(settings.sources_file):
         name = source.get("name", source.get("url", "?"))
@@ -187,6 +209,9 @@ def _score(llm: LLM, profile_summary: str, pool: list[dict], render) -> list[dic
 
 
 def _select(ranked: list[dict], min_score: int, top: int, floor: int = 0) -> list[dict]:
+    """Pick from a `_score`-ranked pool: the top `top` items scoring at least
+    `min_score`. `floor` is a quota — if the threshold yields fewer than `floor`
+    items, take the top `floor` regardless, so a required section never goes empty."""
     picked = [x for x in ranked if x["_score"] >= min_score][:top]
     if len(picked) < floor:  # quota: never let a required section go empty
         picked = ranked[:floor]
@@ -194,6 +219,10 @@ def _select(ranked: list[dict], min_score: int, top: int, floor: int = 0) -> lis
 
 
 def _summarize(llm: LLM, profile_summary: str, papers: list[dict], feed_items: list[dict]) -> None:
+    """One full-model call writes every summary, mutating `papers` and
+    `feed_items` in place: each paper gets `summary` + profile-tied `why`, each
+    feed item a `takeaway` (zh items in Chinese). On failure the items fall back
+    to a truncated abstract/summary, so the digest still renders."""
     paper_lines = "\n".join(
         f"id={p['seen_id']} :: {p['title']} :: {p['abstract'][:800]}" for p in papers
     )

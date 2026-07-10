@@ -1,3 +1,9 @@
+"""Daily profile updater: turn one day's activity observations into evidence-
+gated patch ops applied to profile.yaml. Additive by design (bump/add_evidence
+over new entries), initiative-keyed, and write-gated so transient one-offs never
+enter the profile. `update_profile` is the entry point; also used per-batch by
+the history backfill."""
+
 from datetime import date
 
 import yaml

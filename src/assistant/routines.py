@@ -45,20 +45,32 @@ def parse_days(days: str) -> set[int] | None:
 
 
 class RoutineStore:
+    """Recurring routines persisted to routines.yaml. Each routine holds its
+    schedule (time + days), optional condition, task text, and a
+    ``last_checked`` date that enforces at-most-once-per-day firing; cancelled
+    routines are kept but flagged."""
+
     def __init__(self, data_dir: Path):
+        """Bind the store to ``data_dir/routines.yaml`` (created lazily)."""
         self.path = data_dir / "routines.yaml"
 
     def _load(self) -> dict:
+        """Read the routines file, returning a fresh empty structure when it's
+        missing or empty."""
         if not self.path.exists():
             return {"next_id": 1, "routines": []}
         return yaml.safe_load(self.path.read_text()) or {"next_id": 1, "routines": []}
 
     def _save(self, data: dict) -> None:
+        """Write the routines structure back, creating the data dir if needed."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
     def add(self, task: str, time: str, days: str = "daily",
             condition: str = "") -> dict | None:
+        """Validate and store a new routine, returning the record — or None if
+        ``time`` isn't HH:MM or ``days`` doesn't parse (so the caller can reject
+        bad input). ``task`` and ``condition`` are length-capped free text."""
         try:
             datetime.strptime(str(time).strip(), "%H:%M")
         except ValueError:
@@ -75,9 +87,12 @@ class RoutineStore:
         return routine
 
     def active(self) -> list[dict]:
+        """Routines not cancelled."""
         return [r for r in self._load()["routines"] if not r.get("cancelled")]
 
     def cancel(self, routine_id: str) -> bool:
+        """Flag routine ``routine_id`` as cancelled so it stops firing. True if
+        one was cancelled, False if unknown or already cancelled."""
         data = self._load()
         for r in data["routines"]:
             if r["id"] == routine_id and not r.get("cancelled"):
@@ -97,6 +112,9 @@ class RoutineStore:
                 and r.get("last_checked") != today]
 
     def mark_checked(self, routine_id: str, day: date | None = None) -> None:
+        """Record that ``routine_id`` was checked on ``day`` (default today) so
+        ``due`` won't return it again that day — set before condition evaluation
+        so a check counts even when the condition doesn't hold."""
         data = self._load()
         for r in data["routines"]:
             if r["id"] == routine_id:

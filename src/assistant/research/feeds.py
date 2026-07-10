@@ -1,3 +1,7 @@
+"""RSS/Atom feed reader for the research digest's industry and 中文媒体 sections.
+Exports `load_sources` (the enabled entries from the sources YAML), `fetch_feed`,
+and `parse_feed` — which normalize both RSS 2.0 and Atom into a uniform item list."""
+
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -8,6 +12,9 @@ _ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
 
 def load_sources(sources_file: Path) -> list[dict]:
+    """Read the feed sources from the YAML file, keeping only entries where
+    `enabled` is unset or true. Returns [] if the file is absent, so a missing
+    config degrades to no feeds rather than crashing."""
     if not sources_file.exists():
         return []
     data = yaml.safe_load(sources_file.read_text()) or {}
@@ -23,6 +30,9 @@ def fetch_feed(url: str, timeout: int = 30) -> list[dict]:
 
 
 def parse_feed(xml_text: str) -> list[dict]:
+    """Normalize an RSS 2.0 or Atom document into a uniform item list (title,
+    url, published, summary). Dispatches on the root tag; for Atom it prefers the
+    `alternate` link and strips HTML from the summary/content, capped at 600 chars."""
     root = ET.fromstring(xml_text)
     items = []
 
@@ -59,6 +69,9 @@ def parse_feed(xml_text: str) -> list[dict]:
 
 
 def _strip_html(text: str) -> str:
+    """Crude tag-strip for feed summaries: drop `<...>` tags and unescape
+    `&nbsp;` to a space. Not a full HTML parser — just enough to make a summary
+    readable as plain text."""
     import re
 
     return re.sub(r"<[^>]+>", " ", text).replace("&nbsp;", " ").strip()

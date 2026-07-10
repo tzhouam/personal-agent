@@ -1,3 +1,11 @@
+"""GitHub collector — turns the owner's GitHub activity into Observations.
+
+Registers as `@register("github")`. Draws on the events API, the search API
+(authored/reviewed/commented items and RFCs), repo/commit backfill, per-item
+context, and notifications; also exposes `summarize_commits` to fold raw commits
+into per-repo-month observations for direct-push work that leaves no PR trail.
+"""
+
 import base64
 import re
 import time
@@ -29,9 +37,13 @@ _EVENT_KINDS = {
 
 @register("github")
 class GitHubCollector:
+    """Collects the owner's GitHub activity as Observations via a token-authed client."""
+
     name = "github"
 
     def __init__(self, settings: Settings):
+        """Store the target username and build a reusable authenticated httpx
+        client (Bearer token + API version header) for every request."""
         self.user = settings.github_user
         self.client = httpx.Client(
             headers={
@@ -44,6 +56,13 @@ class GitHubCollector:
 
     # ── activity events → observations ──────────────────────────────
     def collect(self, since: datetime) -> list[dict]:
+        """Return Observations for the owner's activity since `since`.
+
+        Leads with authored PRs/issues/RFCs (their bodies carry the richest
+        profile signal), then walks up to three pages of the events feed —
+        stopping at the first event older than `since` — mapping each recognized
+        event type to an observation.
+        """
         # authored PRs/issues/RFCs first — their bodies carry the profile signal
         observations = self.fetch_authored_items(since=since)
         for page in range(1, 4):  # events API caps at ~300 recent events anyway
@@ -64,6 +83,13 @@ class GitHubCollector:
         return observations
 
     def _event_to_observation(self, event: dict, ts: datetime) -> dict | None:
+        """Map one events-API event at time `ts` to an Observation, or None.
+
+        Returns None for event types outside `_EVENT_KINDS`. Otherwise builds a
+        human-readable title and best-effort URL per kind (push/PR/review/issue/
+        comment/star/release/fork/create), tagging the repo as the entity. PR
+        `closed`+merged is reported as "merged".
+        """
         kind = _EVENT_KINDS.get(event.get("type", ""))
         if kind is None:
             return None
@@ -179,6 +205,10 @@ class GitHubCollector:
         return observations
 
     def _reviewed_to_observation(self, item: dict, kind: str, verb: str) -> dict:
+        """Map a search-API PR/issue `item` to an Observation for reviewed/commented
+        activity. `kind` sets the observation kind and `verb` opens the title
+        (e.g. "Reviewed"/"Commented on"); noun (PR vs issue) is derived from the
+        item, and a trimmed body snippet is appended for signal."""
         repo = item.get("repository_url", "").replace("https://api.github.com/repos/", "")
         noun = "PR" if "pull_request" in item else "issue"
         snippet = " ".join((item.get("body") or "").split())[:400]
@@ -237,6 +267,10 @@ class GitHubCollector:
         return commits
 
     def _issue_to_observation(self, item: dict) -> dict:
+        """Map an authored search-API `item` to an Observation, classifying it as
+        rfc / pr_authored / issue_authored. RFCs are detected from an "rfc" token
+        in the title or a label; the title carries state, repo, and a body
+        snippet."""
         is_pr = "pull_request" in item
         title = item.get("title", "")
         is_rfc = "rfc" in title.lower() or any(
@@ -309,6 +343,12 @@ class GitHubCollector:
 
     # ── notifications (feeds the digest task) ───────────────────────
     def fetch_notifications(self, since: datetime) -> list[dict]:
+        """Return the owner's GitHub notifications updated since `since`.
+
+        Walks up to two pages of /notifications and flattens each into a compact
+        dict (repo, reason, subject type/title, timestamp, and an HTML URL
+        resolved from the API url). Feeds the digest task rather than the profile.
+        """
         notifications = []
         for page in range(1, 3):
             resp = self.client.get(
@@ -341,11 +381,17 @@ class GitHubCollector:
 
     # ── bootstrap helpers ────────────────────────────────────────────
     def fetch_identity(self) -> dict:
+        """Return the authenticated user's /user record — used to bootstrap the profile identity."""
         resp = self.client.get(f"{API}/user")
         resp.raise_for_status()
         return resp.json()
 
     def fetch_recent_repos(self, limit: int = 30) -> list[dict]:
+        """Return the owner's most recently pushed repos (up to `limit`).
+
+        Queries /user/repos (authenticated) rather than /users/{name}/repos so
+        private-repo work isn't silently hidden from the enrich backfill.
+        """
         # /user/repos (authenticated) rather than /users/{name}/repos: the
         # latter only lists public repos, silently hiding private-repo work
         # (e.g. bde-private) from the enrich backfill.
@@ -384,11 +430,16 @@ def summarize_commits(repo: str, commits: list[dict], top_subjects: int = 3) -> 
 
 
 def _split_item_url(html_url: str | None) -> tuple[str, str, str, str] | None:
+    """Parse a PR/issue HTML URL into (owner, repo, kind, number), or None if it
+    doesn't match — the callers use this to route to the pulls vs issues API."""
     match = re.search(r"github\.com/([^/]+)/([^/]+)/(pull|issues)/(\d+)", html_url or "")
     return match.groups() if match else None
 
 
 def _api_to_html_url(api_url: str | None) -> str | None:
+    """Rewrite an api.github.com subject URL into its human github.com URL,
+    fixing the pulls→pull, commits→commit, and releases/{id}→releases path
+    differences. None passes through."""
     if not api_url:
         return None
     url = api_url.replace("https://api.github.com/repos/", "https://github.com/")

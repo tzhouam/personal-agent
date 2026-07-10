@@ -41,6 +41,16 @@ def _summarize_details(llm, items: list[dict]) -> dict[str, str]:
 
 
 def update_todos(store: TodoStore, digest: dict, resume: dict, github=None, llm=None) -> dict:
+    """Reconcile the todo list against today's signals and return
+    {added, closed, open (urgency-sorted), open_count}.
+
+    Passes in order: expire todos untouched for 30 days; if `github` is given,
+    auto-close ones whose underlying PR/issue is finished; add new todos from the
+    digest's red-priority notifications (skipping keys already tracked), fetching
+    context and writing LLM detail summaries only for genuinely new items; and
+    add or clear the single resume-approval todo per `resume["status"]`. `github`
+    and `llm` are optional — without them the monitor and summarization passes are
+    skipped rather than failing."""
     # ── age-out pass: a todo untouched for a month is stale by definition ──
     closed = [{"id": t["id"], "title": t["title"], "reason": "outdated (open >30 days)"}
               for t in store.expire_stale(days=30)]

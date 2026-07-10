@@ -253,6 +253,8 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
     llm = LLM(settings)
 
     def _push_site() -> str:
+        """Re-render and push the website from current state, returning the sync
+        status — called after any phase that changes what the site shows."""
         todos = sorted(TodoStore(settings.profile_dir).open_items(),
                        key=urgency, reverse=True)
         result = sync_website(settings, store.load(), todos,
