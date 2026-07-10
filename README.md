@@ -169,5 +169,4 @@ Full detail in [Design → Safety & privacy](doc/DESIGN.md#safety--privacy).
 
 ## License
 
-No license file is included yet — add one before distributing. Until a license
-is chosen, all rights are reserved by the author.
+[MIT](LICENSE) — use, modify, and distribute freely; no warranty.
