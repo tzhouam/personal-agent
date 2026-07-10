@@ -362,6 +362,11 @@ def main() -> None:
     run_p.add_argument("--dry-run", action="store_true", help="write digest to disk, send no email")
     run_p.add_argument("--resume", action="store_true", help="resume the last incomplete run")
 
+    init_p = sub.add_parser("init", help="guided first-run setup (writes .env, "
+                                         "validates each section, seeds the profile)")
+    init_p.add_argument("--check", action="store_true",
+                        help="no prompts — validate the current config and report")
+
     sub.add_parser("bootstrap", help="seed the profile from GitHub (first run only)")
     sub.add_parser("show-profile", help="print a summary of the current profile")
     sub.add_parser("send-test-email", help="verify email delivery")
@@ -415,7 +420,11 @@ def main() -> None:
     args = parser.parse_args()
     settings = Settings()
 
-    if args.command == "run":
+    if args.command == "init":
+        from .init_wizard import run_init
+
+        sys.exit(run_init(settings, check_only=args.check))
+    elif args.command == "run":
         from .orchestrator import run
 
         sys.exit(run(settings, dry_run=args.dry_run, resume=args.resume))

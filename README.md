@@ -8,8 +8,26 @@ this is **Milestone 1**: profile store + GitHub collector + notification digest 
 ```bash
 source /rebase/.venv/bin/activate
 pip install -e /rebase/personal-agent
-cp .env.template .env   # fill in tokens
 ```
+
+## New user? Start here
+
+```bash
+assistant init           # guided setup: walks every config group, writes .env,
+                         # live-validates each section (LLM ping, token scopes,
+                         # repo access), then seeds your profile from GitHub
+assistant init --check   # no prompts: ✅/⚠️/❌ report on the current config —
+                         # run it any time something feels off
+```
+
+The wizard covers: LLM key/endpoint, GitHub token, email delivery (Resend or
+SMTP — SMTP also unlocks the gmail collector + email chat), the GitHub Pages
+website + private-page password, website marks sync (repo-scoped token —
+the wizard warns if yours is over-scoped), optional Overleaf resume remote,
+and web-search keys. It finishes by printing the remaining manual steps
+(test email, dry run, scheduling). Prefer doing it by hand? `cp .env.template
+.env` and edit — the template documents every knob — then `assistant init
+--check` to verify.
 
 ## Usage
 
