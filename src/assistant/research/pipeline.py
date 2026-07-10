@@ -1,5 +1,4 @@
 import hashlib
-import json
 import logging
 
 from ..config import Settings
