@@ -35,7 +35,7 @@ def test_extractors_cover_all_phases():
     assert EXTRACTORS["profile"](out) == {"ops_applied": 2}
     assert EXTRACTORS["digest"](out) == {"red": 1, "yellow": 0, "white": 2, "suppressed": 4}
     assert EXTRACTORS["todos"](out) == {"wip": 7, "added": 1, "auto_closed": 1}
-    assert EXTRACTORS["research"](out) == {"papers": 2, "industry": 1,
+    assert EXTRACTORS["research"](out) == {"papers": 2, "paper_quota": 0, "industry": 1,
                                            "sources_ok": 2, "sources_total": 3}
     assert EXTRACTORS["website"](out) == {"pushed": 1}
     assert EXTRACTORS["deliver"](out) == {"email_sent": 1}

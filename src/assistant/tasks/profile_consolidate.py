@@ -72,6 +72,54 @@ Editorial rules:
 """ + RESUME_VOICE_RULES
 
 
+_JUDGE_SYSTEM = """You audit the owner's auto-maintained profile for quality. Check ONLY the
+material given — never outside knowledge. Be conservative: report only clear cases.
+
+Respond with ONLY JSON:
+{"contradictions": [{"where": "<entry>", "detail": "<claim A vs claim B>"}],
+ "stale": [{"where": "<entry>", "detail": "<active claim superseded by which newer evidence>"}],
+ "unsupported": [{"where": "<entry>", "detail": "<highlight with no supporting evidence line>"}],
+ "claims_checked": <int>}
+
+- contradiction: two profile statements that cannot both be true (conflicting numbers, dates,
+  RFC/PR ids, roles).
+- stale: an active claim that the newer evidence shown clearly supersedes.
+- unsupported: a highlight asserting something no evidence line in its own entry backs."""
+
+
+def judge_profile(llm: LLM, store: ProfileStore, settings: Settings) -> dict:
+    """Weekly LLM-judge audit (doc/PIPELINE_METRICS.md §2: faithfulness /
+    staleness / contradiction). Read-only — findings are surfaced, never
+    auto-fixed; the consolidator or owner acts on them next cycle."""
+    from ..events_store import EventsStore
+
+    profile = store.load()
+    auditable = {s: [e for e in profile.get(s, []) if e.get("status") == "active"]
+                 for s in ("skills", "projects")}
+    events = EventsStore(settings.events_db)
+    try:
+        recent = events.conn.execute(
+            "SELECT ts, title FROM observations WHERE ts >= date('now', '-30 day')"
+            " ORDER BY ts DESC LIMIT 80").fetchall()
+    finally:
+        events.close()
+    recent_lines = "\n".join(f"- {ts[:10]} {title[:160]}" for ts, title in recent)
+
+    result = llm.complete_json(
+        f"## Profile (active entries)\n```yaml\n"
+        f"{yaml.safe_dump(auditable, sort_keys=False, allow_unicode=True)}```\n\n"
+        f"## Recent evidence (last 30 days of observations)\n{recent_lines or '(none)'}",
+        system=_JUDGE_SYSTEM, max_tokens=16000)
+    if not isinstance(result, dict):
+        raise ValueError("judge returned non-dict")
+    return {
+        "contradictions": result.get("contradictions", []) or [],
+        "stale": result.get("stale", []) or [],
+        "unsupported": result.get("unsupported", []) or [],
+        "claims_checked": int(result.get("claims_checked", 0) or 0),
+    }
+
+
 def consolidate_profile(llm: LLM, store: ProfileStore, settings: Settings,
                         section: str | None = None, dry_run: bool = False) -> dict:
     profile = store.load()
@@ -115,12 +163,42 @@ def consolidate_profile(llm: LLM, store: ProfileStore, settings: Settings,
             notes.append(f"{name}: {result['notes']}")
         log.info("consolidate %s: %d applied, %d rejected", name, len(applied), len(rejected))
 
-    if dry_run or not all_applied:
-        return {"applied": all_applied, "rejected": all_rejected,
+    # weekly quality audit — runs even on a 0-op week; findings are metrics
+    # + email content, never auto-fixes (doc/PIPELINE_METRICS.md §2)
+    judge = {"contradictions": [], "stale": [], "unsupported": [], "claims_checked": 0}
+    if not dry_run:
+        try:
+            judge = judge_profile(llm, store, settings)
+            from ..events_store import EventsStore
+
+            events = EventsStore(settings.events_db)
+            events.record_metrics(f"consolidate-{today}", "consolidate", {
+                "contradictions": len(judge["contradictions"]),
+                "stale_claims": len(judge["stale"]),
+                "unsupported_claims": len(judge["unsupported"]),
+                "claims_checked": judge["claims_checked"]})
+            events.close()
+            log.info("profile judge: %d contradictions, %d stale, %d unsupported "
+                     "(%d claims checked)", len(judge["contradictions"]),
+                     len(judge["stale"]), len(judge["unsupported"]),
+                     judge["claims_checked"])
+        except Exception:
+            log.exception("profile judge failed (consolidation unaffected)")
+
+    findings = [f"{kind}: {f.get('where', '?')} — {f.get('detail', '')}"
+                for kind, items in (("contradiction", judge["contradictions"]),
+                                    ("stale", judge["stale"]),
+                                    ("unsupported", judge["unsupported"]))
+                for f in items]
+
+    if dry_run or not (all_applied or findings):
+        return {"applied": all_applied, "rejected": all_rejected, "judge": judge,
                 "notes": " | ".join(notes), "diff": "", "emailed": False}
 
-    diff = store.save(profile, f"weekly consolidation {today} ({len(all_applied)} ops)")
-    append_ops_log(store.dir, all_applied, today)
+    diff = ""
+    if all_applied:
+        diff = store.save(profile, f"weekly consolidation {today} ({len(all_applied)} ops)")
+        append_ops_log(store.dir, all_applied, today)
 
     emailed = False
     try:
@@ -129,7 +207,12 @@ def consolidate_profile(llm: LLM, store: ProfileStore, settings: Settings,
             f"<p>Weekly profile consolidation applied {len(all_applied)} ops "
             f"({len(all_rejected)} rejected).</p>"
             + (f"<p>{_html.escape(' | '.join(notes))}</p>" if notes else "")
-            + f"<pre style='font-size:12px'>{_html.escape(diff[:12000])}</pre>"
+            + (("<h4>⚖️ Quality audit findings</h4><ul>"
+                + "".join(f"<li>{_html.escape(line)}</li>" for line in findings[:12])
+                + f"</ul><p style='font-size:12px'>{judge['claims_checked']} claims checked; "
+                  "findings are surfaced, not auto-fixed.</p>") if findings else
+               f"<p>⚖️ Quality audit: clean ({judge['claims_checked']} claims checked).</p>")
+            + (f"<pre style='font-size:12px'>{_html.escape(diff[:12000])}</pre>" if diff else "")
             + f"<p>Rollback: <code>git -C ~/.personal-agent/profile revert HEAD</code></p>"
         )
         send_email(settings, f"[assistant] Profile consolidation — {today}", body)
@@ -137,5 +220,5 @@ def consolidate_profile(llm: LLM, store: ProfileStore, settings: Settings,
     except Exception:
         log.exception("consolidation email failed (profile change is committed)")
 
-    return {"applied": all_applied, "rejected": all_rejected,
+    return {"applied": all_applied, "rejected": all_rejected, "judge": judge,
             "notes": " | ".join(notes), "diff": diff, "emailed": emailed}

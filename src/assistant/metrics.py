@@ -42,6 +42,7 @@ EXTRACTORS = {
                           "auto_closed": len(out.get("todos", {}).get("closed", []))},
     "research": lambda out: {
         "papers": len(out.get("research", {}).get("papers", [])),
+        "paper_quota": out.get("research", {}).get("paper_quota", 0),
         "industry": len(out.get("research", {}).get("industry", [])),
         "sources_ok": sum(1 for v in out.get("research", {}).get("source_health", {}).values()
                           if str(v).startswith("ok")),
@@ -132,6 +133,14 @@ def build_health(events, profile_dir, days: int = 7) -> list[tuple[str, str]]:
     read_week = [r for r in reading if r.get("status") == "done"
                  and (_day(r.get("done_at")) or date.min) >= today - timedelta(days=days)]
     lines.append(("reading surfaced / read (7d)", f"{len(surfaced_week)} / {len(read_week)}"))
+
+    checked = _series(rows, "consolidate", "claims_checked")
+    if checked:  # weekly judge audit (faithfulness/staleness/contradiction)
+        last = {name: int(_series(rows, "consolidate", name)[-1])
+                for name in ("contradictions", "stale_claims", "unsupported_claims")}
+        lines.append(("profile audit (weekly)",
+                      f"{last['contradictions']} contradictions · {last['stale_claims']} stale"
+                      f" · {last['unsupported_claims']} unsupported of {int(checked[-1])} claims"))
 
     pushed = _series(rows, "website", "pushed")
     sent = _series(rows, "deliver", "email_sent")

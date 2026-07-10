@@ -31,6 +31,38 @@ Respond with ONLY JSON:
  "items": [{"id": "...", "takeaway": "..."}]}"""
 
 _MIN_SCORE = 6
+_QUOTA_WINDOW_DAYS = 14
+_QUOTA_MIN_HISTORY = 20  # surfaced items needed before the controller kicks in
+_QUOTA_FLOOR = 2
+
+
+def adaptive_paper_quota(settings: Settings, reading_items: list[dict],
+                         today=None) -> tuple[int, str]:
+    """Tune how many papers to surface against the owner's actual engagement
+    (doc/PIPELINE_METRICS.md §6 — done-rate is the implicit relevance label).
+    Sustainable surfacing ≈ 1.5× the rate the owner acts (done OR unrelated)
+    on items, floored at 2/day so discovery never fully stops. Cold start:
+    keep the configured quota until enough history exists."""
+    import math
+    from datetime import date, timedelta
+
+    today = today or date.today()
+    cutoff = (today - timedelta(days=_QUOTA_WINDOW_DAYS)).isoformat()
+    surfaced = [r for r in reading_items if str(r.get("created", "")) >= cutoff]
+    if len(surfaced) < _QUOTA_MIN_HISTORY:
+        return settings.research_top_papers, ""
+    acted = [r for r in reading_items
+             if str(r.get("done_at", "")) >= cutoff
+             or str(r.get("unrelated_at", "")) >= cutoff]
+    per_day = len(acted) / _QUOTA_WINDOW_DAYS
+    quota = max(_QUOTA_FLOOR,
+                min(settings.research_top_papers, math.ceil(per_day * 1.5) + 1))
+    note = ""
+    if quota < settings.research_top_papers:
+        note = (f"paper quota {settings.research_top_papers}→{quota}: you acted on "
+                f"{len(acted)} of {len(surfaced)} items surfaced in the last "
+                f"{_QUOTA_WINDOW_DAYS}d — marking items done/unrelated raises it")
+    return quota, note
 
 
 def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Settings) -> dict:
@@ -39,6 +71,11 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
 
     # negative feedback: readings the owner marked unrelated bias the scorer
     from ..todo_store import ReadingList
+
+    reading_items = ReadingList(settings.profile_dir).load()["items"]
+    paper_quota, quota_note = adaptive_paper_quota(settings, reading_items)
+    if quota_note:
+        health["paper quota"] = quota_note
 
     negatives = ReadingList(settings.profile_dir).unrelated_titles()
     if negatives:
@@ -57,7 +94,7 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
     render_feed = lambda i: f"[{i['source']}] {i['title']} — {i['summary'][:200]}"  # noqa: E731
     papers = _select(
         _score(llm, profile_summary, papers, lambda p: f"{p['title']} — {p['abstract'][:300]}"),
-        min_score=_MIN_SCORE, top=settings.research_top_papers,
+        min_score=_MIN_SCORE, top=paper_quota,
     )
     en_pool = _score(llm, profile_summary, [i for i in feed_items if i.get("lang") != "zh"], render_feed)
     zh_pool = _score(llm, profile_summary, [i for i in feed_items if i.get("lang") == "zh"], render_feed)
@@ -71,6 +108,7 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
         _summarize(llm, profile_summary, papers, industry + chinese)
 
     return {
+        "paper_quota": paper_quota,
         "papers": papers,
         "industry": industry,
         "chinese": chinese,
