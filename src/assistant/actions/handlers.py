@@ -247,6 +247,8 @@ def _list_routines(settings: Settings, p: dict) -> str:
     lines = [f"[{r['id']}] {r['days']} {r['time']}"
              + (f" (if: {r['condition']})" if r.get("condition") else "")
              + f" — {r['task']}"
+             + (f" (last checked {r['last_checked']})" if r.get("last_checked")
+                else " (never checked yet)")
              for r in RoutineStore(settings.data_dir).active()]
     return "\n".join(lines) or "(no routines)"
 
@@ -316,3 +318,4 @@ def _plan_task(settings: Settings, p: dict) -> str:
     if plan.get("next"):
         lines.append(f"→ next: {plan['next']}")
     return "\n".join(lines)
+

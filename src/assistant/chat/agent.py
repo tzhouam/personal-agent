@@ -11,7 +11,7 @@ import json
 import logging
 from datetime import date
 
-from ..actions import execute, prompt_block
+from ..actions import execute, prompt_block, run_action
 from ..config import Settings
 from ..llm import LLM
 from ..profile_store import ProfileStore, render_summary
@@ -21,8 +21,9 @@ from ..todo_store import ReadingList, TodoStore
 log = logging.getLogger("assistant")
 
 _SYSTEM = f"""You are your owner's personal assistant, reachable by chat/email. Answer from the
-context below (profile, open todos, reading list, last run). Be concise and direct — this is a
-chat reply, not a report. Answer in the language the owner wrote in.
+context below (profile, open todos, reading list, active routines, pending reminders, last run).
+Be concise and direct — this is a chat reply, not a report. Answer in the language the owner
+wrote in.
 
 You may execute actions, but ONLY when the owner explicitly asks for them:
 {prompt_block()}
@@ -58,6 +59,15 @@ def build_context(settings: Settings) -> str:
     reading = ReadingList(settings.profile_dir).open_items()
     parts.append("## Reading list\n" + ("\n".join(
         f"[{r['id']}] {r['title']}" for r in reading[:15]) or "(empty)"))
+
+    # scheduled work the agent itself manages — without these it answers
+    # about routines/reminders from todos alone and denies they exist
+    for title, action in (("Active routines", "list_routines"),
+                          ("Pending reminders", "list_reminders")):
+        try:
+            parts.append(f"## {title}\n" + run_action(action, {}, settings))
+        except Exception:  # context is best-effort; a bad store must not kill chat
+            log.exception("context: %s failed", action)
 
     state = load_state(settings.state_file) or {}
     if state.get("run_id"):
