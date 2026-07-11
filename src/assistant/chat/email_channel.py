@@ -11,10 +11,13 @@ inbox tail so history is never replayed.
 
 import email
 import email.utils
+import hashlib
 import imaplib
 import json
 import logging
+from datetime import datetime, timezone
 from email.header import decode_header, make_header
+from pathlib import Path
 
 from ..config import Settings
 from ..deliver.email import send_email
@@ -117,10 +120,11 @@ class EmailChannel:
         text = bare[len(self.settings.chat_subject_prefix):].lstrip(":： ").strip()
         if body:
             text = f"{text}\n{body}".strip()
-        if not text:
+        images = _image_attachments(msg, self.settings)
+        if not text and not images:
             return None
         return {"channel": self.name, "text": text[:4000], "subject": subject,
-                "sender": sender}
+                "sender": sender, "images": images}
 
     def send(self, text: str, in_reply_to: dict | None = None) -> None:
         """Email ``text`` back to the owner as HTML (each line a paragraph),
@@ -130,6 +134,37 @@ class EmailChannel:
         body = "".join(f"<p>{_html.escape(line)}</p>" if line.strip() else "<br>"
                        for line in text.split("\n"))
         send_email(self.settings, subject, body)
+
+
+def _image_attachments(msg: email.message.Message, settings: Settings) -> list[str]:
+    """Save the mail's image attachments into `DATA_DIR/media/` and return
+    their paths (capped at `vision_max_images`), for the vision chain. Only
+    runs for owner mail — `_parse` rejects other senders before we get here."""
+    from ..vision import media_type_for
+
+    paths: list[str] = []
+    if not msg.is_multipart():
+        return paths
+    media_dir = settings.data_dir / "media"
+    for part in msg.walk():
+        if len(paths) >= settings.vision_max_images:
+            break
+        if not part.get_content_type().startswith("image/"):
+            continue
+        name = part.get_filename() or "attachment.png"
+        suffix = Path(name).suffix.lower() or ".png"
+        if media_type_for(f"x{suffix}") is None:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        if not payload or len(payload) > 10 * 1024 * 1024:
+            continue
+        media_dir.mkdir(parents=True, exist_ok=True)
+        path = media_dir / (
+            f"mail-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-"
+            f"{hashlib.sha1(payload).hexdigest()[:8]}{suffix}")
+        path.write_bytes(payload)
+        paths.append(str(path))
+    return paths
 
 
 def _text_body(msg: email.message.Message) -> str:

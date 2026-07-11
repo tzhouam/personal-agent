@@ -75,6 +75,17 @@ class Settings(BaseSettings):
     wecom_aes_key: str = ""        # 43-char EncodingAESKey
     wecom_callback_port: int = 8329
 
+    # Vision (image understanding in chat) — the main LLM is text-only, so
+    # attached images are described by a vision backend first (vision.py).
+    # Remote backend: any Anthropic-compatible vision endpoint. Local backend:
+    # a downloaded VLM (e.g. Qwen3-VL) run one-shot on the freest GPU.
+    vision_api_key: str = ""
+    vision_base_url: str = ""
+    vision_model: str = ""
+    vision_local_model_path: str = ""   # e.g. /models/hub/Qwen3-VL-8B-Instruct
+    vision_min_free_gib: float = 20     # GPU headroom the local worker requires
+    vision_max_images: int = 3          # per message; extras are dropped
+
     # Local service daemon (`assistant serve`) — loopback-only HTTP consumed
     # by the OpenClaw bridge plugin and slash commands. The bearer token is
     # optional (the socket never leaves 127.0.0.1); set it to also keep other

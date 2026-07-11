@@ -35,6 +35,7 @@ import { homedir } from "node:os";
 const ASSISTANT_BIN = process.env.PERSONAL_AGENT_BIN ?? "/rebase/.venv/bin/assistant";
 const ENV_FILE = process.env.PERSONAL_AGENT_ENV ?? "/rebase/personal-agent/.env";
 const TIMEOUT_MS = 120_000;
+const IMAGE_TIMEOUT_MS = 300_000; // vision pass first (local VLM cold-load)
 const ACTION_TIMEOUT_MS = 20_000;
 const PID_FILE = `${homedir()}/.personal-agent/chat_listener.pid`;
 // Container clock is UTC; pin the owner's zone so "today" in chat replies and
@@ -73,12 +74,13 @@ async function daemonPost(path, body, timeoutMs) {
   return data;
 }
 
-function askExec(text) {
+function askExec(text, imagePaths = []) {
   return new Promise((resolve) => {
     execFile(
       ASSISTANT_BIN,
-      ["ask", text],
-      { timeout: TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, env: childEnv() },
+      ["ask", text, ...imagePaths.flatMap((p) => ["--image", p])],
+      { timeout: imagePaths.length ? IMAGE_TIMEOUT_MS : TIMEOUT_MS,
+        maxBuffer: 4 * 1024 * 1024, env: childEnv() },
       (err, stdout, stderr) => {
         const reply = (stdout ?? "").trim();
         if (!err && reply) return resolve({ ok: true, text: reply });
@@ -89,14 +91,73 @@ function askExec(text) {
   });
 }
 
-async function ask(text, session) {
+async function ask(text, session, imagePaths = []) {
+  // Image turns pay a vision-model pass first (local VLM cold-load ≈60-90s),
+  // so give them a longer leash than plain text.
+  const timeoutMs = imagePaths.length ? IMAGE_TIMEOUT_MS : TIMEOUT_MS;
   try {
-    const data = await daemonPost("/chat", { session, text }, TIMEOUT_MS);
+    const body = { session, text };
+    if (imagePaths.length) body.image_paths = imagePaths;
+    const data = await daemonPost("/chat", body, timeoutMs);
     if (data?.reply) return { ok: true, text: data.reply };
     return { ok: false, error: "daemon returned an empty reply" };
   } catch {
-    return askExec(text); // daemon down — degraded but never dark
+    return askExec(text, imagePaths); // daemon down — degraded but never dark
   }
+}
+
+/**
+ * Inbound media cache: the `before_agent_reply` hook only receives the text
+ * body, but `message_received` (fired for the same inbound message, earlier
+ * in the dispatch pipeline) carries `metadata.mediaPath` — the weixin channel
+ * stages an incoming photo as a decrypted local file there. Cache the paths
+ * per conversation/sender for a short window and let `before_agent_reply`
+ * collect them, so an image (with or without a caption) reaches the daemon
+ * as `image_paths`.
+ */
+const MEDIA_TTL_MS = 3 * 60_000;
+const mediaCache = new Map(); // key → {paths: string[], ts: number}
+
+export function cacheInboundMedia(event, ctx) {
+  const md = event?.metadata ?? {};
+  const paths = (md.mediaPaths ?? (md.mediaPath ? [md.mediaPath] : [])).filter(Boolean);
+  const types = md.mediaTypes ?? (md.mediaType ? [md.mediaType] : []);
+  const images = paths.filter((_, i) => String(types[i] ?? md.mediaType ?? "").startsWith("image"));
+  if (!images.length) return;
+  // sessionKey is the one identifier both hooks reliably share (weixin sets
+  // no SenderId, and the reply hook has no conversationId — verified against
+  // openclaw 2026.6.11). "*" is the single-owner fallback: this gateway only
+  // talks to the owner, so an unmatched image can still bind to the very
+  // next message.
+  const keys = [event?.sessionKey, ctx?.conversationId, event?.senderId, md.senderId, "*"];
+  for (const key of keys) {
+    if (!key) continue;
+    const entry = mediaCache.get(String(key));
+    const fresh = entry && Date.now() - entry.ts < MEDIA_TTL_MS ? entry.paths : [];
+    mediaCache.set(String(key), { paths: [...fresh, ...images].slice(-3), ts: Date.now() });
+  }
+  console.log(`[personal-agent-bridge] cached ${images.length} inbound image(s) under: ${keys.filter(Boolean).join(", ")}`);
+}
+
+export function takeInboundMedia(keys) {
+  for (const key of keys) {
+    if (!key) continue;
+    const entry = mediaCache.get(String(key));
+    if (!entry) continue;
+    mediaCache.delete(String(key));
+    if (Date.now() - entry.ts >= MEDIA_TTL_MS) continue;
+    // The same paths are cached under every key of the inbound message
+    // (conversationId AND senderId); consume them everywhere so a later
+    // text-only message can't re-attach an already-answered image.
+    const taken = new Set(entry.paths);
+    for (const [k, e] of mediaCache) {
+      const left = e.paths.filter((p) => !taken.has(p));
+      if (!left.length) mediaCache.delete(k);
+      else if (left.length !== e.paths.length) mediaCache.set(k, { ...e, paths: left });
+    }
+    return entry.paths;
+  }
+  return [];
 }
 
 /** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
@@ -251,6 +312,9 @@ export default {
   configSchema: { type: "object", additionalProperties: false },
   register(api) {
     api.registerService?.(serveService());
+    // Fire-and-forget on every inbound message; harvests staged image paths
+    // for the reply hook below (the reply event itself is text-only).
+    api.on("message_received", cacheInboundMedia);
     api.on(
       "before_agent_reply",
       async (event, ctx) => {
@@ -259,7 +323,11 @@ export default {
         // piping a cron prompt into the chat agent would misfire actions.
         if (ctx?.trigger && ctx.trigger !== "user") return;
         const body = (event?.cleanedBody ?? "").trim();
-        if (!body) return;
+        const images = takeInboundMedia(
+          [ctx?.sessionKey, ctx?.conversationId, ctx?.senderId, event?.senderId, "*"]);
+        if (images.length)
+          console.log(`[personal-agent-bridge] attaching ${images.length} image(s) to chat turn`);
+        if (!body && !images.length) return;
 
         if (body.startsWith("/")) {
           const parsed = parseSlash(body);
@@ -267,8 +335,10 @@ export default {
           return { handled: true, reply: { text: await handleSlash(parsed) } };
         }
 
-        const session = `oc:${ctx?.conversationId ?? ctx?.senderId ?? event?.senderId ?? "default"}`;
-        const result = await ask(body, session);
+        // weixin provides neither conversationId nor SenderId, so sessionKey is
+        // what actually keys per-conversation memory (was falling to "default").
+        const session = `oc:${ctx?.conversationId ?? ctx?.senderId ?? event?.senderId ?? ctx?.sessionKey ?? "default"}`;
+        const result = await ask(body, session, images);
         const text = result.ok
           ? result.text
           : `(assistant bridge error: ${result.error} — check ~/.personal-agent and /rebase/personal-agent/.env)`;

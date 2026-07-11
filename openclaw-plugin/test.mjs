@@ -165,5 +165,32 @@ if (st.backoffMs !== 10_000) throw new Error(`backoff not doubled: ${st.backoffM
 svc2.stop({ logger: log });
 console.log("supervisor backoff: PASS");
 
+// ── inbound media cache: message_received metadata → before_agent_reply ──
+{
+  const { cacheInboundMedia, takeInboundMedia } = await import("./index.js");
+  // The real weixin shape (openclaw 2026.6.11): message_received carries
+  // sessionKey + metadata.mediaPath, NO senderId; before_agent_reply carries
+  // ONLY sessionKey (no conversationId/senderId).
+  cacheInboundMedia(
+    { sessionKey: "agent:main:weixin-dm", metadata: { mediaPath: "/tmp/pic1.jpg", mediaType: "image/*" } },
+    {},
+  );
+  cacheInboundMedia( // non-image media must be ignored
+    { sessionKey: "agent:main:weixin-dm", metadata: { mediaPath: "/tmp/voice.wav", mediaType: "audio/wav" } },
+    {},
+  );
+  let got = takeInboundMedia(["agent:main:weixin-dm", undefined, undefined, undefined, "*"]);
+  if (got.length !== 1 || got[0] !== "/tmp/pic1.jpg") throw new Error(`media cache: ${got}`);
+  if (takeInboundMedia(["*"]).length !== 0) throw new Error("media not consumed everywhere on take");
+  // worst case: NO shared key at all — the "*" single-owner fallback binds it
+  cacheInboundMedia(
+    { metadata: { mediaPaths: ["/tmp/a.png", "/tmp/b.png"], mediaTypes: ["image/png", "image/png"] } },
+    {},
+  );
+  got = takeInboundMedia([undefined, undefined, undefined, undefined, "*"]);
+  if (got.length !== 2) throw new Error(`wildcard fallback failed: ${got}`);
+  console.log("inbound media cache: PASS");
+}
+
 console.log("ALL PASS");
 process.exit(0);

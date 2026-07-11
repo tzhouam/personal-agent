@@ -95,7 +95,8 @@ def run_listener(settings: Settings, once: bool = False) -> int:
                 log.info("%s message from %s: %.80s", channel.name,
                          message.get("sender", "?"), message["text"])
                 try:
-                    reply = handle_message(message["text"], settings, llm)
+                    reply = handle_message(message["text"], settings, llm,
+                                           image_paths=message.get("images"))
                     channel.send(reply, in_reply_to=message)
                     log.info("replied via %s (%d chars)", channel.name, len(reply))
                 except Exception:

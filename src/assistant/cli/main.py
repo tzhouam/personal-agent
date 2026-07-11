@@ -85,7 +85,10 @@ def main() -> None:
                         help="show what would be applied, change nothing")
 
     ask_p = sub.add_parser("ask", help="ask the chat agent one question locally")
-    ask_p.add_argument("text", help="the message, quoted")
+    ask_p.add_argument("text", help="the message, quoted (may be empty with --image)")
+    ask_p.add_argument("--image", action="append", default=[], metavar="PATH",
+                       help="attach a local image (repeatable); described by the "
+                            "vision chain so the agent can answer about it")
 
     args = parser.parse_args()
     settings = Settings()
@@ -133,5 +136,5 @@ def main() -> None:
     elif args.command == "ask":
         from ..chat.agent import handle_message
 
-        print(handle_message(args.text, settings))
+        print(handle_message(args.text, settings, image_paths=args.image or None))
         sys.exit(0)

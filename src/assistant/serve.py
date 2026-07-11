@@ -21,6 +21,7 @@ Design invariants (doc/DESIGN_SERVICE_LAYER.md):
   takeover keeps working unchanged.
 """
 
+import base64
 import hashlib
 import json
 import logging
@@ -37,7 +38,7 @@ from .llm import LLM
 
 log = logging.getLogger("assistant")
 
-_MAX_BODY = 64 * 1024
+_MAX_BODY = 12 * 1024 * 1024  # base64 image attachments ride in /chat bodies
 
 
 class SessionStore:
@@ -193,12 +194,15 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             try:
                 if self.path == "/chat":
                     text = str(body.get("text", "")).strip()
-                    if not text:
+                    images = _staged_images(body, settings)
+                    if not text and not images:
                         return self._send(400, {"error": "missing 'text'"})
                     session = str(body.get("session", "") or "default")
                     reply = handle_message(text, settings, make_llm(settings),
-                                           history=sessions.history(session))
-                    sessions.append(session, text, reply)
+                                           history=sessions.history(session),
+                                           image_paths=images or None)
+                    noted = text + (f" [{len(images)} image(s) attached]" if images else "")
+                    sessions.append(session, noted.strip(), reply)
                     return self._send(200, {"reply": reply})
 
                 if self.path == "/run":
@@ -227,6 +231,44 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
     return server
 
 
+def _staged_images(body: dict, settings: Settings) -> list[str]:
+    """Image attachments from a /chat body, as verified local paths.
+
+    Two forms, capped at `vision_max_images` total: `image_paths` (existing
+    local files — the OpenClaw bridge passes the gateway's staged media
+    straight through; trusted because the socket is loopback + bearer-token)
+    and `images` (`[{media_type, data(b64)}, …]`), which are decoded into
+    `DATA_DIR/media/` for the vision chain. Bad entries are skipped, never
+    fatal."""
+    from .vision import media_type_for
+
+    out: list[str] = []
+    for p in body.get("image_paths") or []:
+        path = Path(str(p))
+        if path.is_file() and media_type_for(path):
+            out.append(str(path))
+    suffix_of = {"image/png": ".png", "image/jpeg": ".jpg",
+                 "image/gif": ".gif", "image/webp": ".webp"}
+    for img in body.get("images") or []:
+        if not isinstance(img, dict):
+            continue
+        suffix = suffix_of.get(str(img.get("media_type", "")))
+        if not suffix:
+            continue
+        try:
+            data = base64.b64decode(str(img.get("data", "")), validate=True)
+        except Exception:
+            continue
+        media_dir = settings.data_dir / "media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        path = media_dir / (
+            f"chat-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-"
+            f"{hashlib.sha1(data).hexdigest()[:8]}{suffix}")
+        path.write_bytes(data)
+        out.append(str(path))
+    return out[:settings.vision_max_images]
+
+
 def _chat_poll_loop(settings_factory, sessions: SessionStore,
                     stop: threading.Event, llm_factory=None) -> None:
     """Email (+WeCom) chat polling, absorbed from the standalone listener.
@@ -253,7 +295,8 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                         session = f"{channel.name}:{message.get('sender', '')}"
                         reply = handle_message(message["text"], settings,
                                                make_llm(settings),
-                                               history=sessions.history(session))
+                                               history=sessions.history(session),
+                                               image_paths=message.get("images"))
                         sessions.append(session, message["text"], reply)
                         channel.send(reply, in_reply_to=message)
                         log.info("replied via %s (%d chars)", channel.name, len(reply))

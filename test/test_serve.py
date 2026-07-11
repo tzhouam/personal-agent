@@ -140,3 +140,33 @@ def test_session_turns_expire_after_48h(settings):
     assert store._path("s").exists()
     assert not store._path("other").exists() and not store._path("legacy").exists()
     assert store.prune() == {"turns": 0, "files": 0}  # idempotent
+
+
+def test_chat_accepts_image_paths(server, tmp_path, monkeypatch):
+    base, llm, _ = server
+    pic = tmp_path / "shot.png"
+    pic.write_bytes(b"\x89PNG fake")
+    monkeypatch.setattr("assistant.vision.describe_images",
+                        lambda s, p: ["a build log full of errors"])
+    r = httpx.post(f"{base}/chat", json={"session": "s1", "text": "看看这个",
+                                         "image_paths": [str(pic)]},
+                   timeout=10)
+    assert r.status_code == 200
+    assert "## Attached images" in llm.prompts[-1]
+    assert "build log" in llm.prompts[-1]
+
+
+def test_chat_accepts_base64_images_and_image_only(server, monkeypatch):
+    base, llm, settings = server
+    import base64 as b64
+    monkeypatch.setattr("assistant.vision.describe_images", lambda s, p: ["a chart"])
+    body = {"session": "s2", "text": "",
+            "images": [{"media_type": "image/png",
+                        "data": b64.b64encode(b"\x89PNG fake").decode()}]}
+    r = httpx.post(f"{base}/chat", json=body, timeout=10)
+    assert r.status_code == 200
+    assert "a chart" in llm.prompts[-1]
+    # decoded file staged under DATA_DIR/media
+    assert list((settings.data_dir / "media").glob("chat-*.png"))
+    # neither text nor images → still a 400
+    assert httpx.post(f"{base}/chat", json={"text": ""}).status_code == 400

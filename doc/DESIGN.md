@@ -194,6 +194,23 @@ what the code actually did — replies are built from those, never from LLM clai
 Actions: todo/reading management, `trigger_run`, `run_phase`, `plan_task`,
 `web_search`, reminders, routines, status/profile queries.
 
+### Images
+
+The main LLM is text-only, so attached images (a WeChat photo, an email
+attachment, `assistant ask --image`) take a describe-then-reason path
+(`vision.py`): a vision backend writes one detailed description per image —
+scene plus verbatim text transcription — and the chat prompt carries it as an
+"## Attached images" context block. Backends chain like search: a configured
+Anthropic-compatible vision endpoint first (`VISION_API_KEY`/`VISION_MODEL`),
+then a local VLM (`VISION_LOCAL_MODEL_PATH`, e.g. Qwen3-VL) run **one-shot in
+a subprocess on the CUDA device with the most free memory** — load, describe,
+exit — so the daemon never holds GPU memory between images on a box whose
+GPUs are shared with CI jobs. WeChat delivery rides the gateway's
+`message_received` hook (which carries the staged media path) into a short
+TTL cache the reply hook drains; the daemon's `/chat` accepts both
+`image_paths` (local, loopback-trusted) and base64 `images` staged into
+`DATA_DIR/media/`.
+
 `assistant serve` is a loopback-only HTTP daemon exposing `/chat` (with
 per-session memory), `/actions/<name>`, `/run`, `/status`, `/healthz`. It
 rebuilds `Settings`/`LLM` per request (so a `.env` edit applies immediately) and

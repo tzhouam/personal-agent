@@ -371,6 +371,18 @@ def build_graph(deps: Deps):
                                        {"chat_turns_pruned": pruned["turns"]})
         except Exception:
             log.exception("session pruning failed")
+        try:  # staged chat images (email/wechat/base64) expire with chat history
+            cutoff = time.time() - settings.chat_history_max_age_hours * 3600
+            media_dir = settings.data_dir / "media"
+            stale = [p for p in media_dir.glob("*")
+                     if p.is_file() and p.stat().st_mtime < cutoff] if media_dir.exists() else []
+            for path in stale:
+                path.unlink(missing_ok=True)
+            if stale:
+                log.info("media pruned: %d staged image(s) older than %dh",
+                         len(stale), settings.chat_history_max_age_hours)
+        except Exception:
+            log.exception("media pruning failed")
         _advance("done")
         return {"curated": curated, "phase": "done", "errors": errors}
 

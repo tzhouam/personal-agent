@@ -23,7 +23,9 @@ log = logging.getLogger("assistant")
 _SYSTEM = f"""You are your owner's personal assistant, reachable by chat/email. Answer from the
 context below (profile, open todos, reading list, active routines, pending reminders, last run).
 Be concise and direct — this is a chat reply, not a report. Answer in the language the owner
-wrote in.
+wrote in. When an "## Attached images" section appears, the owner attached image(s) to this
+message; the descriptions come from a vision model — respond to what the images show as if you
+saw them, and be upfront when a description says an image could not be analyzed.
 
 You may execute actions, but ONLY when the owner explicitly asks for them:
 {prompt_block()}
@@ -86,12 +88,23 @@ def build_context(settings: Settings) -> str:
 
 
 def handle_message(text: str, settings: Settings, llm: LLM | None = None,
-                   history: list[dict] | None = None) -> str:
+                   history: list[dict] | None = None,
+                   image_paths: list[str] | None = None) -> str:
     """``history`` is optional prior exchanges for this session
     (``[{"owner": ..., "assistant": ...}, …]``, oldest first) — supplied by
-    the serve daemon's session store so multi-turn references work."""
+    the serve daemon's session store so multi-turn references work.
+    ``image_paths`` are local image files attached to this message; they are
+    described by the vision chain (vision.py) and injected as context, so an
+    image-only message (empty ``text``) still gets a real reply."""
     llm = llm or LLM(settings)
     prompt = f"## Context\n{build_context(settings)}\n\n"
+    if image_paths:
+        from ..vision import describe_images, render_image_context
+
+        descriptions = describe_images(
+            settings, image_paths[:settings.vision_max_images])
+        prompt += render_image_context(descriptions) + "\n\n"
+        text = text.strip() or "(the owner sent the attached image(s) without text — react to what they show)"
     if history:
         turns = "\n".join(f"Owner: {h.get('owner', '')}\nYou: {h.get('assistant', '')}"
                           for h in history[-10:])
