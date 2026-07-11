@@ -163,7 +163,7 @@ export function takeInboundMedia(keys) {
 /** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
  * (null = not ours, let OpenClaw built-ins have it). */
 export function parseSlash(body) {
-  const m = body.match(/^\/(todo|read|digest|status|run|plan|search|remind|routine)\b\s*(.*)$/s);
+  const m = body.match(/^\/(todo|read|digest|status|run|plan|search|remind|routine|fin)\b\s*(.*)$/s);
   if (!m) return null;
   const [, family, restRaw] = m;
   const rest = restRaw.trim();
@@ -194,6 +194,24 @@ export function parseSlash(body) {
     const set = rest.match(/^(\S+)\s+(.+)$/s);
     if (set) return { action: "set_reminder", params: { when: set[1], message: set[2] } };
     return { usage: "usage: /remind [list] | /remind cancel <id> | /remind <+2h|HH:MM> <message>" };
+  }
+  if (family === "fin") {
+    if (!rest || rest === "sum") return { action: "finance_summary", params: {} };
+    const month = rest.match(/^sum\s+(\d{4}-\d{2})$/);
+    if (month) return { action: "finance_summary", params: { month: month[1] } };
+    if (rest === "list") return { action: "list_transactions", params: {} };
+    const listMonth = rest.match(/^list\s+(\d{4}-\d{2})$/);
+    if (listMonth) return { action: "list_transactions", params: { month: listMonth[1] } };
+    const voided = rest.match(/^void\s+(\S+)$/);
+    if (voided) return { action: "void_transaction", params: { id: voided[1] } };
+    const logged = rest.match(/^(income|expense)\s+([\d.]+)(?:\s+(\S+))?(?:\s+(.+))?$/s);
+    if (logged)
+      return { action: "log_transaction",
+               params: { kind: logged[1], amount: logged[2],
+                         ...(logged[3] ? { category: logged[3] } : {}),
+                         ...(logged[4] ? { note: logged[4] } : {}) } };
+    return { usage: "usage: /fin [sum [YYYY-MM]] | /fin list [YYYY-MM] | " +
+                    "/fin <income|expense> <amount> [category] [note] | /fin void <id>" };
   }
   if (family === "todo") {
     if (!rest || rest === "list") return { action: "list_todos", params: {} };

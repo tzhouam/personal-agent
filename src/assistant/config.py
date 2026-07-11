@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     wecom_aes_key: str = ""        # 43-char EncodingAESKey
     wecom_callback_port: int = 8329
 
+    # Finance ledger (finance.yaml in the profile repo) — chat-logged
+    # income/expense records; summaries are computed in code
+    finance_currency: str = "CNY"   # default currency for logged amounts
+
     # Vision (image understanding in chat) — the main LLM is text-only, so
     # attached images are described by a vision backend first (vision.py).
     # Remote backend: any Anthropic-compatible vision endpoint. Local backend:

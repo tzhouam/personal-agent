@@ -221,6 +221,19 @@ with an `assistant ask` subprocess as the degraded fallback.
 Full rationale and the migration that produced this shape:
 [DESIGN_SERVICE_LAYER.md](DESIGN_SERVICE_LAYER.md).
 
+### Finance ledger
+
+`finance_store.py` keeps income/expense records in `finance.yaml` inside the
+profile git repo — versioned like todos, local-only like everything else, and
+never-delete (wrong entries are *voided*). Records enter through the typed
+`log_transaction` action: spoken amounts ("午饭花了45") or amounts the vision
+chain reads off a payment-receipt screenshot. All analysis numbers — monthly
+income/spend/net, savings rate, category breakdown, previous-month
+comparison — are **computed in code** (`summary()`), injected into the chat
+context as a "## Finance ledger" block, and the LLM is instructed to cite
+those figures rather than invent any. `/fin` slash commands cover quick
+logging and summaries.
+
 ### Proactive messaging
 
 `notify.py` (`send_wechat`) pushes messages to the owner without an inbound

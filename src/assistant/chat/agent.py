@@ -40,6 +40,14 @@ emit set_reminder — the agent messages WeChat by itself at that time. When the
 something RECURRING ("every workday…", "each morning…", possibly gated on a real-world
 condition like a weather alert), emit create_routine, not set_reminder.
 
+Finance: when the owner mentions money spent/earned ("午饭花了45", "发工资了", or a payment
+receipt/bill screenshot), emit log_transaction with the amount, kind, and a sensible category —
+for receipts, read the amount, merchant (note), and payment time (time: "HH:MM") from the image
+description; exact duplicates are rejected automatically, so log what you see. When asked how healthy
+their income/spending is, analyze from the "## Finance ledger" numbers: cite the actual totals,
+savings rate, and top categories, compare with the previous month, and give concrete,
+prioritized suggestions. Never invent amounts that aren't in the ledger.
+
 Respond with ONLY JSON: {{"reply": "<chat reply>", "actions": []}}
 Never claim an action succeeded in the reply — outcomes are appended automatically."""
 
@@ -70,6 +78,25 @@ def build_context(settings: Settings) -> str:
             parts.append(f"## {title}\n" + run_action(action, {}, settings))
         except Exception:  # context is best-effort; a bad store must not kill chat
             log.exception("context: %s failed", action)
+
+    try:  # finance: this month's computed totals + latest records, so money
+        # questions are answered from real ledger numbers, never invented
+        from ..finance_store import FinanceStore
+        from ..finance_store import render_summary as render_finance
+
+        store = FinanceStore(settings.profile_dir)
+        if store.records():
+            recent = "\n".join(
+                f"[{r['id']}] {r['date']}" + (f" {r['time']}" if r.get("time") else "")
+                + f" {r['type']} {r['amount']} {r['currency']} · {r['category']}"
+                + (f" · {r['note']}" if r.get("note") else "")
+                for r in store.records()[-8:])
+            parts.append("## Finance ledger (computed — cite these numbers)\n"
+                         + render_finance(store.summary(),
+                                          currency=settings.finance_currency)
+                         + "\nrecent records:\n" + recent)
+    except Exception:
+        log.exception("context: finance failed")
 
     state = load_state(settings.state_file) or {}
     if state.get("run_id"):

@@ -319,3 +319,66 @@ def _plan_task(settings: Settings, p: dict) -> str:
         lines.append(f"→ next: {plan['next']}")
     return "\n".join(lines)
 
+
+# ── finance ──────────────────────────────────────────────────────────
+
+def _log_transaction(settings: Settings, p: dict) -> str:
+    """Append an income/expense record to the finance ledger. Reports the new
+    id, a rejection reason, or the existing record when this would be a
+    duplicate (same kind/amount/currency/date/time/note)."""
+    from ..finance_store import FinanceStore
+
+    status, record = FinanceStore(settings.profile_dir).add(
+        p.get("kind", ""), p.get("amount"), category=p.get("category", "other"),
+        note=p.get("note", ""), when=p.get("date", ""), time=p.get("time", ""),
+        currency=p.get("currency") or settings.finance_currency,
+        source=p.get("source", "chat"))
+    if status == "invalid":
+        return ("transaction rejected — need kind=income|expense, amount>0, "
+                "date as YYYY-MM-DD and time as HH:MM if given")
+    if status == "duplicate":
+        return (f"NOT logged — duplicate of {record['id']} "
+                f"({record['date']}{' ' + record['time'] if record.get('time') else ''} "
+                f"{record['type']} {record['amount']} {record['currency']}"
+                + (f" · {record['note']}" if record.get("note") else "")
+                + "); add a differing time/note if it really is a second transaction")
+    return (f"logged {record['id']}: {record['type']} {record['amount']} "
+            f"{record['currency']} · {record['category']}"
+            + (f" · {record['note']}" if record["note"] else "")
+            + (f" · {record['date']}" if p.get("date") else "")
+            + (f" {record['time']}" if record.get("time") else ""))
+
+
+def _void_transaction(settings: Settings, p: dict) -> str:
+    """Void (never delete) the ledger record with `id`."""
+    from ..finance_store import FinanceStore
+
+    record_id = str(p.get("id", ""))
+    ok = FinanceStore(settings.profile_dir).void(record_id)
+    return (f"transaction {record_id} voided" if ok
+            else f"no active transaction {record_id!r}")
+
+
+def _list_transactions(settings: Settings, p: dict) -> str:
+    """List records (newest first, capped at 20), optionally for one
+    'YYYY-MM' `month` — one per line."""
+    from ..finance_store import FinanceStore
+
+    recs = FinanceStore(settings.profile_dir).records(
+        str(p["month"]) if p.get("month") else None)
+    lines = [f"[{r['id']}] {r['date']}"
+             + (f" {r['time']}" if r.get("time") else "")
+             + f" {r['type']} {r['amount']} {r['currency']} · {r['category']}"
+             + (f" · {r['note']}" if r.get("note") else "")
+             for r in reversed(recs[-20:])]
+    return "\n".join(lines) or "(no transactions recorded)"
+
+
+def _finance_summary(settings: Settings, p: dict) -> str:
+    """Deterministic monthly totals (income, spend, net, savings rate, top
+    categories) for `month` (default: current)."""
+    from ..finance_store import FinanceStore, render_summary
+
+    store = FinanceStore(settings.profile_dir)
+    return render_summary(store.summary(str(p["month"]) if p.get("month") else None),
+                          currency=settings.finance_currency)

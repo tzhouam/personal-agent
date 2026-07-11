@@ -15,10 +15,13 @@ from .handlers import (
     _create_routine,
     _done_reading,
     _done_todo,
+    _finance_summary,
     _list_reading,
     _list_reminders,
     _list_routines,
     _list_todos,
+    _list_transactions,
+    _log_transaction,
     _plan_task,
     _run_phase,
     _run_status,
@@ -26,6 +29,7 @@ from .handlers import (
     _show_profile,
     _trigger_run,
     _unrelated_reading,
+    _void_transaction,
     _web_search,
 )
 from ..config import Settings
@@ -195,6 +199,56 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         name="show_profile",
         description="summary of the owner profile",
         handler=_show_profile,
+    ),
+    Action(
+        name="log_transaction",
+        description="record an income or expense in the finance ledger",
+        handler=_log_transaction,
+        params={"kind": {"required": True, "desc": "income | expense"},
+                "amount": {"required": True, "desc": "positive number"},
+                "category": {"required": False,
+                             "desc": "food/transport/housing/utilities/entertainment/"
+                                     "shopping/health/education/travel/salary/bonus/"
+                                     "investment/transfer/other"},
+                "note": {"required": False,
+                         "desc": "context: merchant/what it was for — used for dedup"},
+                "date": {"required": False, "desc": "YYYY-MM-DD, default today"},
+                "time": {"required": False,
+                         "desc": "HH:MM if known (e.g. from a receipt) — used for dedup"},
+                "currency": {"required": False, "desc": "e.g. CNY/HKD, default configured"}},
+        llm=True,
+        prompt_example='{"type": "log_transaction", "kind": "expense", "amount": 45, '
+                       '"category": "food", "note": "午饭", "time": "12:30"}   '
+                       '# kind: income|expense; note=context, time from receipt if shown; '
+                       'duplicates (same kind+amount+currency+date+time+note) are rejected',
+        slash="fin",
+    ),
+    Action(
+        name="void_transaction",
+        description="void a mistaken ledger record by id (never deletes)",
+        handler=_void_transaction,
+        params={"id": {"required": True, "desc": "record id, e.g. f3"}},
+        llm=True,
+        prompt_example='{"type": "void_transaction", "id": "f3"}',
+        slash="fin",
+    ),
+    Action(
+        name="list_transactions",
+        description="list finance records, optionally one YYYY-MM month",
+        handler=_list_transactions,
+        params={"month": {"required": False, "desc": "YYYY-MM"}},
+        slash="fin",
+    ),
+    Action(
+        name="finance_summary",
+        description="deterministic monthly finance totals (income, spend, net, "
+                    "savings rate, top categories)",
+        handler=_finance_summary,
+        params={"month": {"required": False, "desc": "YYYY-MM, default current"}},
+        llm=True,
+        prompt_example='{"type": "finance_summary", "month": "2026-06"}   '
+                       '# month optional',
+        slash="fin",
     ),
 ]}
 
