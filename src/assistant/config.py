@@ -81,11 +81,12 @@ class Settings(BaseSettings):
 
     # Vision (image understanding in chat) — the main LLM is text-only, so
     # attached images are described by a vision backend first (vision.py).
-    # Remote backend: any Anthropic-compatible vision endpoint. Local backend:
-    # a downloaded VLM (e.g. Qwen3-VL) run one-shot on the freest GPU.
+    # PREFER the remote multimodal API (owner decision 2026-07-11); the local
+    # VLM (one-shot on the freest GPU) is only the no-key fallback.
     vision_api_key: str = ""
     vision_base_url: str = ""
     vision_model: str = ""
+    vision_provider: str = "anthropic"  # anthropic | openai (OpenAI/Gemini/DashScope)
     vision_local_model_path: str = ""   # e.g. /models/hub/Qwen3-VL-8B-Instruct
     vision_min_free_gib: float = 20     # GPU headroom the local worker requires
     vision_max_images: int = 3          # per message; extras are dropped

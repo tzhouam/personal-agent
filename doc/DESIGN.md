@@ -202,7 +202,8 @@ attachment, `assistant ask --image`) take a describe-then-reason path
 scene plus verbatim text transcription — and the chat prompt carries it as an
 "## Attached images" context block. Backends chain like search: a configured
 Anthropic-compatible vision endpoint first (`VISION_API_KEY`/`VISION_MODEL`),
-then a local VLM (`VISION_LOCAL_MODEL_PATH`, e.g. Qwen3-VL) run **one-shot in
+then — only when no API key is set — a local VLM (`VISION_LOCAL_MODEL_PATH`,
+e.g. Qwen3-VL) run **one-shot in
 a subprocess on the CUDA device with the most free memory** — load, describe,
 exit — so the daemon never holds GPU memory between images on a box whose
 GPUs are shared with CI jobs. WeChat delivery rides the gateway's

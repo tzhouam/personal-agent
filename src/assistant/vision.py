@@ -88,10 +88,16 @@ def describe_images(settings: Settings, paths: list[str]) -> list[str]:
 
 
 def _remote_describe(settings: Settings, paths: list[str]) -> list[str] | None:
-    """Describe via the configured Anthropic-compatible vision endpoint; None
-    when unconfigured (falls through to the local backend)."""
+    """Describe via the configured multimodal API — the PREFERRED backend
+    (owner decision 2026-07-11: use a model API for images, not a local
+    model). `VISION_PROVIDER` picks the wire format: "anthropic" (default —
+    real Anthropic or compatible) or "openai" (OpenAI, Gemini's
+    openai-compatible endpoint, DashScope/Qwen-VL, …). None when
+    unconfigured (falls through to the local fallback)."""
     if not (settings.vision_api_key and settings.vision_model):
         return None
+    if settings.vision_provider.strip().lower() == "openai":
+        return _openai_describe(settings, paths)
     import anthropic
 
     kwargs: dict = {"api_key": settings.vision_api_key}
@@ -110,6 +116,30 @@ def _remote_describe(settings: Settings, paths: list[str]) -> list[str] | None:
                 {"type": "text", "text": _DESCRIBE_PROMPT},
             ]}])
         out.append("".join(b.text for b in resp.content if b.type == "text").strip())
+    return out
+
+
+def _openai_describe(settings: Settings, paths: list[str]) -> list[str]:
+    """OpenAI-style `chat/completions` with data-URI image_url content —
+    plain httpx, no SDK dependency."""
+    import httpx
+
+    base = (settings.vision_base_url or "https://api.openai.com/v1").rstrip("/")
+    out = []
+    for path in paths:
+        data = base64.b64encode(Path(path).read_bytes()).decode()
+        uri = f"data:{media_type_for(path)};base64,{data}"
+        resp = httpx.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.vision_api_key}"},
+            json={"model": settings.vision_model, "max_tokens": 1000,
+                  "messages": [{"role": "user", "content": [
+                      {"type": "image_url", "image_url": {"url": uri}},
+                      {"type": "text", "text": _DESCRIBE_PROMPT},
+                  ]}]},
+            timeout=120)
+        resp.raise_for_status()
+        out.append(str(resp.json()["choices"][0]["message"]["content"] or "").strip())
     return out
 
 

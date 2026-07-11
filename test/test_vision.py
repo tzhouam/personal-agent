@@ -134,3 +134,44 @@ def test_email_channel_extracts_image_attachments(settings):
     saved = parsed["images"][0]
     assert saved.endswith(".png") and (settings.data_dir / "media") in __import__("pathlib").Path(saved).parents
     assert __import__("pathlib").Path(saved).read_bytes() == b"\x89PNG fake bytes"
+
+
+def test_openai_provider_describe(settings, tmp_path, monkeypatch):
+    pic = _png(tmp_path)
+    settings.vision_provider = "openai"
+    settings.vision_api_key = "sk-test"
+    settings.vision_model = "gpt-5-mini"
+    calls = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "a red square, text '42'"}}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls["url"] = url
+        calls["model"] = json["model"]
+        calls["content"] = json["messages"][0]["content"]
+        return Resp()
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    out = describe_images(settings, [str(pic)])
+    assert out == ["a red square, text '42'"]
+    assert calls["url"] == "https://api.openai.com/v1/chat/completions"
+    assert calls["model"] == "gpt-5-mini"
+    assert calls["content"][0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_remote_preferred_over_local(settings, tmp_path, monkeypatch):
+    # owner decision: with an API key configured the local VLM must never run
+    pic = _png(tmp_path)
+    settings.vision_api_key = "sk-test"
+    settings.vision_model = "some-vlm"
+    settings.vision_local_model_path = str(tmp_path)
+    monkeypatch.setattr(vision, "_openai_describe", lambda s, p: ["api desc"])
+    monkeypatch.setattr(vision, "_local_describe",
+                        lambda s, p: (_ for _ in ()).throw(AssertionError("local ran")))
+    settings.vision_provider = "openai"
+    assert describe_images(settings, [str(pic)]) == ["api desc"]
