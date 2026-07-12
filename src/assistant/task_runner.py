@@ -61,6 +61,12 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
         line for line in prompt_block().splitlines()
         if not any(f'"{name}"' in line for name in EXCLUDED_ACTIONS))
     system = _RUNNER_SYSTEM.format(actions=actions_block)
+    try:
+        from .lessons_store import LessonsStore
+
+        system += LessonsStore(settings.profile_dir).prompt_block()
+    except Exception:
+        log.exception("lessons injection failed")
     context = build_context(settings)
     consecutive_failures = 0
 

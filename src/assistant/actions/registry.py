@@ -20,6 +20,8 @@ from .handlers import (
     _execute_task,
     _finance_summary,
     _health_summary,
+    _learn_preference,
+    _list_preferences,
     _list_reading,
     _list_reminders,
     _list_routines,
@@ -32,7 +34,9 @@ from .handlers import (
     _plan_task,
     _recategorize_transaction,
     _run_phase,
+    _retire_preference,
     _run_status,
+    _self_evolve,
     _set_health_profile,
     _set_reminder,
     _show_profile,
@@ -206,6 +210,45 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "plan_task", "request": "<the task in one sentence>"}'
                        '   # for novel multi-step asks: bookings, arranging, research',
         slash="plan",
+    ),
+    Action(
+        name="learn_preference",
+        description="remember a durable behavior rule from the owner's feedback "
+                    "(how the agent should act from now on)",
+        handler=_learn_preference,
+        params={"rule": {"required": True,
+                         "desc": "one imperative sentence, e.g. '记账默认用港币'"},
+                "why": {"required": False, "desc": "what prompted it"}},
+        llm=True,
+        prompt_example='{"type": "learn_preference", "rule": "<the behavior rule>"}'
+                       '   # when the owner gives DURABLE feedback: 以后…/别再…/记住要…/'
+                       'corrections of how you behave — not one-off reminders',
+        slash="learn",
+    ),
+    Action(
+        name="retire_preference",
+        description="retire a learned behavior rule by id",
+        handler=_retire_preference,
+        params={"id": {"required": True, "desc": "lesson id, e.g. L3"}},
+        llm=True,
+        prompt_example='{"type": "retire_preference", "id": "L3"}   # 忘掉那条规则',
+        slash="learn",
+    ),
+    Action(
+        name="list_preferences",
+        description="list the learned behavior rules",
+        handler=_list_preferences,
+        slash="learn",
+    ),
+    Action(
+        name="self_evolve",
+        description="analyze recent chats/tasks now and distill new behavior lessons",
+        handler=_self_evolve,
+        params={},
+        llm=True,
+        prompt_example='{"type": "self_evolve"}   # owner asks you to reflect/improve '
+                       'yourself from recent conversations',
+        slash="learn",
     ),
     Action(
         name="execute_task",

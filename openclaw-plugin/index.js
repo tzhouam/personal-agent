@@ -171,7 +171,7 @@ export function takeInboundMedia(keys) {
 /** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
  * (null = not ours, let OpenClaw built-ins have it). */
 export function parseSlash(body) {
-  const m = body.match(/^\/(todo|read|digest|status|run|plan|search|remind|routine|fin|health|task)\b\s*(.*)$/s);
+  const m = body.match(/^\/(todo|read|digest|status|run|plan|search|remind|routine|fin|health|task|learn)\b\s*(.*)$/s);
   if (!m) return null;
   const [, family, restRaw] = m;
   const rest = restRaw.trim();
@@ -223,6 +223,13 @@ export function parseSlash(body) {
                          ...(logged[4] ? { note: logged[4] } : {}) } };
     return { usage: "usage: /fin [sum [YYYY-MM]] | /fin list [YYYY-MM] | " +
                     "/fin <income|expense> <amount> [category] [note] | /fin cat <id> <category> | /fin void <id>" };
+  }
+  if (family === "learn") {
+    if (!rest || rest === "list") return { action: "list_preferences", params: {} };
+    if (rest === "evolve") return { action: "self_evolve", params: {}, timeoutMs: 120_000 };
+    const retire = rest.match(/^retire\s+(\S+)$/);
+    if (retire) return { action: "retire_preference", params: { id: retire[1] } };
+    return { action: "learn_preference", params: { rule: rest } };
   }
   if (family === "task") {
     if (!rest) return { usage: "usage: /task <the task, one sentence>" };

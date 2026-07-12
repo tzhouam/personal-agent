@@ -284,6 +284,18 @@ to `DATA_DIR/tasks/<id>.json`, and delivers the report over WeChat.
 `execute_task`/`plan_task`/`trigger_run` are excluded from its action set
 (no recursion, no surprise pipeline runs).
 
+### Self-evolution
+
+`lessons_store.py` is the agent's behavior-change surface: durable rules
+with provenance (`owner` — stated directly in chat via the
+`learn_preference` action — or `evolve` — distilled weekly by
+`tasks/evolve.py` from chat sessions and task traces, friction-annotated).
+Active lessons are appended to the system prompt of every chat and task
+turn (`system_prompt()`), so learning changes behavior immediately;
+everything is git-audited, retire-only (never deleted), capped at 25 active
+(evolve-sourced rotate out first, owner rules never auto-evict), and
+near-duplicates are rejected.
+
 ### Proactive messaging
 
 `notify.py` (`send_wechat`) pushes messages to the owner without an inbound

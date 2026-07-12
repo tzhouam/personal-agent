@@ -312,6 +312,7 @@ slash commands (no LLM call, instant):
 | `/fin` · `/fin sum [YYYY-MM]` · `/fin list [YYYY-MM]` | Finance summary / records |
 | `/fin <income\|expense> <amount> [category] [note]` · `/fin cat <id> <category>` · `/fin void <id>` | Log / recategorize / void a transaction |
 | `/health` · `/health sum [days]` | Health summary (log by just describing, or send a food photo) |
+| `/learn <rule>` · `/learn list\|retire <id>` · `/learn evolve` | Learned behavior rules / self-reflection |
 | `/status` | Last run + open counts |
 
 ### Finance
@@ -358,6 +359,18 @@ phases), reviews each result, adapts after failures, and messages you the
 report on WeChat when done (`/task`, or just ask). Each run's full step
 trace is kept under `~/.personal-agent/tasks/` for audit. Budgeted: at most
 12 steps, and three consecutive failures stop it with a partial report.
+
+### Teaching it (self-evolution)
+
+Say it once — *"以后记账默认用港币"*, *"回我消息永远用中文"*, *"别再在晚上
+十点后发提醒"* — and the rule is stored (`lessons.yaml`, git-versioned) and
+injected into every future turn, chat and background tasks alike. `"忘掉那
+条规则"` or `/learn retire L3` reverts it; `/learn list` shows all rules
+with provenance. Weekly (with the profile consolidation) it also reviews
+its own recent chats and task runs for friction — actions that failed and
+got retried, things you had to correct — and distills up to three new rules
+itself, marked `evolve` so you can tell self-learned rules from your own.
+Owner rules are never auto-evicted; self-learned ones rotate out first.
 
 ### Planning novel tasks
 

@@ -72,6 +72,12 @@ use health data (food/health spending vs meals and nutrient needs) and the profi
 career stage shape savings advice); and the "## Cross-links" section gives you computed joins
 (meal↔expense pairs, spend-vs-logged gaps) to cite directly.
 
+Self-evolution: when the owner gives DURABLE feedback about your behavior — "以后…",
+"别再…", "记住要…", "你应该…", or corrects how you just acted — emit learn_preference with the
+rule (and keep applying it immediately); "忘掉/取消那条规则" → retire_preference. Distinguish
+from one-off reminders (set_reminder) and world facts. When the owner asks you to reflect on
+recent conversations and improve, emit self_evolve.
+
 Present analyses so they scan in seconds: a one-line headline first (totals/net), then short
 labeled sections with an emoji each, percentages next to amounts, and one blank line between
 sections. For every dominant cost area, drill into its sub-areas using the computed
@@ -81,6 +87,19 @@ Numbers come from the computed blocks, never estimated.
 
 Respond with ONLY JSON: {{"reply": "<chat reply>", "actions": []}}
 Never claim an action succeeded in the reply — outcomes are appended automatically."""
+
+
+def system_prompt(settings: Settings) -> str:
+    """The chat system prompt: the static core plus the learned behavior
+    rules (lessons_store) — the agent's self-evolution surface. Rebuilt per
+    turn so a lesson learned in one message governs the next."""
+    try:
+        from ..lessons_store import LessonsStore
+
+        return _SYSTEM + LessonsStore(settings.profile_dir).prompt_block()
+    except Exception:  # lessons are an enhancement, never a blocker
+        log.exception("lessons injection failed")
+        return _SYSTEM
 
 
 def build_context(settings: Settings) -> str:
@@ -199,8 +218,9 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                           for h in history[-10:])
         prompt += f"## Recent conversation (oldest first)\n{turns}\n\n"
     prompt += f"## Owner message\n{text.strip()[:4000]}"
+    system = system_prompt(settings)
     try:
-        result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=2000,
+        result = llm.complete_json(prompt, system=system, max_tokens=2000,
                                    **({"images": attach} if attach else {}))
     except Exception as exc:
         log.exception("chat LLM call failed")
@@ -232,7 +252,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                     "succeeded or were rejected as duplicates. You may also "
                     "revise the reply.")
         try:
-            fix = llm.complete_json(review, system=_SYSTEM, max_tokens=2000)
+            fix = llm.complete_json(review, system=system, max_tokens=2000)
         except Exception:
             log.exception("action-review LLM call failed")
             break

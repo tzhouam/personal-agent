@@ -532,3 +532,50 @@ def _execute_task(settings: Settings, p: dict) -> str:
                      start_new_session=True)
     return ("task started in the background — I'll work through it step by "
             "step and message you the result on WeChat")
+
+
+# ── self-evolution (learned behavior) ────────────────────────────────
+
+def _learn_preference(settings: Settings, p: dict) -> str:
+    """Store a durable behavior rule from the owner's direct feedback."""
+    from ..lessons_store import LessonsStore
+
+    lesson = LessonsStore(settings.profile_dir).learn(
+        p.get("rule", ""), why=p.get("why", ""), source="owner")
+    return (f"learned {lesson['id']}: {lesson['rule']}" if lesson
+            else "not stored — empty or already covered by an active lesson")
+
+
+def _retire_preference(settings: Settings, p: dict) -> str:
+    """Retire a learned rule by id (never deleted; git keeps the history)."""
+    from ..lessons_store import LessonsStore
+
+    lesson_id = str(p.get("id", ""))
+    ok = LessonsStore(settings.profile_dir).retire(lesson_id)
+    return (f"lesson {lesson_id} retired" if ok
+            else f"no active lesson {lesson_id!r}")
+
+
+def _list_preferences(settings: Settings, p: dict) -> str:
+    """List active learned rules with provenance."""
+    from ..lessons_store import LessonsStore
+
+    lines = [f"[{l['id']}] ({l['source']}, {l['created']}) {l['rule']}"
+             + (f" — {l['why']}" if l.get("why") else "")
+             for l in LessonsStore(settings.profile_dir).active()]
+    return "\n".join(lines) or "(no learned rules yet)"
+
+
+def _self_evolve(settings: Settings, p: dict) -> str:
+    """Analyze recent chats/tasks and distill new behavior lessons now."""
+    from ..llm import LLM
+    from ..tasks.evolve import evolve
+
+    result = evolve(settings, LLM(settings))
+    if not result["reviewed"]:
+        return "nothing recent to learn from"
+    if not result["learned"]:
+        return (f"reviewed recent interactions — no new durable lesson "
+                f"({len(result['proposed'])} proposal(s) were duplicates or empty)")
+    return "learned:\n" + "\n".join(f"[{l['id']}] {l['rule']}"
+                                    for l in result["learned"])

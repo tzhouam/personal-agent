@@ -84,6 +84,9 @@ def main() -> None:
     cons_p.add_argument("--dry-run", action="store_true",
                         help="show what would be applied, change nothing")
 
+    sub.add_parser("evolve", help="self-evolve: distill behavior lessons from "
+                                  "recent chats and task runs")
+
     task_p = sub.add_parser("task", help="agentically execute a multi-step task now")
     task_p.add_argument("request", help="the task, quoted")
     task_p.add_argument("--no-notify", action="store_true",
@@ -138,6 +141,11 @@ def main() -> None:
         sys.exit(cmd_run_phase(settings, args.phase))
     elif args.command == "consolidate":
         sys.exit(cmd_consolidate(settings, args))
+    elif args.command == "evolve":
+        from ..actions import run_action
+
+        print(run_action("self_evolve", {}, settings))
+        sys.exit(0)
     elif args.command == "task":
         from ..task_runner import run_task
 

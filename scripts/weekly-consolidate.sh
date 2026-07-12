@@ -21,3 +21,6 @@ else
   echo "Weekly consolidation failed (rc=$rc) — check ~/.personal-agent/consolidate.log"
 fi
 exit $rc
+
+# self-evolution: distill behavior lessons from the week
+"$ASSISTANT" evolve || true
