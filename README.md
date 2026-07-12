@@ -13,6 +13,10 @@ Everything runs locally and stores your data on your own machine; the only
 things that leave are LLM API calls, the digest email, and the sites/repos you
 explicitly point it at.
 
+## 🎬 90-second introduction
+
+https://github.com/tzhouam/personal-agent/raw/main/docs/media/intro.mp4
+
 - **New here?** → [`assistant init`](#quickstart) walks you through setup.
 - **Using it day to day?** → [**User Guide**](doc/USER_GUIDE.md)
 - **Understanding or extending it?** → [**Design & Architecture**](doc/DESIGN.md)
