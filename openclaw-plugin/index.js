@@ -171,7 +171,7 @@ export function takeInboundMedia(keys) {
 /** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
  * (null = not ours, let OpenClaw built-ins have it). */
 export function parseSlash(body) {
-  const m = body.match(/^\/(todo|read|digest|status|run|plan|search|remind|routine|fin)\b\s*(.*)$/s);
+  const m = body.match(/^\/(todo|read|digest|status|run|plan|search|remind|routine|fin|health)\b\s*(.*)$/s);
   if (!m) return null;
   const [, family, restRaw] = m;
   const rest = restRaw.trim();
@@ -223,6 +223,13 @@ export function parseSlash(body) {
                          ...(logged[4] ? { note: logged[4] } : {}) } };
     return { usage: "usage: /fin [sum [YYYY-MM]] | /fin list [YYYY-MM] | " +
                     "/fin <income|expense> <amount> [category] [note] | /fin cat <id> <category> | /fin void <id>" };
+  }
+  if (family === "health") {
+    if (!rest || rest === "sum") return { action: "health_summary", params: {} };
+    const days = rest.match(/^sum\s+(\d{1,2})$/);
+    if (days) return { action: "health_summary", params: { days: days[1] } };
+    return { usage: "usage: /health [sum [days]] — log by just telling me " +
+                    "(\"跑了30分钟\", \"体重70.5\", or send a food photo)" };
   }
   if (family === "todo") {
     if (!rest || rest === "list") return { action: "list_todos", params: {} };

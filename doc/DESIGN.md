@@ -241,6 +241,19 @@ block, and the LLM is instructed to cite those figures rather than invent
 any. `/fin` slash commands cover quick logging, summaries, and
 recategorizing.
 
+### Health subprofile
+
+`health_store.py` mirrors the finance pattern in `health.yaml`: a small
+static body profile (sex, birth year, height), append-only `meal` /
+`exercise` / `weight` records with the same stated-or-auto time identity and
+dedup (one meal at 12:30 is one meal, however described), and a list of
+nutrients the owner wants covered. Meals arrive as text or as photos the
+multimodal LLM reads (estimating macros, transcribing label ingredients).
+`summary()` computes BMI, weight trend, exercise totals, and daily
+calorie/protein averages in code; the chat context carries it as a
+"## Health" block so status questions are answered from real numbers.
+Health data is never rendered to the website or digest.
+
 ### Proactive messaging
 
 `notify.py` (`send_wechat`) pushes messages to the owner without an inbound

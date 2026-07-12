@@ -21,7 +21,8 @@ from ..todo_store import ReadingList, TodoStore
 log = logging.getLogger("assistant")
 
 _SYSTEM = f"""You are your owner's personal assistant, reachable by chat/email. Answer from the
-context below (profile, open todos, reading list, active routines, pending reminders, last run).
+context below (profile, open todos, reading list, active routines, pending reminders, finance
+ledger, health, last run).
 Be concise and direct — this is a chat reply, not a report. Answer in the language the owner
 wrote in. When an "## Attached images" section appears, the owner attached image(s) to this
 message — either attached directly (look at them) or as descriptions from a vision model.
@@ -50,6 +51,16 @@ duplicates are rejected automatically, so log what you see. When asked how healt
 their income/spending is, analyze from the "## Finance ledger" numbers: cite the actual totals,
 savings rate, and top categories, compare with the previous month, and give concrete,
 prioritized suggestions. Never invent amounts that aren't in the ledger.
+
+Health: when the owner mentions eating, exercising, or a body measurement — or sends a photo of
+a meal, a nutrition label, or a body scale — emit the matching log action (log_meal /
+log_exercise / log_weight; set_health_profile for height/sex/birth year). For food images,
+estimate calories and protein/carbs/fat from what you see (or read them off the label verbatim),
+put ingredient lists in the note, say in the reply that macros are estimates, and check the
+ingredients against the "wants covered" needs list. When asked about health status or
+improvements, analyze from the "## Health" computed numbers — BMI, weight trend, exercise
+minutes, daily calorie/protein averages, open needs — with concrete, practical suggestions.
+You give wellness guidance, not medical diagnosis; for medical concerns recommend a doctor.
 
 Respond with ONLY JSON: {{"reply": "<chat reply>", "actions": []}}
 Never claim an action succeeded in the reply — outcomes are appended automatically."""
@@ -100,6 +111,18 @@ def build_context(settings: Settings) -> str:
                          + "\nrecent records:\n" + recent)
     except Exception:
         log.exception("context: finance failed")
+
+    try:  # health: computed body facts + 7-day picture, so wellness questions
+        # are answered from real logged numbers
+        from ..health_store import HealthStore
+        from ..health_store import render_summary as render_health
+
+        store = HealthStore(settings.profile_dir)
+        if store.records() or store.load()["profile"] or store.open_needs():
+            parts.append("## Health (computed — cite these numbers)\n"
+                         + render_health(store.summary()))
+    except Exception:
+        log.exception("context: health failed")
 
     state = load_state(settings.state_file) or {}
     if state.get("run_id"):

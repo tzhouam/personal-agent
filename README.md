@@ -30,6 +30,7 @@ explicitly point it at.
 | 💬 **Chat + tasks** | Message it from email or WeChat: ask questions, manage todos/reading, run pipeline phases on demand, set reminders and recurring routines, search the web, or hand it a novel multi-step task (“book a dinner for six Friday”) that it plans and tracks. |
 | 💰 **Finance ledger** | Tell it what you spent or earned (or send a payment-receipt screenshot) — records land in a git-versioned `finance.yaml` in your profile repo, never leaving the machine. Ask "这个月收支健康吗" and it analyzes real computed totals: savings rate, category breakdown, month-over-month. |
 | 🖼️ **Image understanding** | Send a photo or screenshot (WeChat, email attachment, `assistant ask --image`). With a multimodal main model it sees the image directly; text-only models get a describe-then-reason fallback via a vision model API. |
+| 🩺 **Health tracking** | Tell it what you ate, your workout, or your weight — or send a photo of a meal / nutrition label / body scale — and it maintains a health subprofile (`health.yaml`, local-only): body facts, meals with estimated macros, exercise, and nutrients you want covered. Ask "我最近健康状况怎么样" and it analyzes computed BMI, weight trend, exercise minutes, and calorie/protein averages. |
 | 📊 **Self-measuring** | Per-step metrics (success, latency, acceptance rates, triage precision, reading done-rate) in a local SQLite table, surfaced in the digest and used to auto-tune how much it surfaces. |
 
 ## How it works, in one breath

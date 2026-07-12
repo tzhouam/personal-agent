@@ -409,3 +409,108 @@ def _recategorize_transaction(settings: Settings, p: dict) -> str:
         return f"no active transaction {record_id!r}"
     hint = "" if category in CATEGORIES else f" (note: not a standard category — {', '.join(CATEGORIES)})"
     return f"{record_id} recategorized: {old} → {category}{hint}"
+
+
+# ── health ───────────────────────────────────────────────────────────
+
+def _health_record_line(record: dict) -> str:
+    """One outcome line for a logged health record."""
+    from ..finance_store import timestamp_of
+
+    detail = record.get("description") or record.get("activity") or ""
+    if record["kind"] == "exercise":
+        detail += f" {record['duration_min']}min"
+    if record["kind"] == "weight":
+        detail = f"{record['weight_kg']} kg"
+    extras = " ".join(f"{k.split('_')[0]} {record[k]}"
+                      for k in ("calories_kcal", "protein_g", "carbs_g", "fat_g")
+                      if record.get(k) is not None)
+    return (f"logged {record['id']}: {record['kind']} · {detail}"
+            + (f" · {extras}" if extras else "")
+            + f" · {timestamp_of(record)}")
+
+
+def _log_meal(settings: Settings, p: dict) -> str:
+    """Record a meal (description + optional calorie/macro estimates)."""
+    from ..health_store import HealthStore
+
+    status, record = HealthStore(settings.profile_dir).add(
+        "meal", when=p.get("date", ""), time=p.get("time", ""),
+        description=p.get("description", ""), note=p.get("note", ""),
+        calories_kcal=p.get("calories_kcal"), protein_g=p.get("protein_g"),
+        carbs_g=p.get("carbs_g"), fat_g=p.get("fat_g"))
+    if status == "invalid":
+        return "meal rejected — needs a description (date YYYY-MM-DD / time HH:MM if given)"
+    if status == "duplicate":
+        return f"NOT logged — {record['id']} already covers that meal time ({record.get('description', '')})"
+    return _health_record_line(record)
+
+
+def _log_exercise(settings: Settings, p: dict) -> str:
+    """Record an exercise session (activity + duration minutes)."""
+    from ..health_store import HealthStore
+
+    status, record = HealthStore(settings.profile_dir).add(
+        "exercise", when=p.get("date", ""), time=p.get("time", ""),
+        activity=p.get("activity", ""), duration_min=p.get("duration_min"),
+        note=p.get("note", ""))
+    if status == "invalid":
+        return "exercise rejected — needs activity and duration_min (1-1440)"
+    if status == "duplicate":
+        return f"NOT logged — {record['id']} already covers that session time"
+    return _health_record_line(record)
+
+
+def _log_weight(settings: Settings, p: dict) -> str:
+    """Record a body-weight measurement (kg)."""
+    from ..health_store import HealthStore
+
+    status, record = HealthStore(settings.profile_dir).add(
+        "weight", when=p.get("date", ""), time=p.get("time", ""),
+        weight_kg=p.get("weight_kg"), note=p.get("note", ""))
+    if status == "invalid":
+        return "weight rejected — needs weight_kg (20-400)"
+    if status == "duplicate":
+        return f"NOT logged — duplicate of {record['id']} ({record['weight_kg']} kg)"
+    return _health_record_line(record)
+
+
+def _set_health_profile(settings: Settings, p: dict) -> str:
+    """Update static body facts (sex / birth_year / height_cm)."""
+    from ..health_store import HealthStore
+
+    profile = HealthStore(settings.profile_dir).set_profile(
+        sex=p.get("sex"), birth_year=p.get("birth_year"),
+        height_cm=p.get("height_cm"))
+    facts = ", ".join(f"{k}={v}" for k, v in profile.items()) or "(empty)"
+    return f"health profile now: {facts}"
+
+
+def _add_health_need(settings: Settings, p: dict) -> str:
+    """Track a nutrient/ingredient the owner wants covered."""
+    from ..health_store import HealthStore
+
+    need = HealthStore(settings.profile_dir).add_need(
+        p.get("item", ""), why=p.get("why", ""))
+    return (f"tracking need {need['id']}: {need['item']}" if need
+            else "need already tracked (or empty)")
+
+
+def _done_health_need(settings: Settings, p: dict) -> str:
+    """Mark a tracked need as covered."""
+    from ..health_store import HealthStore
+
+    need_id = str(p.get("id", ""))
+    ok = HealthStore(settings.profile_dir).done_need(need_id)
+    return f"need {need_id} marked covered" if ok else f"no open need {need_id!r}"
+
+
+def _health_summary(settings: Settings, p: dict) -> str:
+    """Deterministic health picture for the trailing window (default 7 days)."""
+    from ..health_store import HealthStore, render_summary
+
+    try:
+        days = max(1, min(90, int(p.get("days") or 7)))
+    except (TypeError, ValueError):
+        days = 7
+    return render_summary(HealthStore(settings.profile_dir).summary(days))

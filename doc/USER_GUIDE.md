@@ -310,6 +310,7 @@ slash commands (no LLM call, instant):
 | `/routine list\|cancel <id>` | Recurring routines (create by just describing one) |
 | `/fin` · `/fin sum [YYYY-MM]` · `/fin list [YYYY-MM]` | Finance summary / records |
 | `/fin <income\|expense> <amount> [category] [note]` · `/fin cat <id> <category>` · `/fin void <id>` | Log / recategorize / void a transaction |
+| `/health` · `/health sum [days]` | Health summary (log by just describing, or send a food photo) |
 | `/status` | Last run + open counts |
 
 ### Finance
@@ -329,6 +330,20 @@ category? "把f37改成housing" or `/fin cat f37 housing`; wrong entry?
 `/fin void f37` (voided, never deleted). Then ask things like *"这个月收支健康吗？怎么改善？"* — the monthly
 totals, savings rate, and category breakdown are computed by code and handed
 to the model, so the analysis cites your real numbers.
+
+### Health
+
+Tell it what you ate ("午饭吃了牛肉面"), your workout ("跑了30分钟"), or your
+weight ("体重70.5") — or send a **photo of a meal, a nutrition label, or a
+body scale** — and it logs to a health subprofile (`health.yaml` in the
+profile repo, local-only, never rendered to the website). Food photos get
+calorie/protein estimates (marked as estimates); labels are read verbatim,
+ingredients checked against the nutrients you've asked it to track
+("帮我记着要补维生素D"). Set body facts once ("我身高178，1999年的") and then
+ask *"我最近健康状况怎么样？怎么改善？"* — BMI, weight trend, exercise
+minutes, and daily calorie/protein averages are computed by code, so the
+advice cites your real numbers. Wellness guidance only — it will point you
+to a doctor for anything medical.
 
 ### Planning novel tasks
 

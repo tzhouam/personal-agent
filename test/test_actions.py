@@ -10,7 +10,10 @@ def test_registry_covers_the_llm_action_set():
                            "set_reminder", "cancel_reminder",
                            "create_routine", "cancel_routine", "unrelated_reading",
                            "log_transaction", "void_transaction", "finance_summary",
-                           "recategorize_transaction"}
+                           "recategorize_transaction",
+                           "log_meal", "log_exercise", "log_weight",
+                           "set_health_profile", "add_health_need",
+                           "done_health_need", "health_summary"}
     block = prompt_block()
     for name in llm_actions:
         assert name in block
