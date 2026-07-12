@@ -394,7 +394,7 @@ def _finance_summary(settings: Settings, p: dict) -> str:
 
     store = FinanceStore(settings.profile_dir)
     return render_summary(store.summary(str(p["month"]) if p.get("month") else None),
-                          currency=settings.finance_currency)
+                          currency=settings.finance_currency, store=store)
 
 
 def _recategorize_transaction(settings: Settings, p: dict) -> str:

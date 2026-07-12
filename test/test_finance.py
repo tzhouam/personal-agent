@@ -203,3 +203,43 @@ def test_similar_warning_on_same_day_amount(settings):
                        "time": "16:00"}, settings)
     assert out2.startswith("logged f2")
     assert "same amount already recorded that day: f1" in out2
+
+
+def test_category_detail_drilldown(settings):
+    store = FinanceStore(settings.profile_dir)
+    store.add("expense", 45, category="food", note="美团", time="12:10")
+    store.add("expense", 55, category="food", note="美团", time="12:40",
+              when=_today(-1))
+    store.add("expense", 342, category="food", note="虎东白", time="20:34")
+    store.add("expense", 30, category="food", note="奶茶", time="22:30")
+    store.add("expense", 100, category="shopping", note="MUJI", time="15:00")
+    d = store.category_detail("food")
+    assert d["count"] == 4 and d["total"] == 472.0 and d["avg"] == 118.0
+    assert d["max"]["amount"] == 342.0 and d["max"]["note"] == "虎东白"
+    assert d["by_note"]["美团"] == {"total": 100.0, "count": 2}
+    assert d["by_daypart"]["dinner"]["total"] == 342.0
+    assert d["by_daypart"]["lunch"]["count"] == 2
+    assert d["by_daypart"]["late-night"] == {"total": 30.0, "count": 1}
+    assert store.category_detail("travel")["count"] == 0
+
+
+def test_render_summary_drills_into_dominant_categories(settings):
+    store = FinanceStore(settings.profile_dir)
+    store.add("income", 100, category="salary")
+    store.add("expense", 342, category="food", note="虎东白", time="20:34")
+    store.add("expense", 45, category="food", note="美团", time="12:10")
+    store.add("expense", 100, category="shopping", note="MUJI", time="15:00")
+    store.add("expense", 20, category="transport", note="地铁")
+    text = render_summary(store.summary(), store=store)
+    assert "food 387.0 (76%)" in text
+    assert "food detail: 2 txns, avg 193.5, max 342.0 (虎东白" in text
+    assert "food top: 虎东白 342.0×1, 美团 45.0×1" in text
+    assert "food by time: dinner 342.0 (1), lunch 45.0 (1)" in text
+    # transport (4%) gets no drill-down; without a store no drill-down at all
+    assert "transport detail" not in text
+    assert "detail" not in render_summary(store.summary())
+
+
+def _today(offset):
+    from datetime import date, timedelta
+    return (date.today() + timedelta(days=offset)).isoformat()

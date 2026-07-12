@@ -70,6 +70,13 @@ use health data (food/health spending vs meals and nutrient needs) and the profi
 career stage shape savings advice); and the "## Cross-links" section gives you computed joins
 (meal↔expense pairs, spend-vs-logged gaps) to cite directly.
 
+Present analyses so they scan in seconds: a one-line headline first (totals/net), then short
+labeled sections with an emoji each, percentages next to amounts, and one blank line between
+sections. For every dominant cost area, drill into its sub-areas using the computed
+"<category> detail / top / by time" lines — name the top merchants, the average and largest
+transaction, and the time-of-day pattern — then give ONE concrete suggestion per section.
+Numbers come from the computed blocks, never estimated.
+
 Respond with ONLY JSON: {{"reply": "<chat reply>", "actions": []}}
 Never claim an action succeeded in the reply — outcomes are appended automatically."""
 
@@ -115,7 +122,8 @@ def build_context(settings: Settings) -> str:
                 for r in store.records()[-8:])
             parts.append("## Finance ledger (computed — cite these numbers)\n"
                          + render_finance(store.summary(),
-                                          currency=settings.finance_currency)
+                                          currency=settings.finance_currency,
+                                          store=store)
                          + "\nrecent records:\n" + recent)
     except Exception:
         log.exception("context: finance failed")
