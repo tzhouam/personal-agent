@@ -314,11 +314,12 @@ slash commands (no LLM call, instant):
 Tell it money things in plain language — "午饭花了45", "工资到账32000", or send
 a payment-receipt screenshot with "记一下" — and it logs them to
 `finance.yaml` in your profile repo (git-versioned, local-only, wrong entries
-voided rather than deleted). Each record carries amount, date (+ time when
-known, e.g. off a receipt), income/expense, context note, and currency — and
-that full signature dedups: sending the same receipt twice, or mentioning a
-payment the agent already logged, is rejected with a pointer to the existing
-record. Then ask things like *"这个月收支健康吗？怎么改善？"* — the monthly
+voided rather than deleted). Each record carries a full `YYYY-MM-DD HH:MM`
+identity — the transaction time read off the receipt or your message ("下午3
+点打车" → 15:00), else the logging clock time — plus amount, income/expense,
+context note, and currency. Stated times are what distinguish two same-priced
+purchases; sending the same receipt twice, or repeating a payment the agent
+already logged, is rejected with a pointer to the existing record. Then ask things like *"这个月收支健康吗？怎么改善？"* — the monthly
 totals, savings rate, and category breakdown are computed by code and handed
 to the model, so the analysis cites your real numbers.
 

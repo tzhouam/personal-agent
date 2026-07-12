@@ -74,27 +74,34 @@ class FinanceStore:
             datetime.strptime(when, "%Y-%m-%d")
         except ValueError:
             return "invalid", None
-        time = str(time or "").strip()
-        if time:
+        stated = str(time or "").strip()
+        if stated:
             try:
-                time = datetime.strptime(time, "%H:%M").strftime("%H:%M")
+                stated = datetime.strptime(stated, "%H:%M").strftime("%H:%M")
             except ValueError:
                 return "invalid", None
         currency = str(currency or "CNY").upper()[:8]
         note = str(note or "")[:200]
         data = self.load()
-        signature = _signature(kind, amount, currency, when, time, note)
+        # Dedup uses the STATED time only: an auto-filled clock time would
+        # make the same forgotten-and-resent entry look unique every minute.
+        signature = _signature(kind, amount, currency, when, stated, note)
         for r in data["records"]:
             if not r.get("voided") and _signature(
                     r["type"], r["amount"], r["currency"], r["date"],
-                    r.get("time", ""), r.get("note", "")) == signature:
+                    _stated_time(r), r.get("note", "")) == signature:
                 return "duplicate", r
-        record = {"id": f"f{data['next_id']}", "date": when, "type": kind,
-                  "amount": amount, "currency": currency,
+        now = datetime.now()
+        record = {"id": f"f{data['next_id']}", "date": when,
+                  # every record carries a full YYYY-MM-DD HH:MM identity:
+                  # the stated transaction time when known (receipt/owner),
+                  # else the logging clock time
+                  "time": stated or now.strftime("%H:%M"),
+                  "time_source": "stated" if stated else "auto",
+                  "logged_at": now.strftime("%Y-%m-%d %H:%M"),
+                  "type": kind, "amount": amount, "currency": currency,
                   "category": str(category or "other").strip().lower()[:30],
                   "note": note, "source": str(source or "chat")[:20]}
-        if time:
-            record["time"] = time
         data["next_id"] += 1
         data["records"].append(record)
         self._save(data, f"finance: {kind} {record['amount']} {record['category']} ({record['id']})")
@@ -150,6 +157,21 @@ class FinanceStore:
         expense = round(sum(r["amount"] for r in recs if r["type"] == "expense"), 2)
         return {"month": month, "income": income, "expense": expense,
                 "net": round(income - expense, 2)}
+
+
+def _stated_time(record: dict) -> str:
+    """The record's explicitly-stated transaction time for dedup: '' when the
+    time was auto-filled at logging. Legacy records (pre time_source) only
+    stored a time when it was stated, so they default to stated."""
+    if record.get("time_source", "stated") != "stated":
+        return ""
+    return str(record.get("time", "") or "")
+
+
+def timestamp_of(record: dict) -> str:
+    """Full 'YYYY-MM-DD HH:MM' display identity of a record ('' time for
+    legacy records that never carried one)."""
+    return f"{record['date']} {record.get('time', '')}".strip()
 
 
 def _signature(kind, amount, currency, when, time, note) -> tuple:

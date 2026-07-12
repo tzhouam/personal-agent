@@ -132,6 +132,28 @@ def test_dedup_rejects_same_signature(settings):
     assert store.add("expense", 68, note="面点王", time="12:30")[0] == "created"
 
 
+def test_every_record_has_full_time_identity(settings):
+    store = FinanceStore(settings.profile_dir)
+    _, stated = store.add("expense", 30, note="咖啡", time="09:15")
+    _, auto = store.add("expense", 25, note="打车")
+    assert stated["time"] == "09:15" and stated["time_source"] == "stated"
+    assert auto["time"] and auto["time_source"] == "auto"   # logging clock time
+    assert len(auto["logged_at"]) == 16                     # YYYY-MM-DD HH:MM
+    from assistant.finance_store import timestamp_of
+    assert timestamp_of(stated) == f"{stated['date']} 09:15"
+
+
+def test_auto_time_does_not_weaken_dedup(settings):
+    # the same forgotten-and-resent NL entry minutes apart must still be
+    # caught: auto-filled clock times are excluded from the signature
+    store = FinanceStore(settings.profile_dir)
+    assert store.add("expense", 45, note="午饭")[0] == "created"
+    status, existing = store.add("expense", 45, note="午饭")
+    assert status == "duplicate" and existing["id"] == "f1"
+    # but a STATED time distinguishes a genuine second purchase
+    assert store.add("expense", 45, note="午饭", time="19:00")[0] == "created"
+
+
 def test_log_transaction_reports_duplicate(settings):
     run_action("log_transaction", {"kind": "expense", "amount": 68,
                                    "note": "面点王", "time": "12:30"}, settings)

@@ -217,7 +217,9 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                          "desc": "context: merchant/what it was for — used for dedup"},
                 "date": {"required": False, "desc": "YYYY-MM-DD, default today"},
                 "time": {"required": False,
-                         "desc": "HH:MM if known (e.g. from a receipt) — used for dedup"},
+                         "desc": "HH:MM — ALWAYS pass when the receipt/message shows "
+                                 "one; distinguishes same-priced purchases (auto-filled "
+                                 "with the logging time otherwise)"},
                 "currency": {"required": False, "desc": "e.g. CNY/HKD, default configured"}},
         llm=True,
         prompt_example='{"type": "log_transaction", "kind": "expense", "amount": 45, '

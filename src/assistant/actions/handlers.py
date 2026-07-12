@@ -338,16 +338,19 @@ def _log_transaction(settings: Settings, p: dict) -> str:
         return ("transaction rejected — need kind=income|expense, amount>0, "
                 "date as YYYY-MM-DD and time as HH:MM if given")
     if status == "duplicate":
+        from ..finance_store import timestamp_of
+
         return (f"NOT logged — duplicate of {record['id']} "
-                f"({record['date']}{' ' + record['time'] if record.get('time') else ''} "
-                f"{record['type']} {record['amount']} {record['currency']}"
+                f"({timestamp_of(record)} {record['type']} {record['amount']} "
+                f"{record['currency']}"
                 + (f" · {record['note']}" if record.get("note") else "")
                 + "); add a differing time/note if it really is a second transaction")
+    from ..finance_store import timestamp_of
+
     return (f"logged {record['id']}: {record['type']} {record['amount']} "
             f"{record['currency']} · {record['category']}"
             + (f" · {record['note']}" if record["note"] else "")
-            + (f" · {record['date']}" if p.get("date") else "")
-            + (f" {record['time']}" if record.get("time") else ""))
+            + f" · {timestamp_of(record)}")
 
 
 def _void_transaction(settings: Settings, p: dict) -> str:
@@ -365,11 +368,12 @@ def _list_transactions(settings: Settings, p: dict) -> str:
     'YYYY-MM' `month` — one per line."""
     from ..finance_store import FinanceStore
 
+    from ..finance_store import timestamp_of
+
     recs = FinanceStore(settings.profile_dir).records(
         str(p["month"]) if p.get("month") else None)
-    lines = [f"[{r['id']}] {r['date']}"
-             + (f" {r['time']}" if r.get("time") else "")
-             + f" {r['type']} {r['amount']} {r['currency']} · {r['category']}"
+    lines = [f"[{r['id']}] {timestamp_of(r)} {r['type']} {r['amount']} "
+             f"{r['currency']} · {r['category']}"
              + (f" · {r['note']}" if r.get("note") else "")
              for r in reversed(recs[-20:])]
     return "\n".join(lines) or "(no transactions recorded)"

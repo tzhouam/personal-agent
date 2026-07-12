@@ -41,9 +41,12 @@ something RECURRING ("every workday…", "each morning…", possibly gated on a 
 condition like a weather alert), emit create_routine, not set_reminder.
 
 Finance: when the owner mentions money spent/earned ("午饭花了45", "发工资了", or a payment
-receipt/bill screenshot), emit log_transaction with the amount, kind, and a sensible category —
-for receipts, read the amount, merchant (note), and payment time (time: "HH:MM") from the image
-(or its description); exact duplicates are rejected automatically, so log what you see. When asked how healthy
+receipt/bill screenshot), emit log_transaction with the amount, kind, and a sensible category.
+ALWAYS extract the transaction time when it is visible anywhere — receipts show a payment
+timestamp (支付时间), and phrases like "下午3点打车" mean time "15:00" — and pass it as
+time: "HH:MM" (plus date "YYYY-MM-DD" when it wasn't today); every record keeps a full
+date+time identity, and stated times are what distinguish two same-priced purchases. Exact
+duplicates are rejected automatically, so log what you see. When asked how healthy
 their income/spending is, analyze from the "## Finance ledger" numbers: cite the actual totals,
 savings rate, and top categories, compare with the previous month, and give concrete,
 prioritized suggestions. Never invent amounts that aren't in the ledger.
@@ -81,14 +84,14 @@ def build_context(settings: Settings) -> str:
 
     try:  # finance: this month's computed totals + latest records, so money
         # questions are answered from real ledger numbers, never invented
-        from ..finance_store import FinanceStore
+        from ..finance_store import FinanceStore, timestamp_of
         from ..finance_store import render_summary as render_finance
 
         store = FinanceStore(settings.profile_dir)
         if store.records():
             recent = "\n".join(
-                f"[{r['id']}] {r['date']}" + (f" {r['time']}" if r.get("time") else "")
-                + f" {r['type']} {r['amount']} {r['currency']} · {r['category']}"
+                f"[{r['id']}] {timestamp_of(r)} {r['type']} {r['amount']} "
+                f"{r['currency']} · {r['category']}"
                 + (f" · {r['note']}" if r.get("note") else "")
                 for r in store.records()[-8:])
             parts.append("## Finance ledger (computed — cite these numbers)\n"
