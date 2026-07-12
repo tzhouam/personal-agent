@@ -321,8 +321,10 @@ voided rather than deleted). Each record carries a full `YYYY-MM-DD HH:MM`
 identity — the transaction time read off the receipt or your message ("下午3
 点打车" → 15:00), else the logging clock time — plus amount, income/expense,
 context note, and currency. Stated times are what distinguish two same-priced
-purchases; sending the same receipt twice, or repeating a payment the agent
-already logged, is rejected with a pointer to the existing record. Wrong
+purchases; sending the same receipt twice — or a receipt for a payment the
+agent already logged, however the note is worded — is rejected with a
+pointer to the existing record, and a same-day same-amount near-miss gets
+a ⚠ warning so you can void one if it's the same bill. Wrong
 category? "把f37改成housing" or `/fin cat f37 housing`; wrong entry?
 `/fin void f37` (voided, never deleted). Then ask things like *"这个月收支健康吗？怎么改善？"* — the monthly
 totals, savings rate, and category breakdown are computed by code and handed

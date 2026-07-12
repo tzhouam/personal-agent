@@ -83,13 +83,22 @@ class FinanceStore:
         currency = str(currency or "CNY").upper()[:8]
         note = str(note or "")[:200]
         data = self.load()
-        # Dedup uses the STATED time only: an auto-filled clock time would
-        # make the same forgotten-and-resent entry look unique every minute.
+        # Dedup, two identities (stated times only — an auto-filled clock
+        # time would make a forgotten-and-resent entry look unique):
+        # 1. bill identity: same kind+amount+currency+date+STATED time is the
+        #    same transaction regardless of note wording — a receipt image of
+        #    an already-recorded payment must not double-log even when the
+        #    merchant is written differently;
+        # 2. full signature incl. note, for entries without a stated time.
         signature = _signature(kind, amount, currency, when, stated, note)
         for r in data["records"]:
-            if not r.get("voided") and _signature(
-                    r["type"], r["amount"], r["currency"], r["date"],
-                    _stated_time(r), r.get("note", "")) == signature:
+            if r.get("voided"):
+                continue
+            if stated and (r["type"], r["amount"], r["currency"], str(r["date"]),
+                           _stated_time(r)) == (kind, amount, currency, when, stated):
+                return "duplicate", r
+            if _signature(r["type"], r["amount"], r["currency"], r["date"],
+                          _stated_time(r), r.get("note", "")) == signature:
                 return "duplicate", r
         now = datetime.now()
         record = {"id": f"f{data['next_id']}", "date": when,
@@ -106,6 +115,19 @@ class FinanceStore:
         data["records"].append(record)
         self._save(data, f"finance: {kind} {record['amount']} {record['category']} ({record['id']})")
         return "created", record
+
+    def similar(self, record: dict) -> list[dict]:
+        """Active records that look like possible duplicates of `record`
+        despite passing dedup: same kind, amount, currency, and date but a
+        different (or missing) stated time. Surfaced as a warning after
+        logging, never an automatic rejection — two same-priced purchases in
+        one day are legitimate."""
+        return [r for r in self.records(str(record["date"])[:7])
+                if r["id"] != record["id"] and not r.get("voided")
+                and r["type"] == record["type"]
+                and r["amount"] == record["amount"]
+                and r["currency"] == record["currency"]
+                and str(r["date"]) == str(record["date"])]
 
     def set_category(self, record_id: str, category: str) -> str | None:
         """Recategorize an active record (owner corrections like 物业费 →

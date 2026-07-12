@@ -347,10 +347,18 @@ def _log_transaction(settings: Settings, p: dict) -> str:
                 + "); add a differing time/note if it really is a second transaction")
     from ..finance_store import timestamp_of
 
-    return (f"logged {record['id']}: {record['type']} {record['amount']} "
+    line = (f"logged {record['id']}: {record['type']} {record['amount']} "
             f"{record['currency']} · {record['category']}"
             + (f" · {record['note']}" if record["note"] else "")
             + f" · {timestamp_of(record)}")
+    lookalikes = FinanceStore(settings.profile_dir).similar(record)
+    if lookalikes:
+        ids = ", ".join(f"{r['id']} ({timestamp_of(r)}"
+                        + (f" · {r['note']}" if r.get("note") else "") + ")"
+                        for r in lookalikes[:3])
+        line += (f"\n⚠ same amount already recorded that day: {ids} — if this "
+                 f"is the same bill, void one ({record['id']} or the older id)")
+    return line
 
 
 def _void_transaction(settings: Settings, p: dict) -> str:

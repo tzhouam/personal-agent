@@ -224,10 +224,13 @@ never-delete (wrong entries are *voided*, miscategorized ones moved with
 `recategorize_transaction`). Every record carries a full `YYYY-MM-DD HH:MM`
 identity: the stated transaction time read off a receipt or the owner's
 phrasing, else the logging clock time (`time_source: stated|auto`). Dedup
-uses the signature kind + amount + currency + date + **stated** time +
-context note — auto-filled times are excluded so a forgotten-and-resent
-entry is still caught, while stated times distinguish two genuine
-same-priced purchases.
+runs on two identities (stated times only — auto-filled clock times are
+excluded so a forgotten-and-resent entry is still caught): the **bill
+identity** kind + amount + currency + date + stated time, which rejects a
+receipt image of an already-recorded payment even when the note is worded
+differently; and the full signature including the note for entries without
+a stated time. A same-day same-amount near-miss is logged but flagged with
+a ⚠ warning naming the lookalike records.
 
 Records enter through the typed `log_transaction` action: spoken amounts
 ("午饭花了45") or amounts the model reads off a payment-receipt screenshot.

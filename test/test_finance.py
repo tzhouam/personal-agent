@@ -177,3 +177,29 @@ def test_recategorize(settings):
     out = run_action("recategorize_transaction",
                      {"id": "f1", "category": "misc"}, settings)
     assert "not a standard category" in out
+
+
+def test_bill_identity_dedups_across_note_wordings(settings):
+    # owner scenario: a receipt image of an already-recorded payment must not
+    # double-log even when the merchant/note is worded differently —
+    # (date, stated time, amount) IS the bill identity
+    store = FinanceStore(settings.profile_dir)
+    assert store.add("expense", 68, note="面点王", time="12:30")[0] == "created"
+    status, existing = store.add("expense", 68, note="深圳面点王餐饮有限公司",
+                                 time="12:30", category="food")
+    assert status == "duplicate" and existing["id"] == "f1"
+    assert len(store.records()) == 1
+    # different stated time → genuinely another purchase
+    assert store.add("expense", 68, note="深圳面点王餐饮有限公司", time="18:40")[0] == "created"
+
+
+def test_similar_warning_on_same_day_amount(settings):
+    out1 = run_action("log_transaction",
+                      {"kind": "expense", "amount": 45, "note": "午饭"}, settings)
+    assert "⚠" not in out1
+    # same amount, same day, but a stated time → logged with a warning
+    out2 = run_action("log_transaction",
+                      {"kind": "expense", "amount": 45, "note": "星巴克",
+                       "time": "16:00"}, settings)
+    assert out2.startswith("logged f2")
+    assert "same amount already recorded that day: f1" in out2
