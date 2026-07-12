@@ -82,16 +82,13 @@ class Settings(BaseSettings):
     # Vision (image understanding in chat). With a natively multimodal main
     # LLM (e.g. qwen3.6-plus), set llm_supports_images and chat attaches
     # images directly to the model call — no separate vision backend runs.
-    # Otherwise images are described first (vision.py): PREFER the remote
-    # multimodal API (owner decision 2026-07-11); the local VLM (one-shot on
-    # the freest GPU) is only the no-key fallback.
+    # Otherwise images are described first via a remote multimodal API
+    # (vision.py). Models never run locally (owner decision 2026-07-12).
     llm_supports_images: bool = False
     vision_api_key: str = ""
     vision_base_url: str = ""
     vision_model: str = ""
     vision_provider: str = "anthropic"  # anthropic | openai (OpenAI/Gemini/DashScope)
-    vision_local_model_path: str = ""   # e.g. /models/hub/Qwen3-VL-8B-Instruct
-    vision_min_free_gib: float = 20     # GPU headroom the local worker requires
     vision_max_images: int = 3          # per message; extras are dropped
 
     # Local service daemon (`assistant serve`) — loopback-only HTTP consumed

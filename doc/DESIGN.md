@@ -204,13 +204,11 @@ Attached images (a WeChat photo, an email attachment, `assistant ask
   model call (`llm.py`) — the model sees the pixels, no separate vision pass.
 - **Text-only main LLM**: a describe-then-reason fallback (`vision.py`)
   writes one detailed description per image — scene plus verbatim text
-  transcription — and the chat prompt carries it as an "## Attached images"
-  context block. Backends chain like search: a configured multimodal API
-  first (`VISION_API_KEY`/`VISION_MODEL`, Anthropic- or OpenAI-style wire
-  format via `VISION_PROVIDER`), then — only keyless — a local VLM
-  (`VISION_LOCAL_MODEL_PATH`, e.g. Qwen3-VL) run **one-shot in a subprocess
-  on the CUDA device with the most free memory**: load, describe, exit, so
-  the daemon never holds GPU memory between images.
+  transcription — via a configured multimodal API
+  (`VISION_API_KEY`/`VISION_MODEL`, Anthropic- or OpenAI-style wire format
+  via `VISION_PROVIDER`), and the chat prompt carries it as an
+  "## Attached images" context block. Models never run locally — image
+  understanding is API-only by design.
 
 WeChat delivery rides the gateway's `message_received` hook (which carries
 the staged media path) into a short TTL cache the reply hook drains; the

@@ -29,7 +29,7 @@ explicitly point it at.
 | 📄 **Résumé sync** | Edits your LaTeX résumé from the profile (Overleaf git-bridge or any git remote), gated on a compile and your explicit approval — never auto-pushed. |
 | 💬 **Chat + tasks** | Message it from email or WeChat: ask questions, manage todos/reading, run pipeline phases on demand, set reminders and recurring routines, search the web, or hand it a novel multi-step task (“book a dinner for six Friday”) that it plans and tracks. |
 | 💰 **Finance ledger** | Tell it what you spent or earned (or send a payment-receipt screenshot) — records land in a git-versioned `finance.yaml` in your profile repo, never leaving the machine. Ask "这个月收支健康吗" and it analyzes real computed totals: savings rate, category breakdown, month-over-month. |
-| 🖼️ **Image understanding** | Send a photo or screenshot (WeChat, email attachment, `assistant ask --image`). With a multimodal main model it sees the image directly; text-only models get a describe-then-reason fallback (vision API, or a local VLM one-shot on your own GPU). |
+| 🖼️ **Image understanding** | Send a photo or screenshot (WeChat, email attachment, `assistant ask --image`). With a multimodal main model it sees the image directly; text-only models get a describe-then-reason fallback via a vision model API. |
 | 📊 **Self-measuring** | Per-step metrics (success, latency, acceptance rates, triage precision, reading done-rate) in a local SQLite table, surfaced in the digest and used to auto-tune how much it surfaces. |
 
 ## How it works, in one breath

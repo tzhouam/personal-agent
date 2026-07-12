@@ -1,8 +1,6 @@
 """Vision chain: input validation, backend fallback order, and the plumbing
 that carries image paths from chat entry points into the prompt."""
 
-import json
-
 import assistant.vision as vision
 from assistant.chat.agent import handle_message
 from assistant.vision import describe_images, media_type_for, render_image_context
@@ -45,36 +43,12 @@ def test_describe_images_validates_paths(settings, tmp_path, monkeypatch):
     assert "too large" in out[3]
 
 
-def test_describe_images_falls_back_to_local(settings, tmp_path, monkeypatch):
-    pic = _png(tmp_path)
-    monkeypatch.setattr(vision, "_remote_describe", lambda s, p: None)  # unconfigured
-    monkeypatch.setattr(vision, "_local_describe", lambda s, p: ["local desc"])
-    assert describe_images(settings, [str(pic)]) == ["local desc"]
-
-
 def test_describe_images_survives_dead_chain(settings, tmp_path, monkeypatch):
     pic = _png(tmp_path)
     monkeypatch.setattr(vision, "_remote_describe",
                         lambda s, p: (_ for _ in ()).throw(RuntimeError("api down")))
-    monkeypatch.setattr(vision, "_local_describe", lambda s, p: None)
     out = describe_images(settings, [str(pic)])
     assert "no vision backend" in out[0]
-
-
-def test_local_describe_unconfigured_returns_none(settings):
-    assert vision._local_describe(settings, ["x.png"]) is None
-
-
-def test_local_describe_parses_worker_output(settings, tmp_path, monkeypatch):
-    settings.vision_local_model_path = str(tmp_path)  # any existing dir
-
-    class Proc:
-        returncode = 0
-        stdout = json.dumps({"descriptions": ["a red square"]})
-        stderr = ""
-
-    monkeypatch.setattr(vision.subprocess, "run", lambda *a, **k: Proc())
-    assert vision._local_describe(settings, ["x.png"]) == ["a red square"]
 
 
 def test_render_image_context():
@@ -162,19 +136,6 @@ def test_openai_provider_describe(settings, tmp_path, monkeypatch):
     assert calls["url"] == "https://api.openai.com/v1/chat/completions"
     assert calls["model"] == "gpt-5-mini"
     assert calls["content"][0]["image_url"]["url"].startswith("data:image/png;base64,")
-
-
-def test_remote_preferred_over_local(settings, tmp_path, monkeypatch):
-    # owner decision: with an API key configured the local VLM must never run
-    pic = _png(tmp_path)
-    settings.vision_api_key = "sk-test"
-    settings.vision_model = "some-vlm"
-    settings.vision_local_model_path = str(tmp_path)
-    monkeypatch.setattr(vision, "_openai_describe", lambda s, p: ["api desc"])
-    monkeypatch.setattr(vision, "_local_describe",
-                        lambda s, p: (_ for _ in ()).throw(AssertionError("local ran")))
-    settings.vision_provider = "openai"
-    assert describe_images(settings, [str(pic)]) == ["api desc"]
 
 
 def test_native_multimodal_attaches_images(settings, tmp_path, monkeypatch):
