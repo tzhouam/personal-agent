@@ -304,7 +304,8 @@ slash commands (no LLM call, instant):
 | `/read`, `/read done <id>`, `/read unrelated <id>` | Manage reading list |
 | `/digest` | Trigger a full daily run |
 | `/run <phase>` | Run one phase (`research`/`website`/`todos`/`resume`/`curate`/`consolidate`) |
-| `/plan <task>` | Plan a novel multi-step task, tracked as a todo |
+| `/task <task>` | Agentically EXECUTE a task in the background; result arrives on WeChat |
+| `/plan <task>` | Plan a novel multi-step task, tracked as a todo (when it needs you) |
 | `/search <query>` | Web search with a synthesized answer |
 | `/remind <+2h\|HH:MM> <message>` · `/remind list\|cancel <id>` | One-shot reminders |
 | `/routine list\|cancel <id>` | Recurring routines (create by just describing one) |
@@ -347,6 +348,16 @@ patterns from the finance ledger inform food advice, your work profile
 and routines inform exercise advice, and meal↔expense pairs (matched by
 date and time) connect the two ledgers. Wellness guidance only — it will
 point you to a doctor for anything medical.
+
+### Executing novel tasks
+
+Hand it something with no built-in pipeline — *"查一下明天深圳的天气，会下雨
+就提醒我明早8点带伞"* — and it runs the task itself: a step-by-step loop
+that searches, acts through its own capabilities (reminders, todos, ledgers,
+phases), reviews each result, adapts after failures, and messages you the
+report on WeChat when done (`/task`, or just ask). Each run's full step
+trace is kept under `~/.personal-agent/tasks/` for audit. Budgeted: at most
+12 steps, and three consecutive failures stop it with a partial report.
 
 ### Planning novel tasks
 

@@ -271,6 +271,17 @@ nutrient needs — and the chat context carries them as a "## Cross-links"
 block; the system prompt instructs the model to weave every section (work
 profile, routines, finance, health) into any single-domain analysis.
 
+### Agentic task execution
+
+`task_runner.py` handles requests with no built-in pipeline (the copilot
+pattern): a bounded ReAct loop — one registry action per turn, real outcome
+fed back with the same `looks_failed` review as chat, adapt on failure,
+finish with a report. Budgets: 12 turns, 3 consecutive failures. Runs
+detached (`assistant task` via Popen, like trigger_run), persists every turn
+to `DATA_DIR/tasks/<id>.json`, and delivers the report over WeChat.
+`execute_task`/`plan_task`/`trigger_run` are excluded from its action set
+(no recursion, no surprise pipeline runs).
+
 ### Proactive messaging
 
 `notify.py` (`send_wechat`) pushes messages to the owner without an inbound
