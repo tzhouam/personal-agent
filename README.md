@@ -5,8 +5,9 @@ activity into something useful every morning. It reads what you did (GitHub,
 email, browser history), maintains an evidence-backed profile of your skills
 and projects, publishes a personal website and résumé from it, and emails you
 a triaged digest — action-needed notifications, new papers worth reading, and
-industry news — with a chat interface (email, WeChat) for asking it things and
-handing it tasks.
+industry news. Chat with it over WeChat or email: ask questions, send photos
+and receipts, track your money and health, or hand it multi-step tasks it
+executes on its own and reports back.
 
 Everything runs locally and stores your data on your own machine; the only
 things that leave are LLM API calls, the digest email, and the sites/repos you
@@ -125,6 +126,7 @@ setup and the timezone caveat.
 | `assistant show-profile` | Print a profile summary |
 | `assistant todo list\|add\|done` · `assistant reading list\|done\|unrelated` | Manage todos / reading list |
 | `assistant ask "…" [--image photo.png]` | Ask the chat agent one question locally (images welcome) |
+| `assistant task "…" [--no-notify]` | Agentically execute a multi-step task now (step trace under `~/.personal-agent/tasks/`) |
 | `assistant serve` | Local HTTP daemon (chat/actions API for the WeChat bridge) |
 | `assistant send-test-email` | Verify email delivery |
 | `assistant resume-init\|resume-status\|approve-resume` | Résumé sync + approval gate |
@@ -149,7 +151,7 @@ Everything is under `~/.personal-agent/` (override with `DATA_DIR`):
 ~/.personal-agent/
 ├── profile/          git repo: profile.yaml (source of truth) + PROFILE.md render
 │   ├── aliases.yaml    your initiative groupings (owner-editable)
-│   ├── todos.yaml  reading_list.yaml  finance.yaml
+│   ├── todos.yaml  reading_list.yaml  finance.yaml  health.yaml
 │   └── …
 ├── events.db         SQLite: raw observation log, seen-store, metrics
 ├── runs/<run_id>/    per-run artifacts (for --resume and audit)

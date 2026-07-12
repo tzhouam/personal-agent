@@ -198,7 +198,9 @@ correct and re-execute — retried outcomes appear as "(retry) …" in the reply
 Duplicate rejections never retry: that's dedup working as intended.
 
 Actions: todo/reading management, `trigger_run`, `run_phase`, `plan_task`,
-`web_search`, reminders, routines, status/profile queries.
+`execute_task`, `web_search`, reminders, routines, the finance ledger
+(log/void/recategorize/summary), the health log (meals/exercise/weight/
+profile/needs/summary), and status/profile queries.
 
 ### Images
 
@@ -395,6 +397,10 @@ profile repo.
 - **A new research source** — add it to `config/sources.yaml` (RSS/Atom URL,
   language). Per-source health tracking and the score floor handle the rest.
 - **A new metric** — record it from the phase node; add it to `build_health`.
+- **A new personal sub-store** — follow `finance_store.py`/`health_store.py`:
+  a YAML file in the profile repo, never-delete records with the stated-or-
+  auto time identity, code-computed summaries, typed chat actions, and a
+  context block; wire its joins into `insights.py`.
 
 The codebase favors small, testable, pure functions and a large test suite
 (`test/`, run with `pytest`). When you resolve a recurring operational failure,
@@ -415,6 +421,9 @@ src/assistant/
 ├── vision.py           image → description fallback (remote API only)
 ├── profile_store.py    the profile: apply_ops, git, aliases, render
 ├── finance_store.py    income/expense ledger (finance.yaml, dedup, summaries)
+├── health_store.py     health subprofile (health.yaml: body, meals, exercise)
+├── insights.py         cross-links between the sub-stores (computed joins)
+├── task_runner.py      agentic executor for novel multi-step tasks
 ├── events_store.py     evidence log + seen-store + metrics (SQLite/FTS5)
 ├── todo_store.py       todos + reading list (YAML in the profile repo)
 ├── urgency.py          the todo urgency metric
