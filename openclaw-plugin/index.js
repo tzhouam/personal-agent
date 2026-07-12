@@ -210,6 +210,9 @@ export function parseSlash(body) {
     if (rest === "list") return { action: "list_transactions", params: {} };
     const listMonth = rest.match(/^list\s+(\d{4}-\d{2})$/);
     if (listMonth) return { action: "list_transactions", params: { month: listMonth[1] } };
+    const recat = rest.match(/^cat\s+(\S+)\s+(\S+)$/);
+    if (recat) return { action: "recategorize_transaction",
+                        params: { id: recat[1], category: recat[2] } };
     const voided = rest.match(/^void\s+(\S+)$/);
     if (voided) return { action: "void_transaction", params: { id: voided[1] } };
     const logged = rest.match(/^(income|expense)\s+([\d.]+)(?:\s+(\S+))?(?:\s+(.+))?$/s);
@@ -219,7 +222,7 @@ export function parseSlash(body) {
                          ...(logged[3] ? { category: logged[3] } : {}),
                          ...(logged[4] ? { note: logged[4] } : {}) } };
     return { usage: "usage: /fin [sum [YYYY-MM]] | /fin list [YYYY-MM] | " +
-                    "/fin <income|expense> <amount> [category] [note] | /fin void <id>" };
+                    "/fin <income|expense> <amount> [category] [note] | /fin cat <id> <category> | /fin void <id>" };
   }
   if (family === "todo") {
     if (!rest || rest === "list") return { action: "list_todos", params: {} };

@@ -107,6 +107,19 @@ class FinanceStore:
         self._save(data, f"finance: {kind} {record['amount']} {record['category']} ({record['id']})")
         return "created", record
 
+    def set_category(self, record_id: str, category: str) -> str | None:
+        """Recategorize an active record (owner corrections like 物业费 →
+        housing). Returns the old category, or None when the id is unknown
+        or voided."""
+        data = self.load()
+        for r in data["records"]:
+            if r["id"] == record_id and not r.get("voided"):
+                old = r["category"]
+                r["category"] = str(category).strip().lower()[:30]
+                self._save(data, f"finance: recategorize {record_id} {old}→{r['category']}")
+                return old
+        return None
+
     def void(self, record_id: str) -> bool:
         """Mark a record voided (never delete). True if one was voided."""
         data = self.load()

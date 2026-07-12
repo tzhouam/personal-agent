@@ -9,7 +9,8 @@ def test_registry_covers_the_llm_action_set():
                            "run_phase", "plan_task", "web_search",
                            "set_reminder", "cancel_reminder",
                            "create_routine", "cancel_routine", "unrelated_reading",
-                           "log_transaction", "void_transaction", "finance_summary"}
+                           "log_transaction", "void_transaction", "finance_summary",
+                           "recategorize_transaction"}
     block = prompt_block()
     for name in llm_actions:
         assert name in block

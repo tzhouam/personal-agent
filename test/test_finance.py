@@ -161,3 +161,19 @@ def test_log_transaction_reports_duplicate(settings):
                                          "note": "面点王", "time": "12:30"}, settings)
     assert out.startswith("NOT logged — duplicate of f1")
     assert "12:30" in out
+
+
+def test_recategorize(settings):
+    run_action("log_transaction", {"kind": "expense", "amount": 456.96,
+                                   "note": "物业管理服务中心",
+                                   "category": "shopping"}, settings)
+    out = run_action("recategorize_transaction",
+                     {"id": "f1", "category": "housing"}, settings)
+    assert out == "f1 recategorized: shopping → housing"
+    assert FinanceStore(settings.profile_dir).records()[0]["category"] == "housing"
+    assert "no active transaction" in run_action(
+        "recategorize_transaction", {"id": "f9", "category": "housing"}, settings)
+    # off-list categories are kept but flagged
+    out = run_action("recategorize_transaction",
+                     {"id": "f1", "category": "misc"}, settings)
+    assert "not a standard category" in out

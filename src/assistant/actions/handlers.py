@@ -387,3 +387,17 @@ def _finance_summary(settings: Settings, p: dict) -> str:
     store = FinanceStore(settings.profile_dir)
     return render_summary(store.summary(str(p["month"]) if p.get("month") else None),
                           currency=settings.finance_currency)
+
+
+def _recategorize_transaction(settings: Settings, p: dict) -> str:
+    """Move ledger record `id` to `category`; reports old → new or why not."""
+    from ..finance_store import CATEGORIES, FinanceStore
+
+    record_id, category = str(p.get("id", "")), str(p.get("category", "")).strip().lower()
+    if not category:
+        return "recategorize needs a category, e.g. housing"
+    old = FinanceStore(settings.profile_dir).set_category(record_id, category)
+    if old is None:
+        return f"no active transaction {record_id!r}"
+    hint = "" if category in CATEGORIES else f" (note: not a standard category — {', '.join(CATEGORIES)})"
+    return f"{record_id} recategorized: {old} → {category}{hint}"

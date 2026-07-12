@@ -23,6 +23,7 @@ from .handlers import (
     _list_transactions,
     _log_transaction,
     _plan_task,
+    _recategorize_transaction,
     _run_phase,
     _run_status,
     _set_reminder,
@@ -212,7 +213,8 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                 "category": {"required": False,
                              "desc": "food/transport/housing/utilities/entertainment/"
                                      "shopping/health/education/travel/salary/bonus/"
-                                     "investment/transfer/other"},
+                                     "investment/transfer/other — 物业费/房租/mortgage → "
+                                     "housing; 水电燃气 → utilities"},
                 "note": {"required": False,
                          "desc": "context: merchant/what it was for — used for dedup"},
                 "date": {"required": False, "desc": "YYYY-MM-DD, default today"},
@@ -226,6 +228,17 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                        '"category": "food", "note": "午饭", "time": "12:30"}   '
                        '# kind: income|expense; note=context, time from receipt if shown; '
                        'duplicates (same kind+amount+currency+date+time+note) are rejected',
+        slash="fin",
+    ),
+    Action(
+        name="recategorize_transaction",
+        description="move a ledger record to another category (owner corrections)",
+        handler=_recategorize_transaction,
+        params={"id": {"required": True, "desc": "record id, e.g. f37"},
+                "category": {"required": True, "desc": "target category"}},
+        llm=True,
+        prompt_example='{"type": "recategorize_transaction", "id": "f37", '
+                       '"category": "housing"}',
         slash="fin",
     ),
     Action(
