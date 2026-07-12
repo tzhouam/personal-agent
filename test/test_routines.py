@@ -101,3 +101,63 @@ def test_routine_actions(settings):
     assert run_action("cancel_routine", {"id": "rt1"}, settings) == "routine rt1 cancelled"
     assert "couldn't create routine" in run_action(
         "create_routine", {"task": "x", "time": "noon"}, settings)
+
+
+def test_valid_days_monthly_yearly():
+    from assistant.routines import valid_days
+
+    assert valid_days("monthly:1") and valid_days("monthly:31")
+    assert not valid_days("monthly:0") and not valid_days("monthly:32")
+    assert not valid_days("monthly:abc")
+    assert valid_days("yearly:03-15") and valid_days("yearly:12-31")
+    assert not valid_days("yearly:13-01") and not valid_days("yearly:02-30")
+    assert not valid_days("yearly:0315")
+    assert valid_days("workdays") and not valid_days("fortnightly")
+
+
+def test_day_matches_monthly_clamps():
+    from datetime import date
+
+    from assistant.routines import day_matches
+
+    assert day_matches("monthly:15", date(2026, 7, 15))
+    assert not day_matches("monthly:15", date(2026, 7, 14))
+    # clamped to the month's last day
+    assert day_matches("monthly:31", date(2026, 6, 30))
+    assert not day_matches("monthly:31", date(2026, 6, 29))
+    assert day_matches("monthly:31", date(2026, 2, 28))  # non-leap Feb
+    assert day_matches("monthly:31", date(2028, 2, 29))  # leap Feb
+
+
+def test_day_matches_yearly_and_leap():
+    from datetime import date
+
+    from assistant.routines import day_matches
+
+    assert day_matches("yearly:03-15", date(2026, 3, 15))
+    assert not day_matches("yearly:03-15", date(2026, 3, 16))
+    assert not day_matches("yearly:03-15", date(2026, 4, 15))
+    # Feb-29 anniversaries fire Feb 28 in non-leap years, Feb 29 in leap years
+    assert day_matches("yearly:02-29", date(2027, 2, 28))
+    assert day_matches("yearly:02-29", date(2028, 2, 29))
+    assert not day_matches("yearly:02-29", date(2028, 2, 28))
+
+
+def test_store_monthly_yearly_due(settings):
+    store = RoutineStore(settings.data_dir)
+    rent = store.add("交房租", "09:00", days="monthly:1")
+    domain = store.add("续域名", "10:00", days="yearly:03-15")
+    assert rent and domain
+    assert store.add("bad", "09:00", days="monthly:40") is None
+    due = store.due(datetime(2026, 8, 1, 9, 30))
+    assert [r["id"] for r in due] == [rent["id"]]
+    due = store.due(datetime(2027, 3, 15, 10, 30))
+    assert [r["id"] for r in due] == [domain["id"]]
+    assert store.due(datetime(2026, 8, 2, 9, 30)) == []
+
+
+def test_create_routine_action_monthly(settings):
+    out = run_action("create_routine",
+                     {"task": "交房租", "time": "09:00", "days": "monthly:1"},
+                     settings)
+    assert "rt1 created" in out and "monthly:1" in out

@@ -234,7 +234,8 @@ def _create_routine(settings: Settings, p: dict) -> str:
         days=str(p.get("days") or "daily"), condition=str(p.get("condition") or ""))
     if routine is None:
         return ("couldn't create routine — time must be HH:MM and days one of "
-                "daily/workdays/weekends or e.g. 'mon,wed,fri'")
+                "daily/workdays/weekends, 'mon,wed,fri', 'monthly:<1-31>', "
+                "or 'yearly:<MM-DD>'")
     when = f"{routine['days']} at {routine['time']}"
     gate = f", only when: {routine['condition']}" if routine["condition"] else ""
     return f"routine {routine['id']} created — {when}{gate}: {routine['task']}"

@@ -1,7 +1,8 @@
 """Recurring routines the owner creates from WeChat — with optional
 real-world conditions.
 
-A routine = WHEN (time + days: daily / workdays / weekends / a day list)
+A routine = WHEN (time + days: daily / workdays / weekends / a day list /
+'monthly:<dom>' / 'yearly:<MM-DD>')
 + optional CONDITION (free text — "there is a weather alert in Shenzhen",
 "vLLM shipped a new release" — evaluated at fire time by web search + an
 LLM judge, conservative default false) + TASK (free text, run through the
@@ -13,6 +14,7 @@ fires at most once per day (the day is marked checked even when the
 condition doesn't hold — "check at 07:30" means one check, not polling).
 """
 
+import calendar
 import logging
 from datetime import date, datetime
 from pathlib import Path
@@ -42,6 +44,50 @@ def parse_days(days: str) -> set[int] | None:
         return _DAY_GROUPS[days]
     parsed = {_DAY_NAMES.get(d.strip()[:3]) for d in days.split(",")}
     return None if None in parsed or not parsed else parsed
+
+
+def valid_days(days: str) -> bool:
+    """True when `days` is any supported schedule: a weekly spec
+    (daily/workdays/weekends/day list), 'monthly:<1-31>' (day of month), or
+    'yearly:<MM-DD>' (one date a year)."""
+    days = str(days or "").strip().lower()
+    if days.startswith("monthly:"):
+        try:
+            return 1 <= int(days.split(":", 1)[1]) <= 31
+        except ValueError:
+            return False
+    if days.startswith("yearly:"):
+        try:
+            datetime.strptime(days.split(":", 1)[1].strip(), "%m-%d")
+            return True
+        except ValueError:
+            return False
+    return parse_days(days) is not None
+
+
+def day_matches(days: str, today: date) -> bool:
+    """Does schedule `days` fire on `today`? Weekly specs match by weekday.
+    'monthly:D' matches day D, clamped to the month's last day (monthly:31
+    fires Jun 30 / Feb 28-29). 'yearly:MM-DD' matches that date, with 02-29
+    falling back to 02-28 in non-leap years (never silently skipping a
+    year)."""
+    days = str(days or "daily").strip().lower()
+    if days.startswith("monthly:"):
+        try:
+            target = int(days.split(":", 1)[1])
+        except ValueError:
+            return False
+        last = calendar.monthrange(today.year, today.month)[1]
+        return today.day == min(target, last)
+    if days.startswith("yearly:"):
+        try:
+            month, dom = (int(x) for x in days.split(":", 1)[1].strip().split("-"))
+        except ValueError:
+            return False
+        if (month, dom) == (2, 29) and not calendar.isleap(today.year):
+            month, dom = 2, 28
+        return (today.month, today.day) == (month, dom)
+    return today.weekday() in (parse_days(days) or set())
 
 
 class RoutineStore:
@@ -75,7 +121,7 @@ class RoutineStore:
             datetime.strptime(str(time).strip(), "%H:%M")
         except ValueError:
             return None
-        if parse_days(days) is None:
+        if not valid_days(days):
             return None
         data = self._load()
         routine = {"id": f"rt{data['next_id']}", "task": str(task)[:400],
@@ -107,7 +153,7 @@ class RoutineStore:
         now = now or datetime.now()
         today = now.date().isoformat()
         return [r for r in self.active()
-                if now.weekday() in (parse_days(r["days"]) or set())
+                if day_matches(r["days"], now.date())
                 and r["time"] <= now.strftime("%H:%M")
                 and r.get("last_checked") != today]
 

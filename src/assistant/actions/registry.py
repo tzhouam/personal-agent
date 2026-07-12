@@ -160,13 +160,16 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         params={"task": {"required": True, "desc": "what to do/say each time"},
                 "time": {"required": True, "desc": "HH:MM"},
                 "days": {"required": False,
-                         "desc": "daily|workdays|weekends|'mon,wed,fri' (default daily)"},
+                         "desc": "daily|workdays|weekends|'mon,wed,fri'|"
+                                 "'monthly:<1-31>' (day of month)|'yearly:<MM-DD>' "
+                                 "(default daily)"},
                 "condition": {"required": False,
                               "desc": "free-text gate checked at fire time via web "
                                       "search, e.g. 'there is a weather alert in Shenzhen'"}},
         llm=True,
         prompt_example='{"type": "create_routine", "task": "...", "time": "08:30", '
-                       '"days": "workdays", "condition": "<optional real-world gate>"}',
+                       '"days": "workdays", "condition": "<optional real-world gate>"}'
+                       '   # days also: "monthly:1" (每月1号), "yearly:03-15" (每年3月15日)',
         slash="routine",
     ),
     Action(

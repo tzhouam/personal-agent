@@ -340,6 +340,11 @@ makes *your* steps as easy as possible rather than pretending to do them.
   open PRs"*. Conditions are evaluated at fire time (web search + LLM judge,
   conservatively). Managed with `/routine`.
 
+  Schedules go beyond weekdays: *"每月1号提醒我交房租"* (`monthly:1`) or
+  *"every year on March 15 remind me to renew the domain"* (`yearly:03-15`).
+  Day-of-month clamps to short months (`monthly:31` fires Jun 30 / Feb 28),
+  and `yearly:02-29` falls back to Feb 28 in non-leap years.
+
 Both require WeChat configured (they push proactively).
 
 ---
