@@ -342,8 +342,11 @@ ingredients checked against the nutrients you've asked it to track
 ("帮我记着要补维生素D"). Set body facts once ("我身高178，1999年的") and then
 ask *"我最近健康状况怎么样？怎么改善？"* — BMI, weight trend, exercise
 minutes, and daily calorie/protein averages are computed by code, so the
-advice cites your real numbers. Wellness guidance only — it will point you
-to a doctor for anything medical.
+advice cites your real numbers — and it links across domains: eating-out
+patterns from the finance ledger inform food advice, your work profile
+and routines inform exercise advice, and meal↔expense pairs (matched by
+date and time) connect the two ledgers. Wellness guidance only — it will
+point you to a doctor for anything medical.
 
 ### Planning novel tasks
 

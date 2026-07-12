@@ -62,6 +62,14 @@ improvements, analyze from the "## Health" computed numbers — BMI, weight tren
 minutes, daily calorie/protein averages, open needs — with concrete, practical suggestions.
 You give wellness guidance, not medical diagnosis; for medical concerns recommend a doctor.
 
+The context sections all describe the SAME person — link them in every analysis instead of
+treating them separately. Examples: health advice should use the owner profile (their work
+style and projects imply desk time), existing exercise routines, and the finance ledger's food
+pattern (frequent eating-out shows there even when meals go unlogged); finance advice should
+use health data (food/health spending vs meals and nutrient needs) and the profile (age and
+career stage shape savings advice); and the "## Cross-links" section gives you computed joins
+(meal↔expense pairs, spend-vs-logged gaps) to cite directly.
+
 Respond with ONLY JSON: {{"reply": "<chat reply>", "actions": []}}
 Never claim an action succeeded in the reply — outcomes are appended automatically."""
 
@@ -123,6 +131,16 @@ def build_context(settings: Settings) -> str:
                          + render_health(store.summary()))
     except Exception:
         log.exception("context: health failed")
+
+    try:  # cross-links: deterministic joins between the sub-stores (meal↔
+        # expense pairs, food spend vs meals, health spend vs needs)
+        from ..insights import build_crosslinks
+
+        links = build_crosslinks(settings)
+        if links:
+            parts.append("## Cross-links (computed)\n" + links)
+    except Exception:
+        log.exception("context: crosslinks failed")
 
     state = load_state(settings.state_file) or {}
     if state.get("run_id"):

@@ -254,6 +254,17 @@ calorie/protein averages in code; the chat context carries it as a
 "## Health" block so status questions are answered from real numbers.
 Health data is never rendered to the website or digest.
 
+### Cross-links
+
+The profile, finance ledger, and health log describe one person, and
+analyses are told to treat them that way. `insights.py` computes the
+deterministic joins — meal↔expense pairs matched on the shared
+date + stated-time identity, monthly food spend vs meals actually logged
+(flagging spend-days with no meal), health-category spending vs the open
+nutrient needs — and the chat context carries them as a "## Cross-links"
+block; the system prompt instructs the model to weave every section (work
+profile, routines, finance, health) into any single-domain analysis.
+
 ### Proactive messaging
 
 `notify.py` (`send_wechat`) pushes messages to the owner without an inbound

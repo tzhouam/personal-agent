@@ -152,3 +152,43 @@ def test_food_photo_flow_native_multimodal(settings, tmp_path):
     assert "logged h1: meal · 牛肉面" in reply
     rec = HealthStore(settings.profile_dir).records()[0]
     assert rec["calories_kcal"] == 550.0 and rec["time_source"] == "stated"
+
+
+def test_crosslinks_join_the_stores(settings):
+    from assistant.finance_store import FinanceStore
+    from assistant.insights import build_crosslinks
+
+    finance = FinanceStore(settings.profile_dir)
+    health = HealthStore(settings.profile_dir)
+    # same event in both stores: lunch at 12:30, 45 CNY
+    finance.add("expense", 45, category="food", note="面点王", time="12:30")
+    health.add("meal", description="牛肉面", time="12:30", calories_kcal=550)
+    # food spend on a day with no meal logged
+    finance.add("expense", 88, category="food", note="晚饭", when=_day(-1))
+    # health-category spend + an open need
+    finance.add("expense", 120, category="health", note="维生素D")
+    health.add_need("维生素D")
+
+    links = build_crosslinks(settings)
+    assert "2 food purchases (133.0 CNY) vs 1 meals logged" in links
+    assert _day(-1) in links                      # spend-without-meal day flagged
+    assert "h1 牛肉面 ↔ f1 45.0 CNY" in links      # date+time matched pair
+    assert "health spending this month: 120.0 CNY" in links
+    assert "open nutrient needs: 维生素D" in links
+    # auto-time records never fabricate pairs
+    finance.add("expense", 30, category="food", note="奶茶")
+    health.add("meal", description="奶茶")
+    assert "奶茶 ↔" not in build_crosslinks(settings)
+
+
+def test_crosslinks_in_chat_context(settings):
+    from assistant.finance_store import FinanceStore
+
+    FinanceStore(settings.profile_dir).add("expense", 45, category="food",
+                                           note="午饭", time="12:30")
+    HealthStore(settings.profile_dir).add("meal", description="牛肉面", time="12:30")
+    ctx = build_context(settings)
+    assert "## Cross-links" in ctx and "牛肉面 ↔ f1" in ctx
+    # empty stores → no section
+    other = type(settings)(_env_file=None, data_dir=settings.data_dir / "other")
+    assert "## Cross-links" not in build_context(other)
