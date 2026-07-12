@@ -45,10 +45,9 @@ def test_store_lifecycle_and_caps(settings):
 
 
 def test_prompt_injection_changes_behavior_surface(settings):
-    assert "Learned rules" not in system_prompt(settings)
+    assert "[L1]" not in system_prompt(settings)
     LessonsStore(settings.profile_dir).learn("回复我时永远用中文")
-    prompt = system_prompt(settings)
-    assert "Learned rules" in prompt and "[L1] 回复我时永远用中文" in prompt
+    assert "[L1] 回复我时永远用中文" in system_prompt(settings)
 
 
 def test_chat_captures_direct_feedback(settings):
@@ -57,8 +56,11 @@ def test_chat_captures_direct_feedback(settings):
          "why": "owner correction"}]})
     reply = handle_message("以后记账默认用港币", settings, llm)
     assert "learned L1: 记账时默认使用港币" in reply
-    # the very next turn's system prompt carries the rule
+    # the very next turn carries the rule in BOTH injection points
     assert "[L1] 记账时默认使用港币" in system_prompt(settings)
+    handle_message("hi", settings, llm)
+    assert "## Learned rules" in llm.prompts[-1]
+    assert "[L1] 记账时默认使用港币" in llm.prompts[-1]
     assert run_action("retire_preference", {"id": "L1"}, settings) == "lesson L1 retired"
     assert "(no learned rules yet)" in run_action("list_preferences", {}, settings)
 

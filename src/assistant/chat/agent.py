@@ -222,6 +222,17 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                           for h in history[-10:])
         prompt += f"## Recent conversation (oldest first)\n{turns}\n\n"
     prompt += f"## Owner message\n{text.strip()[:4000]}"
+    try:  # learned rules ride next to the owner message too — end-of-prompt
+        # placement keeps them salient for long system prompts
+        from ..lessons_store import LessonsStore
+
+        rules = LessonsStore(settings.profile_dir).active()
+        if rules:
+            prompt += ("\n\n## Learned rules — apply to your reply AND to every "
+                       "action's parameters\n"
+                       + "\n".join(f"- [{l['id']}] {l['rule']}" for l in rules))
+    except Exception:
+        log.exception("lessons prompt injection failed")
     system = system_prompt(settings)
     try:
         result = llm.complete_json(prompt, system=system, max_tokens=2000,
