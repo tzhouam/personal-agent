@@ -13,7 +13,7 @@ def test_registry_covers_the_llm_action_set():
                            "recategorize_transaction",
                            "log_meal", "log_exercise", "log_weight",
                            "set_health_profile", "add_health_need",
-                           "done_health_need", "health_summary"}
+                           "done_health_need", "health_summary", "execute_task"}
     block = prompt_block()
     for name in llm_actions:
         assert name in block

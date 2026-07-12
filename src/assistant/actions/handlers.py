@@ -514,3 +514,21 @@ def _health_summary(settings: Settings, p: dict) -> str:
     except (TypeError, ValueError):
         days = 7
     return render_summary(HealthStore(settings.profile_dir).summary(days))
+
+
+# ── task execution ───────────────────────────────────────────────────
+
+def _execute_task(settings: Settings, p: dict) -> str:
+    """Run a novel multi-step task agentically in the background (plan, act
+    via actions, review outcomes, adapt); the final report is pushed to
+    WeChat. Detached like trigger_run so chat replies immediately."""
+    request = str(p.get("request", "")).strip()
+    if not request:
+        return "execute_task needs the request"
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (settings.data_dir / "task_run.log").open("a")
+    subprocess.Popen([sys.executable, "-m", "assistant.cli", "task", request],
+                     stdout=log_file, stderr=subprocess.STDOUT,
+                     start_new_session=True)
+    return ("task started in the background — I'll work through it step by "
+            "step and message you the result on WeChat")

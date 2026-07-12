@@ -84,6 +84,11 @@ def main() -> None:
     cons_p.add_argument("--dry-run", action="store_true",
                         help="show what would be applied, change nothing")
 
+    task_p = sub.add_parser("task", help="agentically execute a multi-step task now")
+    task_p.add_argument("request", help="the task, quoted")
+    task_p.add_argument("--no-notify", action="store_true",
+                        help="print the report only; skip the WeChat push")
+
     ask_p = sub.add_parser("ask", help="ask the chat agent one question locally")
     ask_p.add_argument("text", help="the message, quoted (may be empty with --image)")
     ask_p.add_argument("--image", action="append", default=[], metavar="PATH",
@@ -133,6 +138,13 @@ def main() -> None:
         sys.exit(cmd_run_phase(settings, args.phase))
     elif args.command == "consolidate":
         sys.exit(cmd_consolidate(settings, args))
+    elif args.command == "task":
+        from ..task_runner import run_task
+
+        record = run_task(args.request, settings, notify=not args.no_notify)
+        print(f"[{record['status']}] {record['id']} — {len(record['steps'])} step(s)")
+        print(record["report"])
+        sys.exit(0 if record["status"] == "done" else 1)
     elif args.command == "ask":
         from ..chat.agent import handle_message
 

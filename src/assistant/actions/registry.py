@@ -17,6 +17,7 @@ from .handlers import (
     _done_health_need,
     _done_reading,
     _done_todo,
+    _execute_task,
     _finance_summary,
     _health_summary,
     _list_reading,
@@ -205,6 +206,18 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "plan_task", "request": "<the task in one sentence>"}'
                        '   # for novel multi-step asks: bookings, arranging, research',
         slash="plan",
+    ),
+    Action(
+        name="execute_task",
+        description="agentically EXECUTE a novel multi-step task in the "
+                    "background (search, act, adapt, report to WeChat)",
+        handler=_execute_task,
+        params={"request": {"required": True, "desc": "the owner's task, one sentence"}},
+        llm=True,
+        prompt_example='{"type": "execute_task", "request": "<the task in one sentence>"}'
+                       '   # for DOABLE novel tasks: research X and summarize, find and '
+                       'compare, gather info then remind — the agent does it and reports',
+        slash="task",
     ),
     Action(
         name="show_profile",
