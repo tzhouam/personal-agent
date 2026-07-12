@@ -406,3 +406,21 @@ def run_action(name: str, params: dict, settings: Settings) -> str:
     if error:
         raise ValueError(error)
     return action.handler(settings, params)
+
+
+# Failure markers in handler outcomes — the chat agent's review loop retries
+# actions whose outcome matches. Dedup rejections ("NOT logged — duplicate")
+# are deliberately absent: they are correct behavior, and a retry would
+# double-log the very thing dedup caught.
+_FAILURE_MARKERS = ("rejected", "couldn't", "failed", "unknown action",
+                    "missing required", "— need", "needs a", "no open todo",
+                    "no active transaction", "no unread item", "no open need",
+                    "no reading item", "usage:")
+
+
+def looks_failed(outcome: str) -> bool:
+    """Did this action outcome report a failure the model should fix?"""
+    lower = str(outcome).lower()
+    if "duplicate" in lower:
+        return False
+    return any(marker in lower for marker in _FAILURE_MARKERS)

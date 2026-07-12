@@ -92,3 +92,74 @@ def test_wecom_crypto_roundtrip():
         assert False, "bad signature accepted"
     except ValueError:
         pass
+
+
+def test_action_review_retries_failures(settings):
+    # round 1 emits a bad amount → rejected; the review round corrects it
+    class SequenceLLM:
+        def __init__(self, results):
+            self.results = list(results)
+            self.prompts = []
+
+        def complete_json(self, prompt, system=None, **kw):
+            self.prompts.append(prompt)
+            return self.results.pop(0)
+
+    llm = SequenceLLM([
+        {"reply": "记好了", "actions": [
+            {"type": "log_transaction", "kind": "spend", "amount": 45,
+             "note": "午饭"}]},                       # kind invalid → rejected
+        {"reply": "修正后已记录", "actions": [
+            {"type": "log_transaction", "kind": "expense", "amount": 45,
+             "note": "午饭"}]},
+    ])
+    reply = handle_message("记账午饭45", settings, llm)
+    assert len(llm.prompts) == 2
+    assert "transaction rejected" in llm.prompts[1]      # saw the failure
+    assert "Actions you just emitted" in llm.prompts[1]
+    assert reply.startswith("修正后已记录")               # revised reply kept
+    assert "(retry) logged f1: expense 45.0" in reply
+    from assistant.finance_store import FinanceStore
+    assert FinanceStore(settings.profile_dir).records()[0]["amount"] == 45.0
+
+
+def test_action_review_skips_success_and_duplicates(settings):
+    class CountingLLM:
+        def __init__(self, result):
+            self.result, self.calls = result, 0
+
+        def complete_json(self, prompt, system=None, **kw):
+            self.calls += 1
+            return self.result
+
+    # all-success → single LLM call
+    llm = CountingLLM({"reply": "ok", "actions": [
+        {"type": "add_todo", "title": "Buy GPU"}]})
+    handle_message("add todo", settings, llm)
+    assert llm.calls == 1
+    # duplicate rejection → no retry round
+    from assistant.finance_store import FinanceStore
+    FinanceStore(settings.profile_dir).add("expense", 68, note="面点王", time="12:30")
+    llm = CountingLLM({"reply": "ok", "actions": [
+        {"type": "log_transaction", "kind": "expense", "amount": 68,
+         "note": "面点王", "time": "12:30"}]})
+    reply = handle_message("记一下", settings, llm)
+    assert llm.calls == 1 and "duplicate of f1" in reply
+
+
+def test_action_review_gives_up_when_unfixable(settings):
+    class StubbornLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, prompt, system=None, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                return {"reply": "done", "actions": [{"type": "done_todo", "id": "t99"}]}
+            return {"reply": "那个待办不存在", "actions": []}  # unfixable → stop
+
+    llm = StubbornLLM()
+    reply = handle_message("完成t99", settings, llm)
+    assert llm.calls == 2                       # one review round, then stop
+    assert "no open todo 't99'" in reply
+    assert reply.startswith("那个待办不存在")

@@ -191,6 +191,12 @@ consumers: the chat LLM's prompt (which actions it may emit), the executor, and
 the CLI/HTTP entry points. Handlers return one human-readable line describing
 what the code actually did — replies are built from those, never from LLM claims.
 
+Action outcomes are **reviewed, not just appended**: when an outcome reports a
+failure (bad parameters, wrong id, unknown action), the model is shown exactly
+what it emitted and what came back, and gets up to two repair rounds to
+correct and re-execute — retried outcomes appear as "(retry) …" in the reply.
+Duplicate rejections never retry: that's dedup working as intended.
+
 Actions: todo/reading management, `trigger_run`, `run_phase`, `plan_task`,
 `web_search`, reminders, routines, status/profile queries.
 

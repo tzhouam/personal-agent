@@ -11,7 +11,7 @@ import json
 import logging
 from datetime import date
 
-from ..actions import execute, prompt_block, run_action
+from ..actions import execute, looks_failed, prompt_block, run_action
 from ..config import Settings
 from ..llm import LLM
 from ..profile_store import ProfileStore, render_summary
@@ -198,7 +198,43 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
     if not isinstance(result, dict):
         return "(assistant error: unparseable model response)"
     reply = str(result.get("reply", "")).strip() or "(empty reply)"
-    outcomes = execute(result.get("actions") or [], settings)
-    if outcomes:
-        reply += "\n\n✔ " + "\n✔ ".join(outcomes)
+    actions = result.get("actions") or []
+    outcomes = execute(actions, settings)
+    all_outcomes = list(outcomes)
+
+    # Review-and-retry: when an action outcome reports a failure (bad params,
+    # wrong id, unknown action), show the model exactly what it emitted and
+    # what came back so it can analyze, correct, and re-execute — up to 2
+    # repair rounds. Duplicate rejections never retry (dedup working as
+    # intended). Only the latest round's failures drive another round.
+    for _ in range(2):
+        if not any(looks_failed(o) for o in outcomes):
+            break
+        review = (f"{prompt}\n\n## Actions you just emitted\n"
+                  f"{json.dumps(actions, ensure_ascii=False)}\n"
+                  "## Their results (in order)\n"
+                  + "\n".join(f"- {o}" for o in outcomes)
+                  + "\n\n## Fix the failures\nSome actions FAILED. Analyze each "
+                    "failure message, correct the parameters or pick the right "
+                    "action/id, and respond with ONLY the corrected actions "
+                    "(empty list if a failure cannot be fixed — e.g. the thing "
+                    "genuinely doesn't exist). Do NOT re-emit actions that "
+                    "succeeded or were rejected as duplicates. You may also "
+                    "revise the reply.")
+        try:
+            fix = llm.complete_json(review, system=_SYSTEM, max_tokens=2000)
+        except Exception:
+            log.exception("action-review LLM call failed")
+            break
+        if isinstance(fix, dict) and str(fix.get("reply", "")).strip():
+            reply = str(fix["reply"]).strip()  # revised even when unfixable
+        actions = (fix.get("actions") or []) if isinstance(fix, dict) else []
+        if not actions:
+            break
+        outcomes = execute(actions, settings)
+        log.info("action review: retried %d action(s)", len(outcomes))
+        all_outcomes += [f"(retry) {o}" for o in outcomes]
+
+    if all_outcomes:
+        reply += "\n\n✔ " + "\n✔ ".join(all_outcomes)
     return reply
