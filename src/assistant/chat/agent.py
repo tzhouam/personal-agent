@@ -24,8 +24,8 @@ _SYSTEM = f"""You are your owner's personal assistant, reachable by chat/email. 
 context below (profile, open todos, reading list, active routines, pending reminders, last run).
 Be concise and direct — this is a chat reply, not a report. Answer in the language the owner
 wrote in. When an "## Attached images" section appears, the owner attached image(s) to this
-message; the descriptions come from a vision model — respond to what the images show as if you
-saw them, and be upfront when a description says an image could not be analyzed.
+message — either attached directly (look at them) or as descriptions from a vision model.
+Respond to what the images show, and be upfront when an image could not be analyzed.
 
 You may execute actions, but ONLY when the owner explicitly asks for them:
 {prompt_block()}
@@ -43,7 +43,7 @@ condition like a weather alert), emit create_routine, not set_reminder.
 Finance: when the owner mentions money spent/earned ("午饭花了45", "发工资了", or a payment
 receipt/bill screenshot), emit log_transaction with the amount, kind, and a sensible category —
 for receipts, read the amount, merchant (note), and payment time (time: "HH:MM") from the image
-description; exact duplicates are rejected automatically, so log what you see. When asked how healthy
+(or its description); exact duplicates are rejected automatically, so log what you see. When asked how healthy
 their income/spending is, analyze from the "## Finance ledger" numbers: cite the actual totals,
 savings rate, and top categories, compare with the previous month, and give concrete,
 prioritized suggestions. Never invent amounts that aren't in the ledger.
@@ -125,12 +125,20 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
     image-only message (empty ``text``) still gets a real reply."""
     llm = llm or LLM(settings)
     prompt = f"## Context\n{build_context(settings)}\n\n"
+    attach: list[str] = []
     if image_paths:
-        from ..vision import describe_images, render_image_context
+        from ..vision import describe_images, media_type_for, render_image_context
 
-        descriptions = describe_images(
-            settings, image_paths[:settings.vision_max_images])
-        prompt += render_image_context(descriptions) + "\n\n"
+        image_paths = image_paths[:settings.vision_max_images]
+        if settings.llm_supports_images:
+            # natively multimodal main LLM: attach the images to the call
+            # itself — no separate vision pass
+            attach = [p for p in image_paths if media_type_for(p)]
+            prompt += ("## Attached images\n(the owner's images are attached "
+                       "to this message — look at them directly)\n\n")
+        else:  # text-only main LLM: describe-then-reason via the vision chain
+            descriptions = describe_images(settings, image_paths)
+            prompt += render_image_context(descriptions) + "\n\n"
         text = text.strip() or "(the owner sent the attached image(s) without text — react to what they show)"
     if history:
         turns = "\n".join(f"Owner: {h.get('owner', '')}\nYou: {h.get('assistant', '')}"
@@ -138,7 +146,8 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
         prompt += f"## Recent conversation (oldest first)\n{turns}\n\n"
     prompt += f"## Owner message\n{text.strip()[:4000]}"
     try:
-        result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=2000)
+        result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=2000,
+                                   **({"images": attach} if attach else {}))
     except Exception as exc:
         log.exception("chat LLM call failed")
         return f"(assistant error: {exc})"

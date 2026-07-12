@@ -46,16 +46,24 @@ class LLM:
         system: str | None = None,
         model: str | None = None,
         max_tokens: int = 4000,
+        images: list[str] | None = None,
     ) -> str:
         """Send one user ``prompt`` (optional ``system``) and return the
-        concatenated text blocks. ``model`` defaults to ``default_model``. The
-        call is wrapped in a trace span recording usage/stop reason, retried on
-        transient errors (via the decorator), and logs a warning — but does not
-        raise — when the response is cut off at ``max_tokens``."""
+        concatenated text blocks. ``model`` defaults to ``default_model``.
+        ``images`` are local file paths attached as image content blocks
+        before the text — only meaningful on a multimodal model
+        (``llm_supports_images``). The call is wrapped in a trace span
+        recording usage/stop reason, retried on transient errors (via the
+        decorator), and logs a warning — but does not raise — when the
+        response is cut off at ``max_tokens``."""
+        content: str | list = prompt
+        if images:
+            content = [_image_block(p) for p in images] + [
+                {"type": "text", "text": prompt}]
         kwargs: dict = {
             "model": model or self.default_model,
             "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
         }
         if system:
             kwargs["system"] = system
@@ -85,6 +93,20 @@ class LLM:
                 f"({exc}). Respond again with ONLY valid JSON, no prose, no code fences."
             )
             return _parse_json(self.complete(retry_prompt, system=system, **kw))
+
+
+def _image_block(path: str) -> dict:
+    """Anthropic base64 image content block for a local image file."""
+    import base64
+
+    from pathlib import Path
+
+    from .vision import media_type_for
+
+    return {"type": "image",
+            "source": {"type": "base64",
+                       "media_type": media_type_for(path) or "image/png",
+                       "data": base64.b64encode(Path(path).read_bytes()).decode()}}
 
 
 def _parse_json(text: str):

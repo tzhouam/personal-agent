@@ -175,3 +175,55 @@ def test_remote_preferred_over_local(settings, tmp_path, monkeypatch):
                         lambda s, p: (_ for _ in ()).throw(AssertionError("local ran")))
     settings.vision_provider = "openai"
     assert describe_images(settings, [str(pic)]) == ["api desc"]
+
+
+def test_native_multimodal_attaches_images(settings, tmp_path, monkeypatch):
+    # llm_supports_images: the main LLM gets the files, no vision pass runs
+    pic = _png(tmp_path)
+    settings.llm_supports_images = True
+    monkeypatch.setattr("assistant.vision.describe_images",
+                        lambda s, p: (_ for _ in ()).throw(AssertionError("vision ran")))
+    seen = {}
+
+    class NativeLLM(FakeLLM):
+        def complete_json(self, prompt, system=None, images=None, **kw):
+            seen["images"] = images
+            self.prompts.append(prompt)
+            return self.result
+
+    llm = NativeLLM({"reply": "看到了", "actions": []})
+    reply = handle_message("这是什么？", settings, llm, image_paths=[str(pic)])
+    assert reply.startswith("看到了")
+    assert seen["images"] == [str(pic)]
+    assert "look at them directly" in llm.prompts[0]
+    # non-image paths are filtered out of the attachment list
+    seen.clear()
+    handle_message("x", settings, llm, image_paths=[str(tmp_path / "nope.pdf")])
+    assert seen["images"] is None or seen["images"] == []
+
+
+def test_llm_builds_image_blocks(settings, tmp_path, monkeypatch):
+    from assistant.llm import LLM
+
+    pic = _png(tmp_path)
+    captured = {}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+
+            class R:
+                content = [type("B", (), {"type": "text", "text": "ok"})()]
+                stop_reason = "end_turn"
+                usage = None
+            return R()
+
+    llm = LLM.__new__(LLM)
+    llm.client = type("C", (), {"messages": FakeMessages()})()
+    llm.default_model = "test-model"
+    out = llm.complete("look", images=[str(pic)])
+    assert out == "ok"
+    content = captured["messages"][0]["content"]
+    assert content[0]["type"] == "image"
+    assert content[0]["source"]["media_type"] == "image/png"
+    assert content[-1] == {"type": "text", "text": "look"}

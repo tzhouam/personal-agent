@@ -79,10 +79,13 @@ class Settings(BaseSettings):
     # income/expense records; summaries are computed in code
     finance_currency: str = "CNY"   # default currency for logged amounts
 
-    # Vision (image understanding in chat) — the main LLM is text-only, so
-    # attached images are described by a vision backend first (vision.py).
-    # PREFER the remote multimodal API (owner decision 2026-07-11); the local
-    # VLM (one-shot on the freest GPU) is only the no-key fallback.
+    # Vision (image understanding in chat). With a natively multimodal main
+    # LLM (e.g. qwen3.6-plus), set llm_supports_images and chat attaches
+    # images directly to the model call — no separate vision backend runs.
+    # Otherwise images are described first (vision.py): PREFER the remote
+    # multimodal API (owner decision 2026-07-11); the local VLM (one-shot on
+    # the freest GPU) is only the no-key fallback.
+    llm_supports_images: bool = False
     vision_api_key: str = ""
     vision_base_url: str = ""
     vision_model: str = ""

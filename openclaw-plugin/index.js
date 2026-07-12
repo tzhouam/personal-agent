@@ -40,7 +40,15 @@ const ACTION_TIMEOUT_MS = 20_000;
 const PID_FILE = `${homedir()}/.personal-agent/chat_listener.pid`;
 // Container clock is UTC; pin the owner's zone so "today" in chat replies and
 // digest dates match his morning (needs the system tzdata package).
-const childEnv = () => ({ ...process.env, TZ: process.env.PERSONAL_AGENT_TZ ?? "Asia/Hong_Kong" });
+// Also strip inherited ANTHROPIC_* vars: the rebase-agent's shell exports
+// (e.g. ANTHROPIC_MODEL=deepseek-…) ride into the gateway's env and would
+// override the personal-agent's own .env (pydantic gives process env
+// precedence) — its .env must be the single source of LLM config.
+const childEnv = () => {
+  const env = { ...process.env, TZ: process.env.PERSONAL_AGENT_TZ ?? "Asia/Hong_Kong" };
+  for (const k of Object.keys(env)) if (k.startsWith("ANTHROPIC_")) delete env[k];
+  return env;
+};
 
 /** SERVE_PORT/SERVE_TOKEN from the personal-agent .env — re-read per call so
  * a token rotation applies without a gateway restart. */
