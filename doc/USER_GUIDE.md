@@ -79,6 +79,7 @@ endpoint works.
 | `ANTHROPIC_API_KEY` | Your key. Required. |
 | `ANTHROPIC_BASE_URL` | Leave empty for real Anthropic. For a compatible provider (e.g. DeepSeek) set its base URL, e.g. `https://api.deepseek.com/anthropic`. |
 | `ANTHROPIC_MODEL` | Main model for reasoning-heavy work (profile, digests, planning). |
+| `LLM_SUPPORTS_IMAGES` | Set `true` when the model is natively multimodal (Claude, `qwen3.6-plus` via DashScope's Anthropic proxy `https://dashscope.aliyuncs.com/apps/anthropic`, …) — chat then attaches photos directly to the model. Text-only models fall back to the `VISION_*` describe chain (see `.env.template`). |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Optional cheaper model for bulk relevance scoring (hundreds of items/day). Falls back to the main model if unset. |
 
 **Cost:** the cheap model dominates volume (scoring papers/notifications); the
@@ -292,7 +293,9 @@ you can reach it — every channel authenticates the sender.
 
 Just talk to it — "what should I focus on today?", "add a reminder to follow up
 with Sam in 2 hours", "book a dinner for six on Friday", "run the research
-digest again". It figures out the action. On WeChat you can also use explicit
+digest again". It figures out the action. **Photos work too**: send a
+screenshot or a payment receipt (WeChat or email attachment) and it responds
+to what the image shows — and offers to log receipts to the ledger. On WeChat you can also use explicit
 slash commands (no LLM call, instant):
 
 | Command | Does |
@@ -306,7 +309,7 @@ slash commands (no LLM call, instant):
 | `/remind <+2h\|HH:MM> <message>` · `/remind list\|cancel <id>` | One-shot reminders |
 | `/routine list\|cancel <id>` | Recurring routines (create by just describing one) |
 | `/fin` · `/fin sum [YYYY-MM]` · `/fin list [YYYY-MM]` | Finance summary / records |
-| `/fin <income\|expense> <amount> [category] [note]` · `/fin void <id>` | Log / void a transaction |
+| `/fin <income\|expense> <amount> [category] [note]` · `/fin cat <id> <category>` · `/fin void <id>` | Log / recategorize / void a transaction |
 | `/status` | Last run + open counts |
 
 ### Finance
@@ -319,7 +322,9 @@ identity — the transaction time read off the receipt or your message ("下午3
 点打车" → 15:00), else the logging clock time — plus amount, income/expense,
 context note, and currency. Stated times are what distinguish two same-priced
 purchases; sending the same receipt twice, or repeating a payment the agent
-already logged, is rejected with a pointer to the existing record. Then ask things like *"这个月收支健康吗？怎么改善？"* — the monthly
+already logged, is rejected with a pointer to the existing record. Wrong
+category? "把f37改成housing" or `/fin cat f37 housing`; wrong entry?
+`/fin void f37` (voided, never deleted). Then ask things like *"这个月收支健康吗？怎么改善？"* — the monthly
 totals, savings rate, and category breakdown are computed by code and handed
 to the model, so the analysis cites your real numbers.
 

@@ -29,7 +29,7 @@ explicitly point it at.
 | 📄 **Résumé sync** | Edits your LaTeX résumé from the profile (Overleaf git-bridge or any git remote), gated on a compile and your explicit approval — never auto-pushed. |
 | 💬 **Chat + tasks** | Message it from email or WeChat: ask questions, manage todos/reading, run pipeline phases on demand, set reminders and recurring routines, search the web, or hand it a novel multi-step task (“book a dinner for six Friday”) that it plans and tracks. |
 | 💰 **Finance ledger** | Tell it what you spent or earned (or send a payment-receipt screenshot) — records land in a git-versioned `finance.yaml` in your profile repo, never leaving the machine. Ask "这个月收支健康吗" and it analyzes real computed totals: savings rate, category breakdown, month-over-month. |
-| 🖼️ **Image understanding** | Send a photo or screenshot (WeChat, email attachment, `assistant ask --image`) — a vision backend (remote API, or a local VLM one-shot on your own GPU) describes it with text transcribed verbatim, and the agent answers about what it shows. |
+| 🖼️ **Image understanding** | Send a photo or screenshot (WeChat, email attachment, `assistant ask --image`). With a multimodal main model it sees the image directly; text-only models get a describe-then-reason fallback (vision API, or a local VLM one-shot on your own GPU). |
 | 📊 **Self-measuring** | Per-step metrics (success, latency, acceptance rates, triage precision, reading done-rate) in a local SQLite table, surfaced in the digest and used to auto-tune how much it surfaces. |
 
 ## How it works, in one breath
@@ -54,7 +54,8 @@ evidence log (`events.db`) beneath a small curated, git-versioned `profile.yaml`
 
 - **Python 3.11+**
 - An **Anthropic-compatible LLM API key** (real Anthropic, or any compatible
-  endpoint such as DeepSeek — set a base URL)
+  endpoint such as DeepSeek or Alibaba Model Studio — set a base URL). A
+  multimodal model (Claude, Qwen-VL class) also unlocks image chat
 - A **GitHub token** (fine-grained, read-only is enough for the collector)
 - An **email delivery path**: a [Resend](https://resend.com) API key (easiest)
   or SMTP credentials (a Gmail app password also unlocks the Gmail collector
@@ -122,10 +123,22 @@ setup and the timezone caveat.
 | `assistant consolidate [--dry-run] [--section …]` | Weekly editorial profile pass |
 | `assistant show-profile` | Print a profile summary |
 | `assistant todo list\|add\|done` · `assistant reading list\|done\|unrelated` | Manage todos / reading list |
-| `assistant ask "…"` | Ask the chat agent one question locally |
+| `assistant ask "…" [--image photo.png]` | Ask the chat agent one question locally (images welcome) |
 | `assistant serve` | Local HTTP daemon (chat/actions API for the WeChat bridge) |
 | `assistant send-test-email` | Verify email delivery |
 | `assistant resume-init\|resume-status\|approve-resume` | Résumé sync + approval gate |
+
+## Acknowledgements
+
+The always-on runtime is built on **[OpenClaw](https://github.com/openclaw/openclaw)**:
+its gateway hosts the WeChat channel (via Tencent's official
+`@tencent-weixin/openclaw-weixin` plugin), schedules the daily run through
+command-cron, and supervises the chat daemon — this repo's
+[`openclaw-plugin/`](openclaw-plugin/) bridge routes every owner message from
+OpenClaw into the agent. The pipeline itself runs on
+[LangGraph](https://langchain-ai.github.io/langgraph/), and several
+architectural ideas (typed hooks, plugin services) were informed by studying
+OpenClaw's source. Thanks to both projects.
 
 ## Where your data lives
 
@@ -135,7 +148,7 @@ Everything is under `~/.personal-agent/` (override with `DATA_DIR`):
 ~/.personal-agent/
 ├── profile/          git repo: profile.yaml (source of truth) + PROFILE.md render
 │   ├── aliases.yaml    your initiative groupings (owner-editable)
-│   ├── todos.yaml  reading_list.yaml
+│   ├── todos.yaml  reading_list.yaml  finance.yaml
 │   └── …
 ├── events.db         SQLite: raw observation log, seen-store, metrics
 ├── runs/<run_id>/    per-run artifacts (for --resume and audit)

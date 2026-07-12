@@ -62,7 +62,7 @@ One daily run is a [LangGraph](https://langchain-ai.github.io/langgraph/)
 | **research** | Gather arXiv + feeds, score for relevance, select, summarize; feed the reading list | `research/`, `tasks/` |
 | **website** | Render the profile + todos + reading + routines to HTML; push to Pages | `website.py` |
 | **deliver** | Render and send the digest email; announce success to WeChat | `deliver/` |
-| **curate** | Decay dormant entries; prune old chat sessions | `tasks/curate.py` |
+| **curate** | Decay dormant entries; prune old chat sessions + staged chat images | `tasks/curate.py` |
 
 ### State & resume
 
@@ -196,51 +196,57 @@ Actions: todo/reading management, `trigger_run`, `run_phase`, `plan_task`,
 
 ### Images
 
-The main LLM is text-only, so attached images (a WeChat photo, an email
-attachment, `assistant ask --image`) take a describe-then-reason path
-(`vision.py`): a vision backend writes one detailed description per image —
-scene plus verbatim text transcription — and the chat prompt carries it as an
-"## Attached images" context block. Backends chain like search: a configured
-Anthropic-compatible vision endpoint first (`VISION_API_KEY`/`VISION_MODEL`),
-then — only when no API key is set — a local VLM (`VISION_LOCAL_MODEL_PATH`,
-e.g. Qwen3-VL) run **one-shot in
-a subprocess on the CUDA device with the most free memory** — load, describe,
-exit — so the daemon never holds GPU memory between images on a box whose
-GPUs are shared with CI jobs. WeChat delivery rides the gateway's
-`message_received` hook (which carries the staged media path) into a short
-TTL cache the reply hook drains; the daemon's `/chat` accepts both
-`image_paths` (local, loopback-trusted) and base64 `images` staged into
-`DATA_DIR/media/`.
+Attached images (a WeChat photo, an email attachment, `assistant ask
+--image`) reach the agent one of two ways:
 
-`assistant serve` is a loopback-only HTTP daemon exposing `/chat` (with
-per-session memory), `/actions/<name>`, `/run`, `/status`, `/healthz`. It
-rebuilds `Settings`/`LLM` per request (so a `.env` edit applies immediately) and
-runs the email chat poll and the reminder/routine schedulers as background
-threads. The [WeChat bridge](WECHAT_OPENCLAW.md) calls this daemon over HTTP,
-with an `assistant ask` subprocess as the degraded fallback.
+- **Natively multimodal main LLM** (`LLM_SUPPORTS_IMAGES=true`, e.g.
+  qwen3.6-plus or Claude): chat attaches the image blocks directly to the
+  model call (`llm.py`) — the model sees the pixels, no separate vision pass.
+- **Text-only main LLM**: a describe-then-reason fallback (`vision.py`)
+  writes one detailed description per image — scene plus verbatim text
+  transcription — and the chat prompt carries it as an "## Attached images"
+  context block. Backends chain like search: a configured multimodal API
+  first (`VISION_API_KEY`/`VISION_MODEL`, Anthropic- or OpenAI-style wire
+  format via `VISION_PROVIDER`), then — only keyless — a local VLM
+  (`VISION_LOCAL_MODEL_PATH`, e.g. Qwen3-VL) run **one-shot in a subprocess
+  on the CUDA device with the most free memory**: load, describe, exit, so
+  the daemon never holds GPU memory between images.
 
-Full rationale and the migration that produced this shape:
-[DESIGN_SERVICE_LAYER.md](DESIGN_SERVICE_LAYER.md).
+WeChat delivery rides the gateway's `message_received` hook (which carries
+the staged media path) into a short TTL cache the reply hook drains; the
+daemon's `/chat` accepts both `image_paths` (local, loopback-trusted) and
+base64 `images` staged into `DATA_DIR/media/` (pruned with chat history by
+the curate phase).
 
 ### Finance ledger
 
 `finance_store.py` keeps income/expense records in `finance.yaml` inside the
 profile git repo — versioned like todos, local-only like everything else, and
-never-delete (wrong entries are *voided*). Records enter through the typed
-`log_transaction` action: spoken amounts ("午饭花了45") or amounts the vision
-chain reads off a payment-receipt screenshot. All analysis numbers — monthly
-income/spend/net, savings rate, category breakdown, previous-month
-comparison — are **computed in code** (`summary()`), injected into the chat
-context as a "## Finance ledger" block, and the LLM is instructed to cite
-those figures rather than invent any. `/fin` slash commands cover quick
-logging and summaries.
+never-delete (wrong entries are *voided*, miscategorized ones moved with
+`recategorize_transaction`). Every record carries a full `YYYY-MM-DD HH:MM`
+identity: the stated transaction time read off a receipt or the owner's
+phrasing, else the logging clock time (`time_source: stated|auto`). Dedup
+uses the signature kind + amount + currency + date + **stated** time +
+context note — auto-filled times are excluded so a forgotten-and-resent
+entry is still caught, while stated times distinguish two genuine
+same-priced purchases.
+
+Records enter through the typed `log_transaction` action: spoken amounts
+("午饭花了45") or amounts the model reads off a payment-receipt screenshot.
+All analysis numbers — monthly income/spend/net, savings rate, category
+breakdown, previous-month comparison — are **computed in code**
+(`summary()`), injected into the chat context as a "## Finance ledger"
+block, and the LLM is instructed to cite those figures rather than invent
+any. `/fin` slash commands cover quick logging, summaries, and
+recategorizing.
 
 ### Proactive messaging
 
 `notify.py` (`send_wechat`) pushes messages to the owner without an inbound
 command. It backs the deliver-phase success announce, one-shot **reminders**
-(`ReminderStore`), and conditional **routines** (`routines.py` — WHEN + optional
-LLM-judged CONDITION + a TASK run through the chat agent). The serve daemon's
+(`ReminderStore`), and conditional **routines** (`routines.py` — WHEN [time +
+daily/workday/weekday-list, `monthly:<dom>`, or `yearly:<MM-DD>` schedules] +
+optional LLM-judged CONDITION + a TASK run through the chat agent). The serve daemon's
 poll loop fires due reminders and routines each cycle.
 
 ---
@@ -362,20 +368,23 @@ src/assistant/
 ├── state.py            AssistantState + state.json persistence
 ├── config.py           Pydantic Settings (all .env knobs)
 ├── init_wizard.py      `init` wizard + `--check` doctor
-├── cli.py              argparse entry points
-├── llm.py              Anthropic client wrapper (retry, JSON parsing)
+├── cli/                argparse entry points
+├── llm.py              Anthropic client wrapper (retry, JSON, image blocks)
+├── vision.py           image → description fallback chain (API → local VLM)
+├── vision_worker.py    one-shot local VLM subprocess
 ├── profile_store.py    the profile: apply_ops, git, aliases, render
+├── finance_store.py    income/expense ledger (finance.yaml, dedup, summaries)
 ├── events_store.py     evidence log + seen-store + metrics (SQLite/FTS5)
 ├── todo_store.py       todos + reading list (YAML in the profile repo)
 ├── urgency.py          the todo urgency metric
 ├── metrics.py          per-phase extractors + the Health footer
 ├── marks.py            website marks collection
 ├── notify.py           proactive WeChat + reminders
-├── routines.py         recurring conditional routines
+├── routines.py         recurring conditional routines (weekly/monthly/yearly)
 ├── search.py           web search backends
 ├── writing.py          résumé-voice rules (shared prompt block)
-├── website.py          site render + publish
-├── actions.py          the typed action registry
+├── website/            site render + publish
+├── actions/            the typed action registry + handlers
 ├── serve.py            the loopback HTTP daemon
 ├── collectors/         github, chrome, gmail
 ├── deliver/            email render/send, wechat announce
