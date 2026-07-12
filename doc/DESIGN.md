@@ -368,8 +368,7 @@ src/assistant/
 ├── init_wizard.py      `init` wizard + `--check` doctor
 ├── cli/                argparse entry points
 ├── llm.py              Anthropic client wrapper (retry, JSON, image blocks)
-├── vision.py           image → description fallback chain (API → local VLM)
-├── vision_worker.py    one-shot local VLM subprocess
+├── vision.py           image → description fallback (remote API only)
 ├── profile_store.py    the profile: apply_ops, git, aliases, render
 ├── finance_store.py    income/expense ledger (finance.yaml, dedup, summaries)
 ├── events_store.py     evidence log + seen-store + metrics (SQLite/FTS5)
