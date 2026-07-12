@@ -15,7 +15,9 @@ explicitly point it at.
 
 ## 🎬 90-second introduction
 
-https://github.com/tzhouam/personal-agent/raw/main/docs/media/intro.mp4
+[![Introduction video preview](docs/media/intro-preview.gif)](https://github.com/tzhouam/personal-agent/raw/main/docs/media/intro.mp4)
+
+*Click the preview to watch the full video with narration.*
 
 - **New here?** → [`assistant init`](#quickstart) walks you through setup.
 - **Using it day to day?** → [**User Guide**](doc/USER_GUIDE.md)
