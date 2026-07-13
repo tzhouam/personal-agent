@@ -154,3 +154,98 @@ def test_mixture_survives_one_dead_proposer(monkeypatch):
         "members": [{"model": "dead"}, {"model": "live"}],
         "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
     assert llm.complete("x", role="pipeline") == "OK"   # degraded, not failed
+
+
+def _mixture_client(behavior):
+    """Fake Anthropic factory whose create() dispatches on model via `behavior`
+    (model -> str answer, or a callable raising to simulate failure)."""
+    calls = []
+
+    class Resp:
+        def __init__(self, text):
+            self.content = [type("B", (), {"type": "text", "text": text})()]
+            self.stop_reason = "end_turn"; self.usage = None
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    model = kw["model"]
+                    calls.append((model, kw["messages"][0]["content"]))
+                    out = behavior[model]
+                    if callable(out):
+                        return out()
+                    return Resp(out)
+        return C()
+    return make_client, calls
+
+
+def test_mixture_layers_refine(monkeypatch):
+    # layers>1: each round's proposers must see the previous round's answers,
+    # then a single final aggregation. Previously untested.
+    make_client, calls = _mixture_client(
+        {"m1": "ans-m1", "m2": "ans-m2", "agg": "FINAL"})
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "agg"}, "layers": 3, "roles": ["pipeline"]}))
+    out = llm.complete("do it", role="pipeline")
+    assert out == "FINAL"
+    proposer_calls = [c for c in calls if c[0] in ("m1", "m2")]
+    agg_calls = [c for c in calls if c[0] == "agg"]
+    assert len(proposer_calls) == 6      # 2 members x 3 layers
+    assert len(agg_calls) == 1           # one final synthesis
+    # layers 2 & 3 (4 proposer calls) receive the prior answers to refine over
+    refined = [c for c in proposer_calls if "Synthesize" in c[1]]
+    assert len(refined) == 4
+
+
+def test_mixture_survives_dead_aggregator(monkeypatch):
+    # aggregator is not a single point of failure: if it dies after proposers
+    # succeed, fall back to a proposer answer instead of raising.
+    def boom():
+        raise ValueError("aggregator auth failed")
+    make_client, _ = _mixture_client(
+        {"m1": "proposal-m1", "m2": "proposal-m2", "agg": boom})
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
+    out = llm.complete("x", role="pipeline")
+    assert out in ("proposal-m1", "proposal-m2")   # degraded to a proposal
+
+
+def test_mixture_empty_aggregator_falls_back(monkeypatch):
+    # a reasoning-model aggregator that emits only hidden thinking returns "";
+    # don't hand back an empty MoA answer when a proposer succeeded.
+    make_client, _ = _mixture_client(
+        {"m1": "proposal-m1", "m2": "proposal-m2", "agg": "   "})
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
+    out = llm.complete("x", role="pipeline")
+    assert out in ("proposal-m1", "proposal-m2")   # not the empty aggregator output
+
+
+def test_retry_lives_on_call_not_complete():
+    # retry moved onto _call so each mixture proposer/aggregator retries
+    # independently (a transient blip no longer silently drops a proposer, and
+    # an aggregator retry doesn't re-run every proposer). tenacity attaches a
+    # `.retry` controller to the wrapped function.
+    assert hasattr(LLM._call, "retry")
+    assert not hasattr(LLM.complete, "retry")
+
+
+def test_malformed_mixture_config_degrades(monkeypatch):
+    # a broken LLM_MIXTURE/LLM_ROLES must degrade to {} — never crash Settings.
+    # (classic cause: a multi-line value dotenv truncates to its first line.)
+    s = _settings(llm_mixture='{"members":[{', llm_roles="not json at all")
+    assert s.llm_mixture == {}
+    assert s.llm_roles == {}
+    # and a well-formed JSON string still parses (the env path, not kwargs)
+    s2 = _settings(llm_mixture='{"members":[{"model":"a"},{"model":"b"}],"roles":["pipeline"]}')
+    assert [m["model"] for m in s2.llm_mixture["members"]] == ["a", "b"]
+    # a non-object JSON (e.g. a list) also degrades rather than mis-typing
+    assert _settings(llm_roles="[1,2,3]").llm_roles == {}

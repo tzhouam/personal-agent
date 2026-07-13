@@ -121,7 +121,7 @@ def sync_resume(llm: LLM, settings: Settings, profile: dict, profile_diff: str) 
         f"{yaml.safe_dump(profile, sort_keys=False, allow_unicode=True)[:8000]}\n```\n\n"
         f"## Today's profile diff\n{profile_diff[:4000]}\n\n"
         f"## Current resume ({tex.name})\n```latex\n{text}\n```",
-        system=_EDIT_SYSTEM, max_tokens=8000,
+        system=_EDIT_SYSTEM, max_tokens=8000, role="pipeline",
     )
     edits = result.get("edits", []) if isinstance(result, dict) else []
     new_text, applied, rejected = apply_edits(text, edits)

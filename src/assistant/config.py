@@ -4,9 +4,13 @@ Exports `Settings`, the single Pydantic-settings object that gathers every
 secret, feature toggle, and path from `.env` (repo root, then CWD) and env
 vars, plus derived-path/model properties the rest of the package reads."""
 
+import json
+import logging
 from pathlib import Path
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]  # src/assistant/config.py → repo root
 
@@ -34,7 +38,10 @@ class Settings(BaseSettings):
     #       "research": {"model": "qwen3.6-plus",
     #                    "base_url": "https://dashscope.aliyuncs.com/apps/anthropic",
     #                    "api_key": "sk-…"}}
-    llm_roles: dict = {}
+    # NoDecode + the validator below parse the JSON ourselves so a malformed
+    # value degrades to {} (MoA/routing off) instead of crashing Settings() —
+    # this whole optional feature must never take down the agent.
+    llm_roles: Annotated[dict, NoDecode] = {}
     # Mixture-of-Agents (JSON in LLM_MIXTURE). When >=2 `members` are given, the
     # listed `roles` (default pipeline/research/task/evolve) run MoA: every
     # member proposes an answer in parallel, then `aggregator` (default the
@@ -42,7 +49,34 @@ class Settings(BaseSettings):
     # rounds. Each member/aggregator is {model, base_url?, api_key?}.
     # e.g. {"members": [{"model": "mimo-v2.5"}, {"model": "mimo-v2.5-pro"}],
     #       "aggregator": {"model": "mimo-v2.5-pro"}, "roles": ["pipeline"]}
-    llm_mixture: dict = {}
+    llm_mixture: Annotated[dict, NoDecode] = {}
+
+    @field_validator("llm_roles", "llm_mixture", mode="before")
+    @classmethod
+    def _parse_json_dict(cls, value):
+        """Tolerantly parse LLM_ROLES / LLM_MIXTURE from env JSON.
+
+        A dict (kwargs / already parsed) passes through. A JSON string is
+        parsed; anything malformed — the classic being a multi-line value in
+        `.env` that dotenv truncates to its first physical line — degrades to
+        `{}` with a warning rather than raising, so a broken optional routing
+        config can never crash the agent. Note: multi-line JSON in `.env` must
+        be wrapped in single quotes or it reaches us as just its first line."""
+        if isinstance(value, dict):
+            return value
+        if value in (None, ""):
+            return {}
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except (ValueError, TypeError):
+                logging.getLogger("assistant").warning(
+                    "ignoring malformed LLM_ROLES/LLM_MIXTURE JSON (%.60s…) — "
+                    "multi-line values in .env must be wrapped in single quotes",
+                    value.replace("\n", " "))
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
 
     # GitHub
     github_token: str = ""
