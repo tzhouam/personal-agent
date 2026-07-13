@@ -250,8 +250,28 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
         result = llm.complete_json(prompt, system=system, max_tokens=6000,
                                    **({"images": attach} if attach else {}))
     except Exception as exc:
-        log.exception("chat LLM call failed")
-        return f"(assistant error: {exc})"
+        if attach:
+            # image call failed (provider switch, endpoint without vision, …):
+            # degrade to describe-then-reason, then to text — never a raw error
+            log.warning("native image call failed (%s) — falling back", exc)
+            from ..vision import describe_images, render_image_context
+
+            try:
+                descriptions = describe_images(settings, attach)
+                fallback_prompt = prompt.replace(
+                    "## Attached images\n(the owner's images are attached "
+                    "to this message — look at them directly)",
+                    render_image_context(descriptions))
+                result = llm.complete_json(fallback_prompt, system=system,
+                                           max_tokens=6000)
+            except Exception:
+                log.exception("image fallback failed too")
+                return ("图片这次没能处理（当前模型/接口暂不支持图片输入）。"
+                        "文字部分请再发一次，或稍后重试图片。")
+        else:
+            log.exception("chat LLM call failed")
+            return ("我这边连不上大脑了（LLM 接口报错），请稍后再试。"
+                    f"\n技术细节: {str(exc)[:200]}")
     if not isinstance(result, dict):
         return "(assistant error: unparseable model response)"
     reply = str(result.get("reply", "")).strip() or "(empty reply)"

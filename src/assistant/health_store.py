@@ -129,6 +129,13 @@ class HealthStore:
             if r.get("voided") or r["kind"] != kind or str(r["date"]) != when:
                 continue
             if stated and _stated_time(r) == stated:
+                # meals: one sitting can hold several dishes — only a
+                # similarly-described item at the same time is a duplicate
+                # (owner correction 2026-07-13: 燕窝 after 椒盐虾 at 20:00
+                # was wrongly rejected)
+                if kind == "meal" and not _similar_text(
+                        r.get("description", ""), body.get("description", "")):
+                    continue
                 return "duplicate", r
             if kind == "weight" and not stated and not _stated_time(r) \
                     and r.get("weight_kg") == body["weight_kg"]:
@@ -274,6 +281,12 @@ def render_summary(summary: dict) -> str:
             f"[{n['id']}] {n['item']}" + (f" ({n['why']})" if n.get("why") else "")
             for n in summary["needs"]))
     return "\n".join(lines)
+
+
+def _similar_text(a: str, b: str) -> bool:
+    """Loose same-dish check: normalized containment either way."""
+    na, nb = " ".join(str(a).lower().split()), " ".join(str(b).lower().split())
+    return bool(na and nb) and (na in nb or nb in na)
 
 
 def _stated_time(record: dict) -> str:

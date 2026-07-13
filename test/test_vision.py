@@ -188,3 +188,35 @@ def test_llm_builds_image_blocks(settings, tmp_path, monkeypatch):
     assert content[0]["type"] == "image"
     assert content[0]["source"]["media_type"] == "image/png"
     assert content[-1] == {"type": "text", "text": "look"}
+
+
+def test_native_image_failure_falls_back_to_describe(settings, tmp_path, monkeypatch):
+    pic = _png(tmp_path)
+    settings.llm_supports_images = True
+    monkeypatch.setattr("assistant.vision.describe_images",
+                        lambda s, p: ["a receipt for ¥45"])
+    calls = {"n": 0}
+
+    class FlakyLLM(FakeLLM):
+        def complete_json(self, prompt, system=None, images=None, **kw):
+            calls["n"] += 1
+            self.prompts.append(prompt)
+            if images:  # endpoint without vision support
+                raise RuntimeError("404 No endpoints found that support image input")
+            return self.result
+
+    llm = FlakyLLM({"reply": "看到了收据，45元。", "actions": []})
+    reply = handle_message("这是什么", settings, llm, image_paths=[str(pic)])
+    assert calls["n"] == 2                       # native try, then fallback
+    assert "a receipt for ¥45" in llm.prompts[-1]  # description substituted
+    assert reply.startswith("看到了收据")
+
+
+def test_llm_error_without_images_is_humane(settings, tmp_path, monkeypatch):
+    class DeadLLM:
+        def complete_json(self, *a, **kw):
+            raise RuntimeError("401 invalid key")
+
+    reply = handle_message("你好", settings, DeadLLM())
+    assert "(assistant error" not in reply
+    assert "稍后再试" in reply and "401 invalid key" in reply

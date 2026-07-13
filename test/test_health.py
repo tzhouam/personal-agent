@@ -49,8 +49,8 @@ def test_records_validation_and_kinds(settings):
 def test_record_dedup_on_stated_time(settings):
     store = HealthStore(settings.profile_dir)
     assert store.add("meal", description="牛肉面", time="12:30")[0] == "created"
-    status, existing = store.add("meal", description="beef noodles",
-                                 time="12:30")  # same meal, reworded
+    status, existing = store.add("meal", description="香浓牛肉面一碗",
+                                 time="12:30")  # same dish, reworded
     assert status == "duplicate" and existing["id"] == "h1"
     assert store.add("meal", description="牛肉面", time="19:00")[0] == "created"
     # weight: timeless same-day same-kg re-send dedups
@@ -192,3 +192,15 @@ def test_crosslinks_in_chat_context(settings):
     # empty stores → no section
     other = type(settings)(_env_file=None, data_dir=settings.data_dir / "other")
     assert "## Cross-links" not in build_context(other)
+
+
+def test_meal_dedup_allows_second_dish_same_sitting(settings):
+    # owner correction: 燕窝 after 椒盐虾 at the same dinner time was rejected
+    store = HealthStore(settings.profile_dir)
+    assert store.add("meal", description="晚餐: 椒盐虾配脆炸罗勒叶",
+                     time="20:00")[0] == "created"
+    assert store.add("meal", description="甜品: 冰糖燕窝",
+                     time="20:00")[0] == "created"        # different dish → ok
+    status, existing = store.add("meal", description="椒盐虾配脆炸罗勒叶",
+                                 time="20:00")            # same dish reworded
+    assert status == "duplicate" and existing["id"] == "h1"
