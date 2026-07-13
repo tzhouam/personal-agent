@@ -138,7 +138,8 @@ def _gather_papers(llm: LLM, profile: dict, profile_summary: str,
     even that is empty. `health` is annotated with what happened for the footer."""
     try:
         result = llm.complete_json(
-            f"## Owner profile\n{profile_summary}", system=_QUERY_SYSTEM, max_tokens=1500
+            f"## Owner profile\n{profile_summary}", system=_QUERY_SYSTEM,
+            max_tokens=1500, role="pipeline",
         )
         queries = [q for q in result.get("queries", []) if isinstance(q, str)][:6]
     except Exception as exc:
@@ -234,7 +235,7 @@ def _summarize(llm: LLM, profile_summary: str, papers: list[dict], feed_items: l
         result = llm.complete_json(
             f"## Owner profile\n{profile_summary}\n\n## Papers\n{paper_lines or '(none)'}\n\n"
             f"## Feed items\n{item_lines or '(none)'}",
-            system=_SUMMARY_SYSTEM, max_tokens=8000,
+            system=_SUMMARY_SYSTEM, max_tokens=8000, role="pipeline",
         )
     except Exception as exc:
         log.warning("summary generation failed: %s", exc)

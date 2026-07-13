@@ -80,12 +80,6 @@ class LLM:
             return self.client, self.cheap_model
         return self.client, self.default_model
 
-    @retry(
-        retry=retry_if_exception_type(_RETRYABLE),
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=2, max=30),
-        reraise=True,
-    )
     def complete(
         self,
         prompt: str,
@@ -100,10 +94,13 @@ class LLM:
         role map (e.g. "chat", "research", "task"); an explicit ``model``
         overrides it on the default provider; both default to ``default_model``.
         ``images`` are local file paths attached as image content blocks before
-        the text — only meaningful on a multimodal model. The call is wrapped in
-        a trace span recording usage/stop reason, retried on transient errors
-        (via the decorator), and logs a warning — but does not raise — when the
-        response is cut off at ``max_tokens``."""
+        the text — only meaningful on a multimodal model. Each underlying API
+        call (``_call``) is traced, retried on transient errors, and logs a
+        warning — but does not raise — when the response is cut off at
+        ``max_tokens``. Retry lives on ``_call`` (not here) so a mixture's
+        proposers and aggregator each get their own retry rather than being
+        dropped on the first blip, and an aggregator retry doesn't re-run every
+        proposer."""
         content: str | list = prompt
         if images:
             content = [_image_block(p) for p in images] + [
@@ -114,10 +111,18 @@ class LLM:
         client, model_id = self._resolve(role, model)
         return self._call(client, model_id, content, system, max_tokens)
 
+    @retry(
+        retry=retry_if_exception_type(_RETRYABLE),
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=2, max=30),
+        reraise=True,
+    )
     def _call(self, client, model_id: str, content, system: str | None,
               max_tokens: int) -> str:
         """One traced ``messages.create`` returning the concatenated text; the
-        shared core of the single-model and mixture paths."""
+        shared core of the single-model and mixture paths. Retried on transient
+        errors here (rather than on ``complete``) so each mixture proposer and
+        the aggregator retry independently."""
         kwargs: dict = {"model": model_id, "max_tokens": max_tokens,
                         "messages": [{"role": "user", "content": content}]}
         if system:
@@ -166,9 +171,28 @@ class LLM:
             if not responses:
                 raise RuntimeError("all mixture proposers failed")
 
+        # The aggregator is otherwise a single point of failure: if it dies
+        # after every proposer succeeded, fall back to the first surviving
+        # proposal (itself a complete answer to the original prompt) rather
+        # than sinking the whole call — symmetric with dropping a dead proposer.
         agg_client = self._client(agg.get("base_url"), agg.get("api_key"))
-        return self._call(agg_client, agg["model"], _augment(content, responses),
-                          system, max_tokens)
+        try:
+            synthesis = self._call(agg_client, agg["model"],
+                                   _augment(content, responses), system, max_tokens)
+        except Exception as exc:
+            logging.getLogger("assistant").warning(
+                "mixture aggregator %s failed (%s) — returning a proposer answer",
+                agg.get("model"), exc)
+            return responses[0]
+        # An empty synthesis is as useless as a raised one — a reasoning-model
+        # aggregator that spends its whole budget on hidden thinking emits no
+        # text. Don't hand back "" when a good proposal exists.
+        if not synthesis.strip():
+            logging.getLogger("assistant").warning(
+                "mixture aggregator %s returned empty output — returning a "
+                "proposer answer", agg.get("model"))
+            return responses[0]
+        return synthesis
 
     def complete_json(self, prompt: str, system: str | None = None, **kw):
         """One retry with error feedback if the first response isn't valid JSON."""
