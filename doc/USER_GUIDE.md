@@ -77,7 +77,7 @@ endpoint works.
 | Setting | Notes |
 |---|---|
 | `ANTHROPIC_API_KEY` | Your key. Required. |
-| `ANTHROPIC_BASE_URL` | Leave empty for real Anthropic. For a compatible provider (e.g. DeepSeek) set its base URL, e.g. `https://api.deepseek.com/anthropic`. |
+| `ANTHROPIC_BASE_URL` | Leave empty for real Anthropic. For a compatible provider set its base URL — recommended: Xiaomi MiMo standard plan, `https://token-plan-cn.xiaomimimo.com/anthropic` with `ANTHROPIC_MODEL=mimo-v2.5` (natively multimodal, so also set `LLM_SUPPORTS_IMAGES=true`); DeepSeek: `https://api.deepseek.com/anthropic`. |
 | `ANTHROPIC_MODEL` | Main model for reasoning-heavy work (profile, digests, planning). |
 | `LLM_SUPPORTS_IMAGES` | Set `true` when the model is natively multimodal (Claude, `qwen3.6-plus` via DashScope's Anthropic proxy `https://dashscope.aliyuncs.com/apps/anthropic`, …) — chat then attaches photos directly to the model. Text-only models fall back to the `VISION_*` describe chain (see `.env.template`). |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Optional cheaper model for bulk relevance scoring (hundreds of items/day). Falls back to the main model if unset. |

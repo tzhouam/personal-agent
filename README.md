@@ -63,8 +63,20 @@ evidence log (`events.db`) beneath a small curated, git-versioned `profile.yaml`
 
 - **Python 3.11+**
 - An **Anthropic-compatible LLM API key** (real Anthropic, or any compatible
-  endpoint such as DeepSeek or Alibaba Model Studio — set a base URL). A
-  multimodal model (Claude, Qwen-VL class) also unlocks image chat
+  endpoint — set a base URL). **Recommended: Xiaomi MiMo `mimo-v2.5` on the
+  standard (token-plan) subscription** — natively multimodal (image chat works
+  out of the box), fast, and economical for an agent that makes hundreds of
+  calls a day:
+
+  ```
+  ANTHROPIC_BASE_URL=https://token-plan-cn.xiaomimimo.com/anthropic
+  ANTHROPIC_MODEL=mimo-v2.5
+  ANTHROPIC_DEFAULT_HAIKU_MODEL=mimo-v2.5
+  LLM_SUPPORTS_IMAGES=true
+  ```
+
+  DeepSeek, Alibaba Model Studio (Qwen), and real Anthropic all work the same
+  way; any multimodal model (Claude, Qwen-VL class, MiMo) unlocks image chat
 - A **GitHub token** (fine-grained, read-only is enough for the collector)
 - An **email delivery path**: a [Resend](https://resend.com) API key (easiest)
   or SMTP credentials (a Gmail app password also unlocks the Gmail collector
