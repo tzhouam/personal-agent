@@ -1,5 +1,8 @@
 # personal-agent
 
+> [!TIP]
+> **Just want to get running?** → **[Interactive quick start ↗](https://tzhouam.github.io/personal-agent/quickstart.html)** — bilingual, narrated, about five minutes.
+
 A daily self-assistant that keeps a living picture of *you* and turns your own
 activity into something useful every morning. It reads what you did (GitHub,
 email, browser history), maintains an evidence-backed profile of your skills
@@ -19,7 +22,6 @@ https://github.com/user-attachments/assets/6228e3fc-8e1c-4edc-a2d2-68330df2823e
 
 *Embedded player is 720p — [full quality (1080p)](docs/media/intro.mp4).*
 
-- **Just want to get running?** → **[Interactive quick start ↗](https://tzhouam.github.io/personal-agent/quickstart.html)** — bilingual, narrated, about five minutes.
 - **New here?** → [`assistant init`](#quickstart) walks you through setup.
 - **Using it day to day?** → [**User Guide**](doc/USER_GUIDE.md)
 - **Understanding or extending it?** → [**Design & Architecture**](doc/DESIGN.md)
