@@ -459,6 +459,16 @@ LLM_SUPPORTS_IMAGES=true</pre>
 <span class="cmd">TAVILY_API_KEY</span>=<span class="val">…</span>   <span class="cmt"># or this</span></pre></div>
         </article>
 
+        <article class="cfg reveal">
+          <div class="cfg-head"><span class="name" data-en="Multi-model · MoA" data-zh="多模型 · MoA">Multi-model · MoA</span><span class="pill" data-en="optional" data-zh="可选">optional</span></div>
+          <p data-en="Route each role to its own model (LLM_ROLES), or run Mixture-of-Agents — several models propose in parallel and one aggregates — on the offline roles (LLM_MIXTURE). A dead or empty member is dropped, so it keeps working as long as one proposal survives."
+            data-zh="用 LLM_ROLES 把每个角色路由到各自的模型；或用 LLM_MIXTURE 在离线角色上启用 Mixture-of-Agents —— 多个模型并行作答、由一个模型汇总。失效或空的成员会被自动跳过，只要有一个作答存活就照常工作。">Route each role to its own model (LLM_ROLES), or run Mixture-of-Agents — several models propose in parallel and one aggregates — on the offline roles (LLM_MIXTURE). A dead or empty member is dropped, so it keeps working as long as one proposal survives.</p>
+          <a class="cfg-link" href="https://github.com/tzhouam/personal-agent/blob/main/doc/DESIGN.md#9-configuration" target="_blank" rel="noopener" data-en="Multi-model routing docs ↗" data-zh="多模型路由文档 ↗">Multi-model routing docs ↗</a>
+          <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
+<pre><span class="cmd">LLM_ROLES</span>=<span class="val">{"chat":{"model":"mimo-v2.5"}}</span>
+<span class="cmd">LLM_MIXTURE</span>=<span class="val">{"members":[{"model":"mimo-v2.5"},{"model":"qwen3.6-plus"}],"roles":["pipeline"]}</span>   <span class="cmt"># one line — or wrap in 'single quotes'</span></pre></div>
+        </article>
+
         <p class="cfg-span" style="margin:6px 0 0;color:var(--faint);font-size:.9rem;text-align:center"
           data-en="Every knob — website marks sync, WeChat announce, research sources — is documented inline in .env.template."
           data-zh="每一个开关 —— 网站标记同步、微信播报、研究源 —— 都在 .env.template 里有说明。">Every knob — website marks sync, WeChat announce, research sources — is documented inline in .env.template.</p>
