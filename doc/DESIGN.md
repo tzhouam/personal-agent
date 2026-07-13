@@ -371,7 +371,7 @@ code. `assistant init` writes `.env` interactively with live validation;
 `assistant init --check` (`init_wizard.py`) is the config doctor — the same
 probes run non-interactively with a ✅/⚠️/❌ report.
 
-**Multi-model routing.** The `ANTHROPIC_*` settings are the default provider/model; `LLM_ROLES` (a JSON role→{model, base_url?, api_key?} map) routes task roles (chat, pipeline, research, task, evolve) to different models — and, since a model often lives on a different endpoint, different base URLs + keys — so e.g. chat runs on mimo-v2.5 while research runs on qwen3.6-plus at once. `LLM._resolve` maps role→(client, model) and caches one client per provider; an unset role falls back to the cheap or default model.
+**Multi-model routing.** The `ANTHROPIC_*` settings are the default provider/model; `LLM_ROLES` (a JSON role→{model, base_url?, api_key?} map) routes task roles (chat, pipeline, research, task, evolve) to different models — and, since a model often lives on a different endpoint, different base URLs + keys — so e.g. chat runs on mimo-v2.5 while research runs on qwen3.6-plus at once. `LLM._resolve` maps role→(client, model) and caches one client per provider; an unset role falls back to the cheap or default model. When `LLM_MIXTURE` gives >=2 members, the listed roles run **Mixture-of-Agents** (Wang et al. 2024): every member proposes in parallel and an aggregator synthesizes one best answer (optionally over several refine layers) — trading ~2x cost/latency for quality on the offline reasoning roles.
 
 Data lives under `DATA_DIR` (default `~/.personal-agent/`): `profile/` (git),
 `events.db`, `runs/<id>/`, `state.json`, `sessions/`, plus `todos.yaml`,

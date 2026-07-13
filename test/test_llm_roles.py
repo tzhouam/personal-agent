@@ -83,3 +83,74 @@ def test_complete_uses_resolved_client(monkeypatch):
     llm.client.messages = type("M", (), {"create": staticmethod(fake_create)})()
     out = llm.complete("hi", role="chat")
     assert out == "ok" and captured["model"] == "mimo-v2.5"
+
+
+def test_mixture_proposes_and_aggregates(monkeypatch):
+    # each model returns a tagged answer; the aggregator sees all proposals
+    calls = []
+
+    class Resp:
+        def __init__(self, text):
+            self.content = [type("B", (), {"type": "text", "text": text})()]
+            self.stop_reason = "end_turn"; self.usage = None
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    model = kw["model"]
+                    calls.append((model, kw["messages"][0]["content"]))
+                    if model == "aggregator":
+                        return Resp("SYNTHESIZED")
+                    return Resp(f"answer-from-{model}")
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "aggregator"},
+        "roles": ["pipeline"]}))
+    out = llm.complete("do the thing", role="pipeline")
+    assert out == "SYNTHESIZED"
+    proposers = [c for c in calls if c[0] in ("m1", "m2")]
+    assert {c[0] for c in proposers} == {"m1", "m2"}          # both proposed
+    agg = next(c for c in calls if c[0] == "aggregator")
+    assert "answer-from-m1" in agg[1] and "answer-from-m2" in agg[1]  # saw both
+    assert "Synthesize" in agg[1]
+
+
+def test_mixture_only_for_configured_roles(monkeypatch):
+    _fake_anthropic(monkeypatch)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}], "roles": ["pipeline"]}))
+    assert "chat" not in llm._mixture_roles     # chat not listed → single-model
+    assert "pipeline" in llm._mixture_roles
+    # a single member never triggers MoA
+    llm2 = LLM(_settings(llm_mixture={"members": [{"model": "m1"}], "roles": ["pipeline"]}))
+    assert llm2._mixture_roles == set()
+
+
+def test_mixture_survives_one_dead_proposer(monkeypatch):
+    class Resp:
+        def __init__(self, text):
+            self.content = [type("B", (), {"type": "text", "text": text})()]
+            self.stop_reason = "end_turn"; self.usage = None
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    if kw["model"] == "dead":
+                        raise RuntimeError("provider down")
+                    if kw["model"] == "agg":
+                        return Resp("OK")
+                    return Resp("live-answer")
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "dead"}, {"model": "live"}],
+        "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
+    assert llm.complete("x", role="pipeline") == "OK"   # degraded, not failed

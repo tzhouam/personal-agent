@@ -41,6 +41,13 @@ class LLM:
         self.default_model = settings.anthropic_model
         self.cheap_model = settings.cheap_model
         self.roles: dict = settings.llm_roles or {}
+        self.mixture: dict = settings.llm_mixture or {}
+        # roles that run Mixture-of-Agents when >=2 members are configured;
+        # defaults to the offline, quality-sensitive roles (interactive chat is
+        # opt-in, since MoA ~doubles latency)
+        self._mixture_roles: set = (
+            set(self.mixture.get("roles") or ["pipeline", "research", "task", "evolve"])
+            if len(self.mixture.get("members", [])) >= 2 else set())
         self._clients: dict = {}
         self.client = self._client(settings.anthropic_base_url,
                                    settings.anthropic_api_key)
@@ -101,17 +108,23 @@ class LLM:
         if images:
             content = [_image_block(p) for p in images] + [
                 {"type": "text", "text": prompt}]
+        if model is None and role and role in self._mixture_roles \
+                and len(self.mixture.get("members", [])) >= 2:
+            return self._mixture(content, system, max_tokens)
         client, model_id = self._resolve(role, model)
-        kwargs: dict = {
-            "model": model_id,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": content}],
-        }
+        return self._call(client, model_id, content, system, max_tokens)
+
+    def _call(self, client, model_id: str, content, system: str | None,
+              max_tokens: int) -> str:
+        """One traced ``messages.create`` returning the concatenated text; the
+        shared core of the single-model and mixture paths."""
+        kwargs: dict = {"model": model_id, "max_tokens": max_tokens,
+                        "messages": [{"role": "user", "content": content}]}
         if system:
             kwargs["system"] = system
         from . import tracing
 
-        with tracing.span("llm", model=kwargs["model"], max_tokens=max_tokens) as _sp:
+        with tracing.span("llm", model=model_id, max_tokens=max_tokens) as _sp:
             resp = client.messages.create(**kwargs)
             tracing.set_usage(_sp, getattr(resp, "usage", None),
                               stop_reason=getattr(resp, "stop_reason", "") or "")
@@ -120,9 +133,42 @@ class LLM:
 
             logging.getLogger("assistant").warning(
                 "LLM response truncated at max_tokens=%s — raise the budget for this call",
-                kwargs["max_tokens"],
-            )
+                max_tokens)
         return "".join(b.text for b in resp.content if b.type == "text")
+
+    def _mixture(self, content, system: str | None, max_tokens: int) -> str:
+        """Mixture-of-Agents: every member model proposes an answer in parallel,
+        then the aggregator synthesizes them into one (Wang et al. 2024). With
+        `layers` > 1 each further round of proposers refines against the last
+        round's answers before the final aggregation. A member that errors is
+        dropped as long as one proposal survives."""
+        import logging
+        from concurrent.futures import ThreadPoolExecutor
+
+        members = self.mixture["members"]
+        agg = self.mixture.get("aggregator") or members[0]
+        layers = max(1, int(self.mixture.get("layers", 1)))
+
+        def propose(member, layer_input):
+            try:
+                client = self._client(member.get("base_url"), member.get("api_key"))
+                return self._call(client, member["model"], layer_input, system, max_tokens)
+            except Exception as exc:
+                logging.getLogger("assistant").warning(
+                    "mixture proposer %s failed: %s", member.get("model"), exc)
+                return None
+
+        responses: list[str] = []
+        for _ in range(layers):
+            layer_input = content if not responses else _augment(content, responses)
+            with ThreadPoolExecutor(max_workers=min(8, len(members))) as ex:
+                responses = [r for r in ex.map(lambda m: propose(m, layer_input), members) if r]
+            if not responses:
+                raise RuntimeError("all mixture proposers failed")
+
+        agg_client = self._client(agg.get("base_url"), agg.get("api_key"))
+        return self._call(agg_client, agg["model"], _augment(content, responses),
+                          system, max_tokens)
 
     def complete_json(self, prompt: str, system: str | None = None, **kw):
         """One retry with error feedback if the first response isn't valid JSON."""
@@ -135,6 +181,24 @@ class LLM:
                 f"({exc}). Respond again with ONLY valid JSON, no prose, no code fences."
             )
             return _parse_json(self.complete(retry_prompt, system=system, **kw))
+
+
+_MOA_SYNTH = (
+    "\n\n[Reference answers]\nSeveral models answered the request above. Synthesize "
+    "them into ONE best response: keep what is correct and useful, discard errors, "
+    "bias, and hallucination, and match EXACTLY the format the request requires "
+    "(if it asks for JSON, reply with only that JSON). Do not mention the other "
+    "answers.\n\n")
+
+
+def _augment(content, responses: list[str]):
+    """Append the aggregator's reference block (proposer answers) to the prompt
+    content, preserving image blocks when content is a message list."""
+    block = _MOA_SYNTH + "\n\n".join(f"[Answer {i + 1}]\n{r}"
+                                     for i, r in enumerate(responses))
+    if isinstance(content, list):
+        return content + [{"type": "text", "text": block}]
+    return content + block
 
 
 def _image_block(path: str) -> dict:

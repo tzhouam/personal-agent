@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     #                    "base_url": "https://dashscope.aliyuncs.com/apps/anthropic",
     #                    "api_key": "sk-…"}}
     llm_roles: dict = {}
+    # Mixture-of-Agents (JSON in LLM_MIXTURE). When >=2 `members` are given, the
+    # listed `roles` (default pipeline/research/task/evolve) run MoA: every
+    # member proposes an answer in parallel, then `aggregator` (default the
+    # first member) synthesizes them into one. `layers` (default 1) adds refine
+    # rounds. Each member/aggregator is {model, base_url?, api_key?}.
+    # e.g. {"members": [{"model": "mimo-v2.5"}, {"model": "mimo-v2.5-pro"}],
+    #       "aggregator": {"model": "mimo-v2.5-pro"}, "roles": ["pipeline"]}
+    llm_mixture: dict = {}
 
     # GitHub
     github_token: str = ""
