@@ -249,6 +249,11 @@
   .cfg .code pre{font-size:.78rem;padding:13px 15px;line-height:1.7}
   .cfg .val{color:var(--muted)}
   .cfg-span{grid-column:1 / -1}
+  .cfg > p{margin:0 0 12px}
+  .cfg-link{font-family:var(--mono);font-size:.76rem;color:var(--accent);text-decoration:none;
+    display:inline-flex;align-items:center;gap:.35rem;margin:0 0 16px;width:fit-content;
+    border-bottom:1px solid transparent;transition:border-color .2s}
+  .cfg-link:hover{border-color:var(--accent)}
   @media (max-width:720px){.cfg-groups{grid-template-columns:1fr}}
 
   /* reveal */
@@ -395,6 +400,7 @@ LLM_SUPPORTS_IMAGES=true</pre>
           <div class="cfg-head"><span class="name">GitHub</span><span class="pill req" data-en="required" data-zh="必需">required</span></div>
           <p data-en="A fine-grained personal access token — read-only access to your repos and notifications is enough. It powers the activity collector."
             data-zh="一个细粒度个人访问令牌 —— 对你的仓库和通知只读即可。它驱动活动采集器。">A fine-grained personal access token — read-only access to your repos and notifications is enough. It powers the activity collector.</p>
+          <a class="cfg-link" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener" data-en="Create a fine-grained token ↗" data-zh="创建细粒度令牌 ↗">Create a fine-grained token ↗</a>
           <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
 <pre><span class="cmd">GITHUB_TOKEN</span>=<span class="val">github_pat_…</span>
 <span class="cmd">GITHUB_USER</span>=<span class="val">your-username</span></pre></div>
@@ -404,6 +410,7 @@ LLM_SUPPORTS_IMAGES=true</pre>
           <div class="cfg-head"><span class="name">Email · Resend</span><span class="pill req" data-en="required · pick one" data-zh="必需 · 二选一">required · pick one</span></div>
           <p data-en="The easiest delivery path — a free API key from resend.com sends your daily digest."
             data-zh="最简单的投递方式 —— resend.com 的免费 API key 就能发送每日摘要。">The easiest delivery path — a free API key from resend.com sends your daily digest.</p>
+          <a class="cfg-link" href="https://resend.com/api-keys" target="_blank" rel="noopener" data-en="Get a Resend key ↗" data-zh="获取 Resend 密钥 ↗">Get a Resend key ↗</a>
           <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
 <pre><span class="cmd">RESEND_API_KEY</span>=<span class="val">re_…</span>
 <span class="cmd">RESEND_FROM</span>=<span class="val">onboarding@resend.dev</span>
@@ -414,6 +421,7 @@ LLM_SUPPORTS_IMAGES=true</pre>
           <div class="cfg-head"><span class="name">Email · SMTP</span><span class="pill" data-en="or this one" data-zh="或用这个">or this one</span></div>
           <p data-en="Instead of — or alongside — Resend. With Gmail it also unlocks the inbox collector and email chat; use an app password, not your login."
             data-zh="作为 Resend 的替代或补充。配合 Gmail 还会解锁收件箱采集器和邮件对话；用应用专用密码，而非登录密码。">Instead of — or alongside — Resend. With Gmail it also unlocks the inbox collector and email chat; use an app password, not your login.</p>
+          <a class="cfg-link" href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener" data-en="Create a Gmail app password ↗" data-zh="创建 Gmail 应用密码 ↗">Create a Gmail app password ↗</a>
           <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
 <pre><span class="cmd">SMTP_HOST</span>=<span class="val">smtp.gmail.com</span>
 <span class="cmd">SMTP_PORT</span>=<span class="val">587</span>
@@ -426,6 +434,7 @@ LLM_SUPPORTS_IMAGES=true</pre>
           <div class="cfg-head"><span class="name">Résumé sync</span><span class="pill" data-en="optional" data-zh="可选">optional</span></div>
           <p data-en="Point it at your Overleaf git-bridge (or any git remote holding your .tex), then run assistant resume-init. Every edit is gated on your explicit okay."
             data-zh="指向你的 Overleaf git 桥接地址（或任何存放 .tex 的 git 远端），再运行 assistant resume-init。每次改动都需你明确同意。">Point it at your Overleaf git-bridge (or any git remote holding your .tex), then run assistant resume-init. Every edit is gated on your explicit okay.</p>
+          <a class="cfg-link" href="https://www.overleaf.com/learn/how-to/Git_integration" target="_blank" rel="noopener" data-en="Overleaf Git setup ↗" data-zh="Overleaf Git 设置 ↗">Overleaf Git setup ↗</a>
           <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
 <pre><span class="cmd">RESUME_REMOTE_URL</span>=<span class="val">https://git:TOKEN@git.overleaf.com/PROJECT_ID</span></pre></div>
         </article>
@@ -434,6 +443,7 @@ LLM_SUPPORTS_IMAGES=true</pre>
           <div class="cfg-head"><span class="name" data-en="Website" data-zh="个人网站">Website</span><span class="pill" data-en="optional" data-zh="可选">optional</span></div>
           <p data-en="Publish your profile to a GitHub Pages repo. The password encrypts the private todos / reading / routines pages in your browser."
             data-zh="把你的画像发布到 GitHub Pages 仓库。密码用于在浏览器端加密私有的待办 / 阅读 / 例程页面。">Publish your profile to a GitHub Pages repo. The password encrypts the private todos / reading / routines pages in your browser.</p>
+          <a class="cfg-link" href="https://github.com/new" target="_blank" rel="noopener" data-en="Create the Pages repo ↗" data-zh="创建 Pages 仓库 ↗">Create the Pages repo ↗</a>
           <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
 <pre><span class="cmd">WEBSITE_REPO</span>=<span class="val">you/you.github.io</span>
 <span class="cmd">WEBSITE_PASSWORD</span>=<span class="val">a-strong-passphrase</span></pre></div>
@@ -443,6 +453,7 @@ LLM_SUPPORTS_IMAGES=true</pre>
           <div class="cfg-head"><span class="name" data-en="Web search" data-zh="网页搜索">Web search</span><span class="pill" data-en="optional" data-zh="可选">optional</span></div>
           <p data-en="Sharpens chat answers and task research. Keyless DuckDuckGo works out of the box; add a key for better results."
             data-zh="让对话回答和任务调研更准。无需密钥即可用 DuckDuckGo；加一个密钥效果更好。">Sharpens chat answers and task research. Keyless DuckDuckGo works out of the box; add a key for better results.</p>
+          <a class="cfg-link" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener" data-en="Get a Gemini key ↗" data-zh="获取 Gemini 密钥 ↗">Get a Gemini key ↗</a>
           <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
 <pre><span class="cmd">GEMINI_API_KEY</span>=<span class="val">…</span>   <span class="cmt"># recommended</span>
 <span class="cmd">TAVILY_API_KEY</span>=<span class="val">…</span>   <span class="cmt"># or this</span></pre></div>
