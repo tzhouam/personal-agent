@@ -466,7 +466,7 @@ LLM_SUPPORTS_IMAGES=true</pre>
           <a class="cfg-link" href="https://github.com/tzhouam/personal-agent/blob/main/doc/DESIGN.md#9-configuration" target="_blank" rel="noopener" data-en="Multi-model routing docs ↗" data-zh="多模型路由文档 ↗">Multi-model routing docs ↗</a>
           <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
 <pre><span class="cmd">LLM_ROLES</span>=<span class="val">{"chat":{"model":"mimo-v2.5"}}</span>
-<span class="cmd">LLM_MIXTURE</span>=<span class="val">{"members":[{"model":"mimo-v2.5"},{"model":"qwen3.6-plus"}],"roles":["pipeline"]}</span>   <span class="cmt"># one line — or wrap in 'single quotes'</span></pre></div>
+<span class="cmd">LLM_MIXTURE</span>=<span class="val">{"members":[{"model":"mimo-v2.5","base_url":"https://token-plan-cn.xiaomimimo.com/anthropic","api_key":"tp-…"},{"model":"qwen3.6-plus","base_url":"https://dashscope.aliyuncs.com/apps/anthropic","api_key":"sk-…"}],"aggregator":{"model":"deepseek-v4-pro","base_url":"https://api.deepseek.com/anthropic","api_key":"sk-…"},"roles":["pipeline"]}</span>   <span class="cmt"># one line — or wrap in 'single quotes'; each member is {model, base_url?, api_key?}</span></pre></div>
         </article>
 
         <p class="cfg-span" style="margin:6px 0 0;color:var(--faint);font-size:.9rem;text-align:center"
