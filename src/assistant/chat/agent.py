@@ -9,6 +9,7 @@ from what the code actually did, not from what the LLM claims it did.
 
 import json
 import logging
+import time
 from datetime import date
 
 from ..actions import execute, looks_failed, prompt_block, run_action
@@ -19,6 +20,8 @@ from ..state import load_state
 from ..todo_store import ReadingList, TodoStore
 
 log = logging.getLogger("assistant")
+
+_TODO_CONTEXT_LIMIT = 25
 
 _SYSTEM = f"""You are your owner's personal assistant, reachable by chat/email. Answer from the
 context below (profile, open todos, reading list, active routines, pending reminders, finance
@@ -113,12 +116,20 @@ def build_context(settings: Settings) -> str:
     if profile_store.exists():
         parts.append("## Owner profile\n" + render_summary(profile_store.load()))
 
-    todos = TodoStore(settings.profile_dir).open_items()
-    parts.append("## Open todos\n" + ("\n".join(
-        f"[{t['id']}] {t['title']}" + (f" (due {t['due']})" if t.get("due") else "")
-        + (f" — {t.get('detail', '')[:160]}" if t.get("detail") else "")
-        for t in todos
-    ) or "(none)"))
+    # context budget: the full todo list once hit 18KB of a 23KB context —
+    # show the top of the urgency ranking, summarize the rest
+    from ..urgency import urgency
+
+    todos = sorted(TodoStore(settings.profile_dir).open_items(),
+                   key=urgency, reverse=True)
+    shown, rest = todos[:_TODO_CONTEXT_LIMIT], todos[_TODO_CONTEXT_LIMIT:]
+    lines = [f"[{t['id']}] {t['title']}" + (f" (due {t['due']})" if t.get("due") else "")
+             + (f" — {t.get('detail', '')[:120]}" if t.get("detail") else "")
+             for t in shown]
+    if rest:
+        lines.append(f"…and {len(rest)} lower-urgency todos "
+                     "(list_todos shows all; never claim these are everything)")
+    parts.append("## Open todos (top by urgency)\n" + ("\n".join(lines) or "(none)"))
 
     reading = ReadingList(settings.profile_dir).open_items()
     parts.append("## Reading list\n" + ("\n".join(
@@ -201,6 +212,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
     described by the vision chain (vision.py) and injected as context, so an
     image-only message (empty ``text``) still gets a real reply."""
     llm = llm or LLM(settings)
+    turn_start = time.monotonic()
     prompt = f"## Context\n{build_context(settings)}\n\n"
     attach: list[str] = []
     if image_paths:
@@ -235,7 +247,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
         log.exception("lessons prompt injection failed")
     system = system_prompt(settings)
     try:
-        result = llm.complete_json(prompt, system=system, max_tokens=2000,
+        result = llm.complete_json(prompt, system=system, max_tokens=6000,
                                    **({"images": attach} if attach else {}))
     except Exception as exc:
         log.exception("chat LLM call failed")
@@ -246,6 +258,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
     actions = result.get("actions") or []
     outcomes = execute(actions, settings)
     all_outcomes = list(outcomes)
+    repair_rounds = 0
 
     # Review-and-retry: when an action outcome reports a failure (bad params,
     # wrong id, unknown action), show the model exactly what it emitted and
@@ -267,7 +280,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                     "succeeded or were rejected as duplicates. You may also "
                     "revise the reply.")
         try:
-            fix = llm.complete_json(review, system=system, max_tokens=2000)
+            fix = llm.complete_json(review, system=system, max_tokens=6000)
         except Exception:
             log.exception("action-review LLM call failed")
             break
@@ -277,9 +290,25 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
         if not actions:
             break
         outcomes = execute(actions, settings)
+        repair_rounds += 1
         log.info("action review: retried %d action(s)", len(outcomes))
         all_outcomes += [f"(retry) {o}" for o in outcomes]
 
     if all_outcomes:
         reply += "\n\n✔ " + "\n✔ ".join(all_outcomes)
+    try:  # harness telemetry: per-turn latency/size/repair counts (best-effort)
+        from datetime import datetime
+
+        from ..events_store import EventsStore
+
+        events = EventsStore(settings.events_db)
+        events.record_metrics(f"chat-{date.today().isoformat()}", "chat_turn", {
+            "duration_s": round(time.monotonic() - turn_start, 2),
+            "prompt_chars": len(prompt), "actions": len(all_outcomes),
+            "repair_rounds": repair_rounds,
+            "failures_left": sum(1 for o in all_outcomes if looks_failed(o)),
+            "images": len(attach)})
+        events.close()
+    except Exception:
+        log.exception("chat metrics failed")
     return reply

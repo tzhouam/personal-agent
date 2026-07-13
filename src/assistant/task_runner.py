@@ -79,7 +79,7 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
                   f"\n\n## Steps so far\n{transcript}\n\n## Next\nDecide the next single "
                   "step, or finish with the report.")
         try:
-            move = llm.complete_json(prompt, system=system, max_tokens=2500)
+            move = llm.complete_json(prompt, system=system, max_tokens=6000)
         except Exception as exc:
             record["status"], record["report"] = "error", f"LLM failed mid-task: {exc}"
             break

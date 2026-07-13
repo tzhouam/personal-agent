@@ -43,7 +43,7 @@ def evolve(settings: Settings, llm: LLM | None = None) -> dict:
     result = llm.complete_json(
         f"## Existing lessons (do not repeat or contradict)\n{existing}\n\n"
         f"## Recent interactions\n{evidence[:16000]}",
-        system=_EVOLVE_SYSTEM, max_tokens=2000)
+        system=_EVOLVE_SYSTEM, max_tokens=5000)
     proposed = (result.get("lessons") or []) if isinstance(result, dict) else []
     learned = []
     for item in proposed[:3]:

@@ -163,3 +163,18 @@ def test_action_review_gives_up_when_unfixable(settings):
     assert llm.calls == 2                       # one review round, then stop
     assert "no open todo 't99'" in reply
     assert reply.startswith("那个待办不存在")
+
+
+def test_context_caps_todos_by_urgency(settings):
+    from assistant.chat.agent import build_context
+
+    store = TodoStore(settings.profile_dir)
+    for i in range(40):
+        store.upsert(f"k{i}", title=f"todo number {i}", source="github",
+                     priority="yellow", detail="x" * 300)
+    ctx = build_context(settings)
+    section = ctx.split("## Open todos")[1].split("\n## ")[0]
+    assert "…and 15 lower-urgency todos" in section
+    assert section.count("[t") == 25
+    # per-todo detail is trimmed too
+    assert "x" * 121 not in section
