@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Quick start for personal agent — a local-first daily self-assistant. Install, set up, run, connect WeChat.">
+<meta name="description" content="Quick start for personal agent — a local-first daily self-assistant. Install, configure, run, connect WeChat.">
 <meta property="og:title" content="personal agent — Quick Start">
-<meta property="og:description" content="A local-first daily self-assistant. Install, set up, run, connect WeChat — bilingual, narrated.">
+<meta property="og:description" content="A local-first daily self-assistant. Install, configure every integration, run, connect WeChat — bilingual, narrated.">
 <meta property="og:type" content="website">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127749;</text></svg>">
@@ -233,6 +233,24 @@
     color:var(--muted);font-size:.95rem;max-width:66ch}
   @media (max-width:720px){.connect-grid{grid-template-columns:1fr;gap:30px}.qr-wrap{order:-1}}
 
+  /* ---- config reference ---- */
+  .cfg-groups{display:grid;grid-template-columns:repeat(2,1fr);gap:22px;margin-top:48px}
+  .cfg{border:1px solid var(--line);border-radius:18px;padding:24px;background:var(--surface);
+    box-shadow:var(--shadow);display:flex;flex-direction:column}
+  .cfg-head{display:flex;align-items:center;gap:.7rem;margin-bottom:12px}
+  .cfg-head .name{font-family:var(--mono);font-size:.92rem;font-weight:600;letter-spacing:.02em}
+  .pill{font-family:var(--mono);font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;
+    padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--faint);white-space:nowrap}
+  .pill.req{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 42%,var(--line));
+    background:color-mix(in srgb,var(--accent) 8%,transparent)}
+  .pill.good{color:var(--good);border-color:color-mix(in srgb,var(--good) 42%,var(--line))}
+  .cfg > p{margin:0 0 16px;color:var(--muted);font-size:.93rem}
+  .cfg .code{margin-top:auto}
+  .cfg .code pre{font-size:.78rem;padding:13px 15px;line-height:1.7}
+  .cfg .val{color:var(--muted)}
+  .cfg-span{grid-column:1 / -1}
+  @media (max-width:720px){.cfg-groups{grid-template-columns:1fr}}
+
   /* reveal */
   .reveal{opacity:0;transform:translateY(18px);transition:opacity .7s ease,transform .7s ease}
   .reveal.in{opacity:1;transform:none}
@@ -358,6 +376,81 @@ LLM_SUPPORTS_IMAGES=true</pre>
             </div>
           </div>
         </article>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section id="config">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <h2 data-en="Every setting, by hand" data-zh="所有配置，手动版">Every setting, by hand</h2>
+        <p class="sec-sub" data-en="The wizard writes all of this and validates it live — but if you'd rather edit .env yourself, here's every group. Run assistant init --check when you're done."
+          data-zh="向导会替你写好这一切并当场校验 —— 但你若想自己改 .env，下面是每一组设置。改完运行 assistant init --check。">The wizard writes all of this and validates it live — but if you'd rather edit .env yourself, here's every group. Run assistant init --check when you're done.</p>
+      </div>
+
+      <div class="cfg-groups">
+        <article class="cfg reveal">
+          <div class="cfg-head"><span class="name">GitHub</span><span class="pill req" data-en="required" data-zh="必需">required</span></div>
+          <p data-en="A fine-grained personal access token — read-only access to your repos and notifications is enough. It powers the activity collector."
+            data-zh="一个细粒度个人访问令牌 —— 对你的仓库和通知只读即可。它驱动活动采集器。">A fine-grained personal access token — read-only access to your repos and notifications is enough. It powers the activity collector.</p>
+          <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
+<pre><span class="cmd">GITHUB_TOKEN</span>=<span class="val">github_pat_…</span>
+<span class="cmd">GITHUB_USER</span>=<span class="val">your-username</span></pre></div>
+        </article>
+
+        <article class="cfg reveal">
+          <div class="cfg-head"><span class="name">Email · Resend</span><span class="pill req" data-en="required · pick one" data-zh="必需 · 二选一">required · pick one</span></div>
+          <p data-en="The easiest delivery path — a free API key from resend.com sends your daily digest."
+            data-zh="最简单的投递方式 —— resend.com 的免费 API key 就能发送每日摘要。">The easiest delivery path — a free API key from resend.com sends your daily digest.</p>
+          <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
+<pre><span class="cmd">RESEND_API_KEY</span>=<span class="val">re_…</span>
+<span class="cmd">RESEND_FROM</span>=<span class="val">onboarding@resend.dev</span>
+<span class="cmd">DIGEST_TO</span>=<span class="val">you@example.com</span></pre></div>
+        </article>
+
+        <article class="cfg reveal">
+          <div class="cfg-head"><span class="name">Email · SMTP</span><span class="pill" data-en="or this one" data-zh="或用这个">or this one</span></div>
+          <p data-en="Instead of — or alongside — Resend. With Gmail it also unlocks the inbox collector and email chat; use an app password, not your login."
+            data-zh="作为 Resend 的替代或补充。配合 Gmail 还会解锁收件箱采集器和邮件对话；用应用专用密码，而非登录密码。">Instead of — or alongside — Resend. With Gmail it also unlocks the inbox collector and email chat; use an app password, not your login.</p>
+          <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
+<pre><span class="cmd">SMTP_HOST</span>=<span class="val">smtp.gmail.com</span>
+<span class="cmd">SMTP_PORT</span>=<span class="val">587</span>
+<span class="cmd">SMTP_USER</span>=<span class="val">you@gmail.com</span>
+<span class="cmd">SMTP_PASSWORD</span>=<span class="val">app-password</span>
+<span class="cmd">DIGEST_TO</span>=<span class="val">you@gmail.com</span></pre></div>
+        </article>
+
+        <article class="cfg reveal">
+          <div class="cfg-head"><span class="name">Résumé sync</span><span class="pill" data-en="optional" data-zh="可选">optional</span></div>
+          <p data-en="Point it at your Overleaf git-bridge (or any git remote holding your .tex), then run assistant resume-init. Every edit is gated on your explicit okay."
+            data-zh="指向你的 Overleaf git 桥接地址（或任何存放 .tex 的 git 远端），再运行 assistant resume-init。每次改动都需你明确同意。">Point it at your Overleaf git-bridge (or any git remote holding your .tex), then run assistant resume-init. Every edit is gated on your explicit okay.</p>
+          <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
+<pre><span class="cmd">RESUME_REMOTE_URL</span>=<span class="val">https://git:TOKEN@git.overleaf.com/PROJECT_ID</span></pre></div>
+        </article>
+
+        <article class="cfg reveal">
+          <div class="cfg-head"><span class="name" data-en="Website" data-zh="个人网站">Website</span><span class="pill" data-en="optional" data-zh="可选">optional</span></div>
+          <p data-en="Publish your profile to a GitHub Pages repo. The password encrypts the private todos / reading / routines pages in your browser."
+            data-zh="把你的画像发布到 GitHub Pages 仓库。密码用于在浏览器端加密私有的待办 / 阅读 / 例程页面。">Publish your profile to a GitHub Pages repo. The password encrypts the private todos / reading / routines pages in your browser.</p>
+          <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
+<pre><span class="cmd">WEBSITE_REPO</span>=<span class="val">you/you.github.io</span>
+<span class="cmd">WEBSITE_PASSWORD</span>=<span class="val">a-strong-passphrase</span></pre></div>
+        </article>
+
+        <article class="cfg reveal">
+          <div class="cfg-head"><span class="name" data-en="Web search" data-zh="网页搜索">Web search</span><span class="pill" data-en="optional" data-zh="可选">optional</span></div>
+          <p data-en="Sharpens chat answers and task research. Keyless DuckDuckGo works out of the box; add a key for better results."
+            data-zh="让对话回答和任务调研更准。无需密钥即可用 DuckDuckGo；加一个密钥效果更好。">Sharpens chat answers and task research. Keyless DuckDuckGo works out of the box; add a key for better results.</p>
+          <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
+<pre><span class="cmd">GEMINI_API_KEY</span>=<span class="val">…</span>   <span class="cmt"># recommended</span>
+<span class="cmd">TAVILY_API_KEY</span>=<span class="val">…</span>   <span class="cmt"># or this</span></pre></div>
+        </article>
+
+        <p class="cfg-span" style="margin:6px 0 0;color:var(--faint);font-size:.9rem;text-align:center"
+          data-en="Every knob — website marks sync, WeChat announce, research sources — is documented inline in .env.template."
+          data-zh="每一个开关 —— 网站标记同步、微信播报、研究源 —— 都在 .env.template 里有说明。">Every knob — website marks sync, WeChat announce, research sources — is documented inline in .env.template.</p>
       </div>
     </div>
   </section>
