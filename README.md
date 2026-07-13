@@ -80,6 +80,7 @@ evidence log (`events.db`) beneath a small curated, git-versioned `profile.yaml`
 
   DeepSeek, Alibaba Model Studio (Qwen), and real Anthropic all work the same
   way; any multimodal model (Claude, Qwen-VL class, MiMo) unlocks image chat
+- *Run different tasks on different models at once* — set `LLM_ROLES` (JSON) to route roles (chat, pipeline, research, task) to different models and endpoints, e.g. `mimo-v2.5` for chat and `qwen3.6-plus` for research simultaneously
 - A **GitHub token** (fine-grained, read-only is enough for the collector)
 - An **email delivery path**: a [Resend](https://resend.com) API key (easiest)
   or SMTP credentials (a Gmail app password also unlocks the Gmail collector

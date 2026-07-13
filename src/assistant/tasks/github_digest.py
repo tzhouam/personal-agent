@@ -73,7 +73,7 @@ def build_digest(llm: LLM, profile: dict, notifications: list[dict], activity: l
     by_id = {str(n["id"]): n for n in head}
     triaged: dict[str, dict] = {}
     try:
-        for item in llm.complete_json(prompt, system=_SYSTEM, max_tokens=6000):
+        for item in llm.complete_json(prompt, system=_SYSTEM, max_tokens=6000, role="pipeline"):
             nid = str(item.get("id", ""))
             if nid in by_id and item.get("priority") in sections:
                 triaged[nid] = item

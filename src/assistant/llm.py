@@ -20,19 +20,58 @@ _RETRYABLE = (
 )
 
 
+_CHEAP_ROLES = frozenset({"cheap", "bulk", "research", "score"})
+
+
 class LLM:
-    """Anthropic chat client carrying the default and cheap model ids, so
-    callers pick a tier without re-reading settings."""
+    """Anthropic chat client with per-role model routing.
+
+    The ``ANTHROPIC_*`` settings are the default provider (base URL + key) and
+    model. ``settings.llm_roles`` (the ``LLM_ROLES`` JSON map) can route named
+    task roles to a different model and — since a different model often lives
+    on a different endpoint — a different base URL + key, so e.g. chat runs on
+    mimo-v2.5 while research runs on qwen3.6-plus at the same time. A role with
+    no entry falls back to the default (cheap tier for cheap-ish roles, else
+    the main model); clients are cached per (base_url, key)."""
 
     def __init__(self, settings: Settings):
-        """Build the Anthropic client from ``settings`` (honoring an optional
-        ``anthropic_base_url`` for a proxy/router) and cache the two model ids."""
-        kwargs: dict = {"api_key": settings.anthropic_api_key}
-        if settings.anthropic_base_url:
-            kwargs["base_url"] = settings.anthropic_base_url
-        self.client = anthropic.Anthropic(**kwargs)
+        """Cache the default provider, model tiers, the role map, and a lazy
+        per-provider client cache."""
+        self.settings = settings
         self.default_model = settings.anthropic_model
         self.cheap_model = settings.cheap_model
+        self.roles: dict = settings.llm_roles or {}
+        self._clients: dict = {}
+        self.client = self._client(settings.anthropic_base_url,
+                                   settings.anthropic_api_key)
+
+    def _client(self, base_url: str | None, api_key: str | None):
+        """Return an Anthropic client for (base_url, key), building and caching
+        one per distinct provider; blanks fall back to the default provider."""
+        base_url = base_url or self.settings.anthropic_base_url
+        api_key = api_key or self.settings.anthropic_api_key
+        cache_key = (base_url, api_key)
+        if cache_key not in self._clients:
+            kwargs: dict = {"api_key": api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            self._clients[cache_key] = anthropic.Anthropic(**kwargs)
+        return self._clients[cache_key]
+
+    def _resolve(self, role: str | None, model: str | None):
+        """Map ``role``/``model`` to a concrete (client, model_id). An explicit
+        ``model`` wins on the default provider; a configured role uses its
+        model + optional provider override; an unconfigured role falls back to
+        the cheap or default model on the default provider."""
+        if model:
+            return self.client, model
+        spec = self.roles.get(role) if role else None
+        if isinstance(spec, dict) and spec.get("model"):
+            return (self._client(spec.get("base_url"), spec.get("api_key")),
+                    spec["model"])
+        if role in _CHEAP_ROLES:
+            return self.client, self.cheap_model
+        return self.client, self.default_model
 
     @retry(
         retry=retry_if_exception_type(_RETRYABLE),
@@ -47,21 +86,24 @@ class LLM:
         model: str | None = None,
         max_tokens: int = 4000,
         images: list[str] | None = None,
+        role: str | None = None,
     ) -> str:
         """Send one user ``prompt`` (optional ``system``) and return the
-        concatenated text blocks. ``model`` defaults to ``default_model``.
-        ``images`` are local file paths attached as image content blocks
-        before the text — only meaningful on a multimodal model
-        (``llm_supports_images``). The call is wrapped in a trace span
-        recording usage/stop reason, retried on transient errors (via the
-        decorator), and logs a warning — but does not raise — when the
+        concatenated text blocks. ``role`` selects the model+provider via the
+        role map (e.g. "chat", "research", "task"); an explicit ``model``
+        overrides it on the default provider; both default to ``default_model``.
+        ``images`` are local file paths attached as image content blocks before
+        the text — only meaningful on a multimodal model. The call is wrapped in
+        a trace span recording usage/stop reason, retried on transient errors
+        (via the decorator), and logs a warning — but does not raise — when the
         response is cut off at ``max_tokens``."""
         content: str | list = prompt
         if images:
             content = [_image_block(p) for p in images] + [
                 {"type": "text", "text": prompt}]
+        client, model_id = self._resolve(role, model)
         kwargs: dict = {
-            "model": model or self.default_model,
+            "model": model_id,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": content}],
         }
@@ -70,7 +112,7 @@ class LLM:
         from . import tracing
 
         with tracing.span("llm", model=kwargs["model"], max_tokens=max_tokens) as _sp:
-            resp = self.client.messages.create(**kwargs)
+            resp = client.messages.create(**kwargs)
             tracing.set_usage(_sp, getattr(resp, "usage", None),
                               stop_reason=getattr(resp, "stop_reason", "") or "")
         if resp.stop_reason == "max_tokens":

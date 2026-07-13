@@ -25,6 +25,16 @@ class Settings(BaseSettings):
     anthropic_base_url: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
     anthropic_default_haiku_model: str = ""
+    # Per-role model routing (JSON in LLM_ROLES). Maps a task role to a model
+    # and — since different models often live on different endpoints — an
+    # optional base_url + api_key, so different tasks run on different models
+    # at once. Roles the code uses: chat, pipeline, research, task, evolve.
+    # Anything omitted falls back to the default ANTHROPIC_* config.
+    # e.g. {"chat": {"model": "mimo-v2.5"},
+    #       "research": {"model": "qwen3.6-plus",
+    #                    "base_url": "https://dashscope.aliyuncs.com/apps/anthropic",
+    #                    "api_key": "sk-…"}}
+    llm_roles: dict = {}
 
     # GitHub
     github_token: str = ""

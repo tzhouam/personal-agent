@@ -196,7 +196,7 @@ def _score(llm: LLM, profile_summary: str, pool: list[dict], render) -> list[dic
     try:
         scored = llm.complete_json(
             f"## Owner profile\n{profile_summary}\n\n## Items\n{lines}",
-            system=_SCORE_SYSTEM, model=llm.cheap_model, max_tokens=4000,
+            system=_SCORE_SYSTEM, role="research", max_tokens=4000,
         )
         scores = {int(s["idx"]): int(s["score"]) for s in scored
                   if isinstance(s, dict) and "idx" in s and "score" in s}

@@ -32,7 +32,7 @@ def _summarize_details(llm, items: list[dict]) -> dict[str, str]:
     )
     try:
         result = llm.complete_json(f"## Tasks\n\n{lines}", system=_DETAIL_SYSTEM,
-                                   model=llm.cheap_model, max_tokens=4000)
+                                   role="research", max_tokens=4000)
         return {str(r["id"]): str(r["detail"]).strip() for r in result
                 if isinstance(r, dict) and r.get("id") and r.get("detail")}
     except Exception as exc:

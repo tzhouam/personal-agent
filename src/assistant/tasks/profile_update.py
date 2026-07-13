@@ -99,7 +99,7 @@ def update_profile(llm: LLM, store: ProfileStore, observations: list[dict],
     # 16000: reasoning models spend a large invisible budget thinking before
     # the JSON; 8000 truncated on backfill batches (see skill
     # llm-json-truncation-reasoning-models)
-    result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=16000)
+    result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=16000, role="pipeline")
     ops = result.get("ops", []) if isinstance(result, dict) else []
 
     profile, applied, rejected = store.apply_ops(profile, ops, today=today)

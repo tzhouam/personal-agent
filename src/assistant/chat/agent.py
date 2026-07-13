@@ -247,7 +247,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
         log.exception("lessons prompt injection failed")
     system = system_prompt(settings)
     try:
-        result = llm.complete_json(prompt, system=system, max_tokens=6000,
+        result = llm.complete_json(prompt, system=system, max_tokens=6000, role="chat",
                                    **({"images": attach} if attach else {}))
     except Exception as exc:
         if attach:
@@ -300,7 +300,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                     "succeeded or were rejected as duplicates. You may also "
                     "revise the reply.")
         try:
-            fix = llm.complete_json(review, system=system, max_tokens=6000)
+            fix = llm.complete_json(review, system=system, max_tokens=6000, role="chat")
         except Exception:
             log.exception("action-review LLM call failed")
             break

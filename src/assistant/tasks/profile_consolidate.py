@@ -156,7 +156,7 @@ def consolidate_profile(llm: LLM, store: ProfileStore, settings: Settings,
               f"{yaml.safe_dump(entries, sort_keys=False, allow_unicode=True)}```"
         )
         try:
-            result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=8000)
+            result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=8000, role="pipeline")
         except Exception as exc:
             log.exception("consolidation LLM call failed for %s", name)
             notes.append(f"{name}: failed ({exc})")
