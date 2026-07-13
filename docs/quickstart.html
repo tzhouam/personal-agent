@@ -465,8 +465,13 @@ LLM_SUPPORTS_IMAGES=true</pre>
             data-zh="用 LLM_ROLES 把每个角色路由到各自的模型；或用 LLM_MIXTURE 在离线角色上启用 Mixture-of-Agents —— 多个模型并行作答、由一个模型汇总。失效或空的成员会被自动跳过，只要有一个作答存活就照常工作。">Route each role to its own model (LLM_ROLES), or run Mixture-of-Agents — several models propose in parallel and one aggregates — on the offline roles (LLM_MIXTURE). A dead or empty member is dropped, so it keeps working as long as one proposal survives.</p>
           <a class="cfg-link" href="https://github.com/tzhouam/personal-agent/blob/main/doc/DESIGN.md#9-configuration" target="_blank" rel="noopener" data-en="Multi-model routing docs ↗" data-zh="多模型路由文档 ↗">Multi-model routing docs ↗</a>
           <div class="code"><button class="copy" data-en="Copy" data-zh="复制">Copy</button>
-<pre><span class="cmd">LLM_ROLES</span>=<span class="val">{"chat":{"model":"mimo-v2.5"}}</span>
-<span class="cmd">LLM_MIXTURE</span>=<span class="val">{"members":[{"model":"mimo-v2.5","base_url":"https://token-plan-cn.xiaomimimo.com/anthropic","api_key":"tp-…"},{"model":"qwen3.6-plus","base_url":"https://dashscope.aliyuncs.com/apps/anthropic","api_key":"sk-…"}],"aggregator":{"model":"deepseek-v4-pro","base_url":"https://api.deepseek.com/anthropic","api_key":"sk-…"},"roles":["pipeline"]}</span>   <span class="cmt"># one line — or wrap in 'single quotes'; each member is {model, base_url?, api_key?}</span></pre></div>
+<pre><span class="cmd">LLM_ROLES</span>=<span class="val">{"chat":{"model":"mimo-v2.5"}}</span>   <span class="cmt"># one line needs no quotes</span>
+<span class="cmt"># each member is {model, base_url?, api_key?}; span lines only if 'single-quoted'</span>
+<span class="cmd">LLM_MIXTURE</span>=<span class="val">'{"members":[
+  {"model":"mimo-v2.5","base_url":"https://token-plan-cn.xiaomimimo.com/anthropic","api_key":"tp-…"},
+  {"model":"qwen3.6-plus","base_url":"https://dashscope.aliyuncs.com/apps/anthropic","api_key":"sk-…"}],
+  "aggregator":{"model":"deepseek-v4-pro","base_url":"https://api.deepseek.com/anthropic","api_key":"sk-…"},
+  "roles":["pipeline"]}'</span></pre></div>
         </article>
 
         <p class="cfg-span" style="margin:6px 0 0;color:var(--faint);font-size:.9rem;text-align:center"
