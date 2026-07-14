@@ -44,6 +44,7 @@ if (services.length !== 1 || services[0].id !== "serve-supervisor") throw new Er
 const cases = [
   ["/status", { action: "run_status", params: {} }],
   ["/digest", { action: "trigger_run", params: {} }],
+  ["/reboot", { action: "reboot", params: {}, timeoutMs: 15_000 }],
   ["/todo", { action: "list_todos", params: {} }],
   ["/todo list", { action: "list_todos", params: {} }],
   ["/todo done t3", { action: "done_todo", params: { id: "t3" } }],

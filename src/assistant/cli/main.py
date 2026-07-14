@@ -71,6 +71,12 @@ def main() -> None:
     sub.add_parser("serve", help="local HTTP daemon: chat/actions/run endpoints "
                                  "for the OpenClaw bridge + email chat polling")
 
+    reboot_p = sub.add_parser("reboot", help="restart the serve daemon so it "
+                                             "reloads code (after a code update)")
+    reboot_p.add_argument("--delay", type=float, default=0.0,
+                          help="wait N seconds before stopping the daemon "
+                               "(the chat action uses this so its reply sends first)")
+
     phase_p = sub.add_parser("run-phase",
                              help="run one standalone pipeline phase now")
     phase_p.add_argument("phase", choices=["research", "website", "todos", "resume",
@@ -137,6 +143,14 @@ def main() -> None:
         from ..serve import run_serve
 
         sys.exit(run_serve(settings))
+    elif args.command == "reboot":
+        from ..serve import reboot
+
+        result = reboot(settings, delay=args.delay)
+        print(f"[{result['status']}] "
+              + (f"daemon pid {result.get('pid')} healthy"
+                 if result["status"] == "rebooted" else result.get("note", "")))
+        sys.exit(0 if result["status"] == "rebooted" else 1)
     elif args.command == "run-phase":
         sys.exit(cmd_run_phase(settings, args.phase))
     elif args.command == "consolidate":

@@ -34,6 +34,7 @@ from .handlers import (
     _plan_task,
     _query_health,
     _query_transactions,
+    _reboot,
     _recategorize_transaction,
     _run_phase,
     _retire_preference,
@@ -129,6 +130,16 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "run_phase", "phase": "research"}   # research|website|todos'
                        '|resume|curate|consolidate, or "all" for the full daily run',
         slash="run",
+    ),
+    Action(
+        name="reboot",
+        description="restart the assistant daemon so it reloads code (after an "
+                    "update / when it's misbehaving)",
+        handler=_reboot,
+        llm=True,
+        prompt_example='{"type": "reboot"}   # owner says 重启/restart/重新启动 — '
+                       'reload the agent (comes back in a few seconds)',
+        slash="reboot",
     ),
     Action(
         name="web_search",

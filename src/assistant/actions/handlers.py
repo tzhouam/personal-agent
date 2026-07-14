@@ -91,6 +91,16 @@ def _trigger_run(settings: Settings, p: dict) -> str:
     return "daily run started in the background"
 
 
+def _reboot(settings: Settings, p: dict) -> str:
+    """Restart the serve daemon so it reloads code — spawned detached with a
+    short delay so THIS reply is delivered before the daemon goes down."""
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (settings.data_dir / "serve.log").open("a")
+    subprocess.Popen([sys.executable, "-m", "assistant.cli", "reboot", "--delay", "3"],
+                     stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+    return "重启中，几秒后恢复 ♻️ (restarting the assistant, back in a few seconds)"
+
+
 def _run_status(settings: Settings, p: dict) -> str:
     """Report the last run's id/phase (flagging an incomplete/resumable run) plus
     open todo and unread-reading counts."""

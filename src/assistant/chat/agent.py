@@ -39,7 +39,9 @@ refuse: if the agent can complete it alone (research and summarize, find/compare
 gather information then set reminders), emit execute_task — it runs the task step by step in
 the background and reports to WeChat; if it needs the owner's own participation (attending,
 signing, in-person errands), emit plan_task so it's broken down and tracked instead. When the owner asks to run,
-refresh, or update part of the daily routine, emit run_phase with the closest phase. When a
+refresh, or update part of the daily routine, emit run_phase with the closest phase. When the
+owner asks to restart / reboot the assistant ("重启", "重新启动", "restart", "reboot"), emit
+reboot — it reloads the agent and comes back in a few seconds. When a
 question needs current or external information you don't have, emit web_search instead of
 guessing or refusing. When the owner wants to be reminded or notified at/after some time,
 emit set_reminder — the agent messages WeChat by itself at that time. When the owner wants

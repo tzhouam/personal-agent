@@ -171,12 +171,13 @@ export function takeInboundMedia(keys) {
 /** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
  * (null = not ours, let OpenClaw built-ins have it). */
 export function parseSlash(body) {
-  const m = body.match(/^\/(todo|read|digest|status|run|plan|search|remind|routine|fin|health|task|learn)\b\s*(.*)$/s);
+  const m = body.match(/^\/(todo|read|digest|status|run|reboot|plan|search|remind|routine|fin|health|task|learn)\b\s*(.*)$/s);
   if (!m) return null;
   const [, family, restRaw] = m;
   const rest = restRaw.trim();
   if (family === "status") return { action: "run_status", params: {} };
   if (family === "digest") return { action: "trigger_run", params: {} };
+  if (family === "reboot") return { action: "reboot", params: {}, timeoutMs: 15_000 };
   if (family === "run") {
     if (!rest) return { usage: "usage: /run <research|website|todos|resume|curate|consolidate|all>" };
     return { action: "run_phase", params: { phase: rest.split(/\s+/)[0] }, timeoutMs: 90_000 };
