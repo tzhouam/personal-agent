@@ -12,7 +12,7 @@ import logging
 import time
 from datetime import date
 
-from ..actions import execute, looks_failed, prompt_block, run_action
+from ..actions import RETRIEVAL_ACTIONS, execute, looks_failed, prompt_block, run_action
 from ..config import Settings
 from ..llm import LLM
 from ..profile_store import ProfileStore, render_summary
@@ -55,7 +55,9 @@ date+time identity, and stated times are what distinguish two same-priced purcha
 duplicates are rejected automatically, so log what you see. When asked how healthy
 their income/spending is, analyze from the "## Finance ledger" numbers: cite the actual totals,
 savings rate, and top categories, compare with the previous month, and give concrete,
-prioritized suggestions. Never invent amounts that aren't in the ledger.
+prioritized suggestions. Never invent amounts that aren't in the ledger. For a month, period,
+category, or merchant NOT covered by the "## Finance ledger" block, emit query_transactions
+(date / start+end / category / kind / contains) to retrieve those records before answering.
 
 Health: when the owner mentions eating, exercising, or a body measurement — or sends a photo of
 a meal, a nutrition label, or a body scale — emit the matching log action (log_meal /
@@ -67,7 +69,10 @@ improvements, analyze from the "## Health" computed numbers — BMI, weight tren
 minutes, daily calorie/protein averages, open needs — with concrete, practical suggestions.
 For a specific day ("昨天吃了多少"), read the per-day totals and the "recent records" list in
 that block — NEVER claim a meal wasn't logged without checking them first; a record you can
-see there IS logged, even if it isn't in the recent chat.
+see there IS logged, even if it isn't in the recent chat. If the day or period you need is NOT
+shown in that block (older than the recent window, a text/ingredient search, a range), emit
+query_health (date / start+end / kind / contains) to retrieve it before answering — never
+guess or say "没记录" without querying.
 You give wellness guidance, not medical diagnosis; for medical concerns recommend a doctor.
 
 The context sections all describe the SAME person — link them in every analysis instead of
@@ -314,6 +319,32 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
             log.exception("empty-reply retry failed")
         if not reply and not all_outcomes:
             reply = "抱歉，我刚才没组织好回复 🙏 可以再说一次，或者换个说法吗？"
+
+    # Retrieval → compose: query_* actions pull profile records on demand (any
+    # day/period, not just the fixed context snapshot). The first reply was
+    # written before the query ran, so feed the fetched records back and let the
+    # model answer FROM them; the composed answer cites the data, so the raw
+    # records aren't echoed as a "✔" outcome. (well-formed actions map 1:1 to
+    # outcomes in order — execute only skips non-dict/type-less entries.)
+    wf = [a for a in actions if isinstance(a, dict) and a.get("type")][:5]
+    retrieved = [(a, o) for a, o in zip(wf, outcomes)
+                 if a["type"] in RETRIEVAL_ACTIONS and not looks_failed(o)]
+    if retrieved:
+        data = "\n\n".join(f"### {a['type']} result\n{o}" for a, o in retrieved)
+        try:
+            comp = llm.complete_json(
+                f"{prompt}\n\n## Records you just retrieved from the profile\n{data}"
+                "\n\nAnswer the owner's message using these retrieved records and the "
+                "context above. Cite the specific records/totals; never say something "
+                "is missing that appears here; do NOT re-run the query. Respond with "
+                'ONLY JSON {"reply": "...", "actions": []}.',
+                system=system, max_tokens=6000, role="chat")
+            if isinstance(comp, dict) and str(comp.get("reply", "")).strip():
+                reply = str(comp["reply"]).strip()
+        except Exception:
+            log.exception("retrieval compose failed")
+        drop = {o for _, o in retrieved}
+        all_outcomes = [o for o in all_outcomes if o not in drop]
 
     # Review-and-retry: when an action outcome reports a failure (bad params,
     # wrong id, unknown action), show the model exactly what it emitted and

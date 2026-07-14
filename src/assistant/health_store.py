@@ -172,6 +172,25 @@ class HealthStore:
                and (kind is None or r["kind"] == kind)]
         return sorted(out, key=lambda r: (str(r["date"]), r["id"]))
 
+    def query(self, start: str = "", end: str = "", kind: str | None = None,
+              contains: str = "", limit: int = 80) -> list[dict]:
+        """On-demand retrieval behind the `query_health` chat action: non-voided
+        records within [`start`, `end`] (YYYY-MM-DD, inclusive; either bound
+        optional), optionally one `kind` and a case-insensitive substring over
+        description/activity/note. Oldest first, capped at `limit` — so the
+        agent can look up any day or period, not just the context snapshot."""
+        out = self.records(kind=kind)
+        if start:
+            out = [r for r in out if str(r["date"]) >= start]
+        if end:
+            out = [r for r in out if str(r["date"]) <= end]
+        if contains:
+            needle = contains.lower()
+            out = [r for r in out if needle in
+                   f"{r.get('description', '')} {r.get('activity', '')} "
+                   f"{r.get('note', '')}".lower()]
+        return out[-limit:]
+
     # ── needs (nutrients / ingredients wanted) ───────────────────────
     def add_need(self, item: str, why: str = "") -> dict | None:
         """Track a nutrient/ingredient the owner wants covered; None when the
