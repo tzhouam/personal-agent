@@ -150,8 +150,11 @@ class Settings(BaseSettings):
     serve_port: int = 8377
     serve_token: str = ""
     serve_session_turns: int = 10   # exchanges of chat history kept per session
-    chat_history_max_age_hours: int = 48  # older turns never enter a prompt;
-                                          # the daily curate phase prunes them from disk
+    chat_history_max_age_hours: int = 48  # context window: turns older than this
+                                          # never enter a prompt (~2 days)
+    chat_history_retention_days: int = 30  # disk retention: how long chat turns are
+                                           # kept before the curate phase prunes them
+                                           # (~1 month) — decoupled from the window above
 
     # Deliver-phase WeChat announce (best-effort, OFF by default — enable only
     # after removing --announce from the OpenClaw cron job, or 07:00 pings twice)

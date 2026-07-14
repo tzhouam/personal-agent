@@ -430,6 +430,69 @@ def _health_record_line(record: dict) -> str:
             + f" · {timestamp_of(record)}")
 
 
+def _query_health(settings: Settings, p: dict) -> str:
+    """Retrieve health records for a day / range / kind / food-text, with range
+    totals — so the agent can answer about any date, not just the context
+    snapshot. `date` is a single-day shortcut for start==end."""
+    from ..health_store import HealthStore
+
+    store = HealthStore(settings.profile_dir)
+    day = str(p.get("date") or "").strip()
+    start = day or str(p.get("start") or "").strip()
+    end = day or str(p.get("end") or "").strip()
+    kind = str(p.get("kind") or "").strip() or None
+    contains = str(p.get("contains") or "").strip()
+    recs = store.query(start=start, end=end, kind=kind, contains=contains)
+    scope = (f"{start or '起始'}~{end or '至今'}"
+             + (f" {kind}" if kind else "") + (f" '{contains}'" if contains else ""))
+    if not recs:
+        return f"no health records for {scope}"
+    meals = [r for r in recs if r["kind"] == "meal"]
+    kcal = round(sum(r.get("calories_kcal") or 0 for r in meals))
+    prot = round(sum(r.get("protein_g") or 0 for r in meals), 1)
+    exmin = round(sum(r.get("duration_min") or 0 for r in recs if r["kind"] == "exercise"))
+    head = (f"{len(recs)} record(s) · {scope}"
+            + (f" · {len(meals)} meals ~{kcal}kcal ~{prot}g protein" if meals else "")
+            + (f" · exercise {exmin}min" if exmin else "") + ":")
+    return "\n".join([head] + [
+        f"[{r['id']}] {r['date']} {r.get('time', '')} {r['kind']} · "
+        + (r.get("description") or r.get("activity") or "")
+        + (f" · {r['calories_kcal']}kcal" if r.get("calories_kcal") else "")
+        + (f" · {r['protein_g']}g蛋白" if r.get("protein_g") else "")
+        + (f" · {r['duration_min']}min" if r.get("duration_min") else "")
+        + (f" · {r['weight_kg']}kg" if r.get("weight_kg") else "")
+        for r in recs])
+
+
+def _query_transactions(settings: Settings, p: dict) -> str:
+    """Retrieve finance records for a day / range / category / kind / note-text,
+    with income/expense/net totals — arbitrary lookups beyond the current-month
+    context snapshot."""
+    from ..finance_store import FinanceStore, timestamp_of
+
+    store = FinanceStore(settings.profile_dir)
+    day = str(p.get("date") or "").strip()
+    start = day or str(p.get("start") or "").strip()
+    end = day or str(p.get("end") or "").strip()
+    category = str(p.get("category") or "").strip() or None
+    kind = str(p.get("kind") or "").strip() or None
+    contains = str(p.get("contains") or "").strip()
+    recs = store.query(start=start, end=end, category=category, kind=kind, contains=contains)
+    scope = (f"{start or '起始'}~{end or '至今'}" + (f" {category}" if category else "")
+             + (f" {kind}" if kind else "") + (f" '{contains}'" if contains else ""))
+    if not recs:
+        return f"no transactions for {scope}"
+    income = sum(r["amount"] for r in recs if r["type"] == "income")
+    expense = sum(r["amount"] for r in recs if r["type"] == "expense")
+    cur = recs[0].get("currency", "")
+    head = (f"{len(recs)} record(s) · {scope} · income {round(income, 2)} "
+            f"expense {round(expense, 2)} net {round(income - expense, 2)} {cur}:")
+    return "\n".join([head] + [
+        f"[{r['id']}] {timestamp_of(r)} {r['type']} {r['amount']} {r['currency']} "
+        f"· {r['category']}" + (f" · {r['note']}" if r.get("note") else "")
+        for r in recs])
+
+
 def _log_meal(settings: Settings, p: dict) -> str:
     """Record a meal (description + optional calorie/macro estimates)."""
     from ..health_store import HealthStore

@@ -32,6 +32,8 @@ from .handlers import (
     _log_transaction,
     _log_weight,
     _plan_task,
+    _query_health,
+    _query_transactions,
     _recategorize_transaction,
     _run_phase,
     _retire_preference,
@@ -352,6 +354,23 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         slash="health",
     ),
     Action(
+        name="query_health",
+        description="retrieve health records for a specific day, date range, "
+                    "kind, or food/ingredient text (with totals) — look up any "
+                    "day/period not shown in the context",
+        handler=_query_health,
+        params={"date": {"required": False, "desc": "YYYY-MM-DD single day"},
+                "start": {"required": False, "desc": "YYYY-MM-DD range start"},
+                "end": {"required": False, "desc": "YYYY-MM-DD range end"},
+                "kind": {"required": False, "desc": "meal|exercise|weight"},
+                "contains": {"required": False, "desc": "text to match in a meal/note"}},
+        llm=True,
+        prompt_example='{"type": "query_health", "date": "2026-07-13"}   # or '
+                       'start/end range, kind, contains — look up meals/exercise/'
+                       'weight for ANY day when the ## Health block does not show it',
+        slash="health",
+    ),
+    Action(
         name="log_transaction",
         description="record an income or expense in the finance ledger",
         handler=_log_transaction,
@@ -415,7 +434,30 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                        '# month optional',
         slash="fin",
     ),
+    Action(
+        name="query_transactions",
+        description="retrieve finance records for a specific day, date range, "
+                    "category, kind, or note text (with income/expense/net "
+                    "totals) — arbitrary lookups beyond the current month",
+        handler=_query_transactions,
+        params={"date": {"required": False, "desc": "YYYY-MM-DD single day"},
+                "start": {"required": False, "desc": "YYYY-MM-DD range start"},
+                "end": {"required": False, "desc": "YYYY-MM-DD range end"},
+                "category": {"required": False, "desc": "food/housing/... category"},
+                "kind": {"required": False, "desc": "income|expense"},
+                "contains": {"required": False, "desc": "text to match in the note"}},
+        llm=True,
+        prompt_example='{"type": "query_transactions", "start": "2026-05-01", '
+                       '"end": "2026-05-31", "category": "food"}   # any period/'
+                       'category/merchant when the ## Finance block does not cover it',
+        slash="fin",
+    ),
 ]}
+
+
+# Actions whose outcome is retrieved data to answer FROM (the chat loop runs a
+# compose pass feeding the result back), not a mutation to confirm with a "✔".
+RETRIEVAL_ACTIONS = frozenset({"query_health", "query_transactions"})
 
 
 def prompt_block() -> str:

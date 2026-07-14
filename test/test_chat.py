@@ -178,3 +178,56 @@ def test_context_caps_todos_by_urgency(settings):
     assert section.count("[t") == 25
     # per-todo detail is trimmed too
     assert "x" * 121 not in section
+
+
+def test_empty_reply_retries_then_recovers(settings):
+    # an empty reply with no actions triggers one retry; the recovered reply is
+    # used (never the raw "(empty reply)" placeholder).
+    class SeqLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, prompt, system=None, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                return {"reply": "", "actions": []}
+            return {"reply": "好的，已记录。", "actions": []}
+
+    llm = SeqLLM()
+    reply = handle_message("还有三个叉烧包", settings, llm)
+    assert reply == "好的，已记录。"
+    assert llm.calls == 2  # retried exactly once
+
+
+def test_empty_reply_falls_back_gracefully(settings):
+    # if it stays empty even after the retry, degrade to a human ask.
+    llm = FakeLLM({"reply": "", "actions": []})
+    reply = handle_message("嗯", settings, llm)
+    assert "(empty reply)" not in reply and reply.strip()
+
+
+def test_query_action_composes_answer_from_retrieved_data(settings):
+    # a query_* action retrieves records; the model then answers FROM them (the
+    # composed reply replaces the blind first reply) and the raw records are not
+    # echoed as a "✔" outcome.
+    from assistant.health_store import HealthStore
+    HealthStore(settings.profile_dir).add(
+        "meal", when="2026-07-13", time="08:00", description="早餐 蛋",
+        calories_kcal=200, protein_g=10)
+
+    class SeqLLM:
+        def __init__(self):
+            self.calls = 0
+            self.prompts = []
+
+        def complete_json(self, prompt, system=None, **kw):
+            self.prompts.append(prompt)
+            self.calls += 1
+            if self.calls == 1:
+                return {"reply": "让我查一下",
+                        "actions": [{"type": "query_health", "date": "2026-07-13"}]}
+            return {"reply": "7月13号早餐吃了蛋，约200大卡。", "actions": []}
+
+    reply = handle_message("我7月13号早餐吃了什么", settings, SeqLLM())
+    assert reply == "7月13号早餐吃了蛋，约200大卡。"  # data-informed, not the blind first reply
+    assert "✔" not in reply  # raw records not echoed as an outcome

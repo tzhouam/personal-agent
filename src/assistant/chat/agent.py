@@ -12,7 +12,7 @@ import logging
 import time
 from datetime import date
 
-from ..actions import execute, looks_failed, prompt_block, run_action
+from ..actions import RETRIEVAL_ACTIONS, execute, looks_failed, prompt_block, run_action
 from ..config import Settings
 from ..llm import LLM
 from ..profile_store import ProfileStore, render_summary
@@ -55,7 +55,9 @@ date+time identity, and stated times are what distinguish two same-priced purcha
 duplicates are rejected automatically, so log what you see. When asked how healthy
 their income/spending is, analyze from the "## Finance ledger" numbers: cite the actual totals,
 savings rate, and top categories, compare with the previous month, and give concrete,
-prioritized suggestions. Never invent amounts that aren't in the ledger.
+prioritized suggestions. Never invent amounts that aren't in the ledger. For a month, period,
+category, or merchant NOT covered by the "## Finance ledger" block, emit query_transactions
+(date / start+end / category / kind / contains) to retrieve those records before answering.
 
 Health: when the owner mentions eating, exercising, or a body measurement — or sends a photo of
 a meal, a nutrition label, or a body scale — emit the matching log action (log_meal /
@@ -65,6 +67,12 @@ put ingredient lists in the note, say in the reply that macros are estimates, an
 ingredients against the "wants covered" needs list. When asked about health status or
 improvements, analyze from the "## Health" computed numbers — BMI, weight trend, exercise
 minutes, daily calorie/protein averages, open needs — with concrete, practical suggestions.
+For a specific day ("昨天吃了多少"), read the per-day totals and the "recent records" list in
+that block — NEVER claim a meal wasn't logged without checking them first; a record you can
+see there IS logged, even if it isn't in the recent chat. If the day or period you need is NOT
+shown in that block (older than the recent window, a text/ingredient search, a range), emit
+query_health (date / start+end / kind / contains) to retrieve it before answering — never
+guess or say "没记录" without querying.
 You give wellness guidance, not medical diagnosis; for medical concerns recommend a doctor.
 
 The context sections all describe the SAME person — link them in every analysis instead of
@@ -171,8 +179,19 @@ def build_context(settings: Settings) -> str:
 
         store = HealthStore(settings.profile_dir)
         if store.records() or store.load()["profile"] or store.open_needs():
-            parts.append("## Health (computed — cite these numbers)\n"
-                         + render_health(store.summary()))
+            block = ["## Health (computed — cite these numbers)",
+                     render_health(store.summary())]
+            recent = store.records(days=3)[-16:]  # individual meals/exercise, so
+            if recent:                            # per-day questions are answerable
+                block.append("recent records (id · date time · what):")
+                block += [
+                    f"[{r['id']}] {r['date']} {r.get('time', '')} · "
+                    + (r.get("description") or r.get("activity", ""))
+                    + (f" · {r['calories_kcal']}kcal" if r.get("calories_kcal") else "")
+                    + (f" · {r['protein_g']}g蛋白" if r.get("protein_g") else "")
+                    + (f" · {r['duration_min']}min" if r.get("duration_min") else "")
+                    for r in recent]
+            parts.append("\n".join(block))
     except Exception:
         log.exception("context: health failed")
 
@@ -274,11 +293,58 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                     f"\n技术细节: {str(exc)[:200]}")
     if not isinstance(result, dict):
         return "(assistant error: unparseable model response)"
-    reply = str(result.get("reply", "")).strip() or "(empty reply)"
+    reply = str(result.get("reply", "")).strip()
     actions = result.get("actions") or []
     outcomes = execute(actions, settings)
     all_outcomes = list(outcomes)
     repair_rounds = 0
+
+    # Empty reply AND nothing done = the model returned nothing usable (mimo /
+    # other reasoning models occasionally do this on an ambiguous fragment).
+    # Retry once with a nudge; if still blank, degrade to a human ask — never
+    # surface a raw "(empty reply)" to the owner.
+    if not reply and not all_outcomes:
+        log.warning("empty model reply with no actions — retrying once")
+        try:
+            retry = llm.complete_json(
+                prompt + "\n\n(Your previous response was empty. Reply now with a "
+                "concrete answer, or emit the right action — as JSON.)",
+                system=system, max_tokens=6000, role="chat")
+            if isinstance(retry, dict):
+                reply = str(retry.get("reply", "")).strip()
+                actions = retry.get("actions") or []
+                outcomes = execute(actions, settings)
+                all_outcomes = list(outcomes)
+        except Exception:
+            log.exception("empty-reply retry failed")
+        if not reply and not all_outcomes:
+            reply = "抱歉，我刚才没组织好回复 🙏 可以再说一次，或者换个说法吗？"
+
+    # Retrieval → compose: query_* actions pull profile records on demand (any
+    # day/period, not just the fixed context snapshot). The first reply was
+    # written before the query ran, so feed the fetched records back and let the
+    # model answer FROM them; the composed answer cites the data, so the raw
+    # records aren't echoed as a "✔" outcome. (well-formed actions map 1:1 to
+    # outcomes in order — execute only skips non-dict/type-less entries.)
+    wf = [a for a in actions if isinstance(a, dict) and a.get("type")][:5]
+    retrieved = [(a, o) for a, o in zip(wf, outcomes)
+                 if a["type"] in RETRIEVAL_ACTIONS and not looks_failed(o)]
+    if retrieved:
+        data = "\n\n".join(f"### {a['type']} result\n{o}" for a, o in retrieved)
+        try:
+            comp = llm.complete_json(
+                f"{prompt}\n\n## Records you just retrieved from the profile\n{data}"
+                "\n\nAnswer the owner's message using these retrieved records and the "
+                "context above. Cite the specific records/totals; never say something "
+                "is missing that appears here; do NOT re-run the query. Respond with "
+                'ONLY JSON {"reply": "...", "actions": []}.',
+                system=system, max_tokens=6000, role="chat")
+            if isinstance(comp, dict) and str(comp.get("reply", "")).strip():
+                reply = str(comp["reply"]).strip()
+        except Exception:
+            log.exception("retrieval compose failed")
+        drop = {o for _, o in retrieved}
+        all_outcomes = [o for o in all_outcomes if o not in drop]
 
     # Review-and-retry: when an action outcome reports a failure (bad params,
     # wrong id, unknown action), show the model exactly what it emitted and
@@ -315,7 +381,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
         all_outcomes += [f"(retry) {o}" for o in outcomes]
 
     if all_outcomes:
-        reply += "\n\n✔ " + "\n✔ ".join(all_outcomes)
+        reply = (reply + "\n\n" if reply else "") + "✔ " + "\n✔ ".join(all_outcomes)
     try:  # harness telemetry: per-turn latency/size/repair counts (best-effort)
         from datetime import datetime
 

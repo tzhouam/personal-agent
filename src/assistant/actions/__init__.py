@@ -13,7 +13,8 @@ dispatch). The public surface is re-exported so importers are unchanged.
 """
 
 from .base import Action, validate
-from .registry import ACTIONS, execute, looks_failed, prompt_block, run_action
+from .registry import (ACTIONS, RETRIEVAL_ACTIONS, execute, looks_failed,
+                       prompt_block, run_action)
 
-__all__ = ["Action", "validate", "ACTIONS", "execute", "looks_failed",
-           "prompt_block", "run_action"]
+__all__ = ["Action", "validate", "ACTIONS", "RETRIEVAL_ACTIONS", "execute",
+           "looks_failed", "prompt_block", "run_action"]

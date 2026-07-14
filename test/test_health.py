@@ -204,3 +204,53 @@ def test_meal_dedup_allows_second_dish_same_sitting(settings):
     status, existing = store.add("meal", description="椒盐虾配脆炸罗勒叶",
                                  time="20:00")            # same dish reworded
     assert status == "duplicate" and existing["id"] == "h1"
+
+
+def test_summary_per_day_and_context_lists_meals(settings):
+    # per-day totals are kept (not just the multi-day average) and the chat
+    # context lists individual meals — so "how much did I eat yesterday" is
+    # answerable. Regression: summary discarded per-day totals and the context
+    # showed only aggregates, so the agent wrongly insisted meals weren't logged.
+    store = HealthStore(settings.profile_dir)
+    y = _day(-1)
+    store.add("meal", when=y, time="08:00", description="早餐 蛋+奶",
+              calories_kcal=300, protein_g=20)
+    store.add("meal", when=y, time="12:30", description="午餐 牛肉面",
+              calories_kcal=600, protein_g=30)
+    s = store.summary()
+    by_day = {d["date"]: d for d in s["by_day"]}
+    assert by_day[y]["meals"] == 2
+    assert by_day[y]["kcal"] == 900 and by_day[y]["protein_g"] == 50.0
+    assert f"  {y}: 2 meals, 900 kcal" in render_summary(s)
+    ctx = build_context(settings)
+    assert "早餐 蛋+奶" in ctx and "午餐 牛肉面" in ctx  # individual meals visible
+
+
+def test_health_query_by_day_kind_and_text(settings):
+    store = HealthStore(settings.profile_dir)
+    store.add("meal", when="2026-07-13", time="08:00", description="早餐 燕窝粥",
+              calories_kcal=200, protein_g=8)
+    store.add("meal", when="2026-07-13", time="12:30", description="午餐 牛肉面",
+              calories_kcal=600, protein_g=30)
+    store.add("meal", when="2026-07-10", time="19:00", description="晚餐 沙拉",
+              calories_kcal=300, protein_g=15)
+    store.add("exercise", when="2026-07-13", time="18:00", activity="跑步", duration_min=30)
+    # single day (all kinds)
+    assert {r["id"] for r in store.query(start="2026-07-13", end="2026-07-13")} == {"h1", "h2", "h4"}
+    # by kind
+    assert [r["description"] for r in
+            store.query(start="2026-07-13", end="2026-07-13", kind="meal")] == ["早餐 燕窝粥", "午餐 牛肉面"]
+    # text search across all dates
+    assert [r["date"] for r in store.query(contains="燕窝")] == ["2026-07-13"]
+    # range start excludes the older day
+    assert all(r["date"] >= "2026-07-11" for r in store.query(start="2026-07-11"))
+
+
+def test_query_health_action_formats_records_and_totals(settings):
+    store = HealthStore(settings.profile_dir)
+    store.add("meal", when="2026-07-13", time="08:00", description="早餐", calories_kcal=200, protein_g=8)
+    store.add("meal", when="2026-07-13", time="12:30", description="午餐", calories_kcal=600, protein_g=30)
+    out = run_action("query_health", {"date": "2026-07-13"}, settings)
+    assert "2 meals" in out and "~800kcal" in out and "~38" in out
+    assert "早餐" in out and "午餐" in out
+    assert "no health records" in run_action("query_health", {"date": "2020-01-01"}, settings)

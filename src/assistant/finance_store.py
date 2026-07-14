@@ -159,6 +159,27 @@ class FinanceStore:
             out = [r for r in out if str(r["date"]).startswith(month)]
         return sorted(out, key=lambda r: (str(r["date"]), r["id"]))
 
+    def query(self, start: str = "", end: str = "", category: str | None = None,
+              kind: str | None = None, contains: str = "", limit: int = 100) -> list[dict]:
+        """On-demand retrieval behind the `query_transactions` chat action:
+        non-voided records within [`start`, `end`] (YYYY-MM-DD, inclusive;
+        either bound optional), optionally by `category`, `kind`
+        (income|expense), and a substring over the note. Oldest first, capped —
+        so the agent can look up any period, not just the current month."""
+        out = self.records()
+        if start:
+            out = [r for r in out if str(r["date"]) >= start]
+        if end:
+            out = [r for r in out if str(r["date"]) <= end]
+        if category:
+            out = [r for r in out if r.get("category") == category]
+        if kind:
+            out = [r for r in out if r.get("type") == kind]
+        if contains:
+            needle = contains.lower()
+            out = [r for r in out if needle in str(r.get("note", "")).lower()]
+        return out[-limit:]
+
     def months(self) -> list[str]:
         """Distinct 'YYYY-MM' months with records, ascending."""
         return sorted({str(r["date"])[:7] for r in self.records()})

@@ -243,3 +243,23 @@ def test_render_summary_drills_into_dominant_categories(settings):
 def _today(offset):
     from datetime import date, timedelta
     return (date.today() + timedelta(days=offset)).isoformat()
+
+
+def test_finance_query_by_range_category_and_text(settings):
+    store = FinanceStore(settings.profile_dir)
+    store.add("expense", 45, category="food", note="午饭 星巴克", when="2026-05-10")
+    store.add("expense", 300, category="housing", note="房租", when="2026-05-01")
+    store.add("expense", 20, category="food", note="外卖", when="2026-06-02")
+    assert {r["id"] for r in store.query(start="2026-05-01", end="2026-05-31")} == {"f1", "f2"}
+    assert [r["note"] for r in store.query(category="food")] == ["午饭 星巴克", "外卖"]
+    assert [r["note"] for r in store.query(contains="星巴克")] == ["午饭 星巴克"]
+
+
+def test_query_transactions_action_totals(settings):
+    store = FinanceStore(settings.profile_dir)
+    store.add("expense", 45, category="food", note="午饭", when="2026-05-10")
+    store.add("income", 1000, category="salary", note="兼职", when="2026-05-15")
+    out = run_action("query_transactions", {"start": "2026-05-01", "end": "2026-05-31"}, settings)
+    assert "income 1000" in out and "expense 45" in out and "net 955" in out
+    assert "午饭" in out
+    assert "no transactions" in run_action("query_transactions", {"month": None, "start": "2000-01-01", "end": "2000-01-02"}, settings)
