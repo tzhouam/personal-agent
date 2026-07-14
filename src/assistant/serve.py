@@ -25,8 +25,12 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import signal
+import subprocess
+import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -369,3 +373,83 @@ def run_serve(settings: Settings) -> int:
     server.serve_forever()
     stop.set()
     return 0
+
+
+def _pid_alive(pid: int | None) -> bool:
+    """Is `pid` a live process? (`os.kill(pid, 0)` — PermissionError means it
+    exists but isn't ours, still alive.)"""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _healthz(settings: Settings) -> bool:
+    """True if a serve daemon answers /healthz on the loopback port."""
+    import httpx
+
+    try:
+        r = httpx.get(f"http://127.0.0.1:{settings.serve_port}/healthz", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def reboot(settings: Settings, delay: float = 0.0, timeout: float = 20.0,
+           stop_wait: float = 8.0) -> dict:
+    """One-command restart of the serve daemon so it reloads code.
+
+    A running daemon holds its imported Python modules in memory — only a
+    restart picks up a code change (the per-request Settings/LLM rebuild reloads
+    `.env`, not code). This stops the current daemon (via the `chat_listener.pid`
+    lock), then starts a fresh detached one and waits for `/healthz`. If some
+    supervisor also respawns it, the shared pid lock lets only one survive (the
+    loser exits), so a duplicate can't stick.
+
+    `delay` (used by the chat `reboot` action) sleeps first so the reply flushes
+    before the daemon goes down. Never signals its own pid, so it is safe to run
+    detached from inside the daemon. Returns `{status, pid}`."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if delay > 0:
+        time.sleep(delay)
+    pid_file = settings.data_dir / "chat_listener.pid"
+
+    def _pid() -> int | None:
+        try:
+            return int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    old, me = _pid(), os.getpid()
+    if old and old != me and _pid_alive(old):
+        log.info("reboot: stopping daemon pid %d", old)
+        try:
+            os.kill(old, signal.SIGTERM)
+            deadline = time.time() + stop_wait
+            while _pid_alive(old) and time.time() < deadline:
+                time.sleep(0.3)
+            if _pid_alive(old):
+                log.warning("reboot: pid %d didn't stop — SIGKILL", old)
+                os.kill(old, signal.SIGKILL)
+                time.sleep(1.0)
+        except ProcessLookupError:
+            pass
+
+    # start a fresh detached daemon; it loads the current code. (The pid lock
+    # makes this safe even if a supervisor also respawns one — only one keeps it.)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (settings.data_dir / "serve.log").open("a")
+    subprocess.Popen([sys.executable, "-m", "assistant.cli", "serve"],
+                     stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _healthz(settings):
+            log.info("reboot: daemon healthy (pid %s)", _pid())
+            return {"status": "rebooted", "pid": _pid()}
+        time.sleep(0.5)
+    return {"status": "failed", "note": "daemon did not come back healthy in time"}

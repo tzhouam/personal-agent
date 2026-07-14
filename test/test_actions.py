@@ -6,7 +6,7 @@ from assistant.todo_store import ReadingList, TodoStore
 def test_registry_covers_the_llm_action_set():
     llm_actions = {name for name, a in ACTIONS.items() if a.llm}
     assert llm_actions == {"add_todo", "done_todo", "done_reading", "trigger_run",
-                           "run_phase", "plan_task", "web_search",
+                           "run_phase", "reboot", "plan_task", "web_search",
                            "set_reminder", "cancel_reminder",
                            "create_routine", "cancel_routine", "unrelated_reading",
                            "log_transaction", "void_transaction", "finance_summary",
@@ -150,3 +150,38 @@ def test_trigger_run_refuses_while_incomplete(settings):
 def test_validate_passes_optional_params():
     assert validate(ACTIONS["add_todo"], {"title": "x"}) is None
     assert validate(ACTIONS["trigger_run"], {}) is None
+
+
+def test_reboot_action_spawns_detached_cli(settings, monkeypatch):
+    # the chat reboot action must fire a detached `assistant.cli reboot --delay 3`
+    # (delay so the reply flushes) and never block on the restart.
+    import assistant.actions.handlers as h
+
+    spawned = []
+    monkeypatch.setattr(h.subprocess, "Popen",
+                        lambda cmd, **kw: spawned.append(cmd) or object())
+    out = run_action("reboot", {}, settings)
+    assert "重启" in out or "restart" in out.lower()
+    assert spawned and spawned[0][-4:] == ["assistant.cli", "reboot", "--delay", "3"] \
+        or ("assistant.cli" in spawned[0] and spawned[0][-2:] == ["--delay", "3"])
+
+
+def test_serve_reboot_starts_daemon_when_unsupervised(settings, monkeypatch):
+    # with no running daemon and no supervisor respawn, reboot() starts a fresh
+    # detached `serve` and returns once it answers /healthz.
+    import assistant.serve as sv
+
+    spawned = []
+    monkeypatch.setattr(sv.subprocess, "Popen",
+                        lambda cmd, **kw: spawned.append(cmd) or object())
+    calls = {"n": 0}
+
+    def fake_healthz(_settings):
+        calls["n"] += 1
+        return calls["n"] >= 2  # comes up shortly after we spawn it
+
+    monkeypatch.setattr(sv, "_healthz", fake_healthz)
+    monkeypatch.setattr(sv, "_pid_alive", lambda pid: False)
+    result = sv.reboot(settings, timeout=3, stop_wait=0.5)
+    assert result["status"] == "rebooted"
+    assert spawned and spawned[0][-1] == "serve"
