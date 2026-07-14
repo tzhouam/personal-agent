@@ -178,3 +178,29 @@ def test_context_caps_todos_by_urgency(settings):
     assert section.count("[t") == 25
     # per-todo detail is trimmed too
     assert "x" * 121 not in section
+
+
+def test_empty_reply_retries_then_recovers(settings):
+    # an empty reply with no actions triggers one retry; the recovered reply is
+    # used (never the raw "(empty reply)" placeholder).
+    class SeqLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, prompt, system=None, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                return {"reply": "", "actions": []}
+            return {"reply": "好的，已记录。", "actions": []}
+
+    llm = SeqLLM()
+    reply = handle_message("还有三个叉烧包", settings, llm)
+    assert reply == "好的，已记录。"
+    assert llm.calls == 2  # retried exactly once
+
+
+def test_empty_reply_falls_back_gracefully(settings):
+    # if it stays empty even after the retry, degrade to a human ask.
+    llm = FakeLLM({"reply": "", "actions": []})
+    reply = handle_message("嗯", settings, llm)
+    assert "(empty reply)" not in reply and reply.strip()

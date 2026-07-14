@@ -204,3 +204,23 @@ def test_meal_dedup_allows_second_dish_same_sitting(settings):
     status, existing = store.add("meal", description="椒盐虾配脆炸罗勒叶",
                                  time="20:00")            # same dish reworded
     assert status == "duplicate" and existing["id"] == "h1"
+
+
+def test_summary_per_day_and_context_lists_meals(settings):
+    # per-day totals are kept (not just the multi-day average) and the chat
+    # context lists individual meals — so "how much did I eat yesterday" is
+    # answerable. Regression: summary discarded per-day totals and the context
+    # showed only aggregates, so the agent wrongly insisted meals weren't logged.
+    store = HealthStore(settings.profile_dir)
+    y = _day(-1)
+    store.add("meal", when=y, time="08:00", description="早餐 蛋+奶",
+              calories_kcal=300, protein_g=20)
+    store.add("meal", when=y, time="12:30", description="午餐 牛肉面",
+              calories_kcal=600, protein_g=30)
+    s = store.summary()
+    by_day = {d["date"]: d for d in s["by_day"]}
+    assert by_day[y]["meals"] == 2
+    assert by_day[y]["kcal"] == 900 and by_day[y]["protein_g"] == 50.0
+    assert f"  {y}: 2 meals, 900 kcal" in render_summary(s)
+    ctx = build_context(settings)
+    assert "早餐 蛋+奶" in ctx and "午餐 牛肉面" in ctx  # individual meals visible

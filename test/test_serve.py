@@ -106,39 +106,59 @@ def test_session_store_trims_and_survives_corruption(settings):
     assert store.history("s") == []
 
 
-def test_session_turns_expire_after_48h(settings):
+def test_context_window_excludes_but_retention_keeps(settings):
+    # a turn past the ~2-day context window never reaches a prompt, but stays
+    # on disk (retained ~1 month) and survives further appends.
     import json
     from datetime import datetime, timedelta, timezone
 
-    store = SessionStore(settings.data_dir, max_age_hours=48)
+    store = SessionStore(settings.data_dir, context_hours=48, retention_days=30)
     store.append("s", "fresh question", "fresh answer")
-    store.append("other", "old only", "old answer")
-    # age one turn in each file past the cutoff
-    for sid, make_all_old in (("s", False), ("other", True)):
-        path = store._path(sid)
-        data = json.loads(path.read_text())
-        old_ts = (datetime.now(timezone.utc) - timedelta(hours=49)).isoformat()
-        if make_all_old:
-            for t in data["turns"]:
-                t["ts"] = old_ts
-        else:
-            data["turns"].insert(0, {"ts": old_ts, "owner": "stale q", "assistant": "stale a"})
-        path.write_text(json.dumps(data))
+    path = store._path("s")
+    data = json.loads(path.read_text())
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=49)).isoformat()  # >2d, <30d
+    data["turns"].insert(0, {"ts": old_ts, "owner": "day-old q", "assistant": "a"})
+    path.write_text(json.dumps(data))
 
-    # read-time filter: stale turns never reach a prompt
+    # prompt context: only the in-window turn
     assert [t["owner"] for t in store.history("s")] == ["fresh question"]
-    assert store.history("other") == []
-    # legacy turns without ts are treated as expired
+    # retention: the day-old turn is still on disk...
+    assert [t["owner"] for t in store._all("s")] == ["day-old q", "fresh question"]
+    # ...and an append preserves it (append loads the retention window, not the slice)
+    store.append("s", "q3", "a3")
+    assert [t["owner"] for t in store._all("s")] == ["day-old q", "fresh question", "q3"]
+    # legacy turns without a ts are treated as expired for prompts
     store._path("legacy").parent.mkdir(parents=True, exist_ok=True)
     store._path("legacy").write_text(json.dumps(
         {"session": "legacy", "turns": [{"owner": "x", "assistant": "y"}]}))
     assert store.history("legacy") == []
 
-    # daily prune: stale turns leave disk, empty sessions are deleted
+
+def test_prune_uses_retention_not_context(settings):
+    # prune drops turns past the retention window (~30d), NOT the context window;
+    # a turn one day old is kept even though it's out of the prompt window.
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    store = SessionStore(settings.data_dir, context_hours=48, retention_days=30)
+    store.append("s", "recent", "a")
+    store.append("old", "gone", "a")
+    now = datetime.now(timezone.utc)
+    for sid, mode in (("s", "mix"), ("old", "all")):
+        path = store._path(sid)
+        data = json.loads(path.read_text())
+        if mode == "all":
+            for t in data["turns"]:
+                t["ts"] = (now - timedelta(days=31)).isoformat()  # past retention
+        else:
+            data["turns"].insert(0, {"ts": (now - timedelta(days=40)).isoformat(),
+                                     "owner": "ancient", "assistant": "a"})
+        path.write_text(json.dumps(data))
+
     pruned = store.prune()
-    assert pruned == {"turns": 3, "files": 2}  # 1 stale turn + 2 all-stale files
-    assert store._path("s").exists()
-    assert not store._path("other").exists() and not store._path("legacy").exists()
+    assert pruned == {"turns": 2, "files": 1}  # 1 ancient turn in 's' + all of 'old'
+    assert store._path("s").exists() and not store._path("old").exists()
+    assert [t["owner"] for t in store._all("s")] == ["recent"]  # in-window turn kept
     assert store.prune() == {"turns": 0, "files": 0}  # idempotent
 
 

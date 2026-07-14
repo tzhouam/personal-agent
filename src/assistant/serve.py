@@ -45,58 +45,70 @@ class SessionStore:
     """Rolling chat history per session id, spilled to disk so multi-turn
     context survives a daemon restart.
 
-    Turns expire after ``max_age_hours`` (default 48): expired turns never
-    enter a prompt (read-time filter — the context-window budget), and the
-    daily curate phase calls ``prune()`` to delete them from disk."""
+    Two decoupled horizons:
 
-    def __init__(self, data_dir: Path, keep: int = 10, max_age_hours: int = 48):
-        """Store under `data_dir/sessions`, retaining at most `keep` turns per
-        session on disk and treating turns older than `max_age_hours` as
-        expired."""
+    - **context window** (``context_hours``, default 48 ≈ 2 days): only turns
+      this recent enter a prompt (read-time filter — the token budget), capped
+      at ``keep`` turns.
+    - **retention** (``retention_days``, default 30 ≈ 1 month): how long turns
+      stay on disk; the daily curate phase ``prune()``s past this.
+
+    So the owner keeps a month of history while each reply only sees the last
+    couple of days."""
+
+    def __init__(self, data_dir: Path, keep: int = 10, context_hours: int = 48,
+                 retention_days: int = 30, max_turns: int = 1500):
+        """Store under `data_dir/sessions`. `keep`/`context_hours` bound what a
+        prompt sees; `retention_days`/`max_turns` bound what stays on disk."""
         self.dir = data_dir / "sessions"
         self.keep = keep
-        self.max_age_hours = max_age_hours
+        self.context_hours = context_hours
+        self.retention_days = retention_days
+        self.max_turns = max_turns
 
     def _path(self, session_id: str) -> Path:
         """Map a session id to its spill file via a short sha1 hash, so
         arbitrary channel:peer ids become safe fixed-length filenames."""
         return self.dir / (hashlib.sha1(session_id.encode()).hexdigest()[:16] + ".json")
 
-    def _fresh(self, turns: list[dict]) -> list[dict]:
-        """Keep only turns newer than the `max_age_hours` cutoff; turns lacking
-        a `ts` predate the expiry feature and are dropped as expired."""
-        cutoff = (datetime.now(timezone.utc)
-                  - timedelta(hours=self.max_age_hours)).isoformat()
-        # turns without a ts predate the expiry feature — treat as expired
-        return [t for t in turns if t.get("ts", "") >= cutoff]
-
-    def history(self, session_id: str) -> list[dict]:
-        """Load the session's non-expired turns for prompt context, returning
-        `[]` when the file is absent or corrupt — history is best-effort, a bad
-        spill must never break a reply (degrade, never crash)."""
+    def _all(self, session_id: str) -> list[dict]:
+        """Every stored turn for the session (unfiltered); `[]` when the file
+        is absent or corrupt — a bad spill must never break a reply."""
         path = self._path(session_id)
         if not path.exists():
             return []
         try:
-            return self._fresh(json.loads(path.read_text()).get("turns", []))
+            return json.loads(path.read_text()).get("turns", [])
         except ValueError:
             return []
 
+    def _within(self, turns: list[dict], hours: float) -> list[dict]:
+        """Turns newer than `hours` ago; turns lacking a `ts` predate the
+        timestamp feature and are treated as expired."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        return [t for t in turns if t.get("ts", "") >= cutoff]
+
+    def history(self, session_id: str) -> list[dict]:
+        """The turns a prompt should see: the last `keep` within the context
+        window. Older turns stay on disk (retention) but never reach a prompt."""
+        return self._within(self._all(session_id), self.context_hours)[-self.keep:]
+
     def append(self, session_id: str, owner: str, assistant: str) -> None:
-        """Record one owner/assistant exchange, capping each side at 2000 chars
-        and writing back only the newest `keep` turns so the file stays
-        bounded."""
-        turns = self.history(session_id)
+        """Record one owner/assistant exchange (each side capped at 2000 chars).
+        Keeps the whole retention window on disk — not just the prompt slice —
+        bounded by `max_turns`, so a month of history survives while prompts
+        stay short."""
+        turns = self._within(self._all(session_id), self.retention_days * 24)
         turns.append({"ts": datetime.now(timezone.utc).isoformat(),
                       "owner": owner[:2000], "assistant": assistant[:2000]})
         self.dir.mkdir(parents=True, exist_ok=True)
         self._path(session_id).write_text(json.dumps(
-            {"session": session_id, "turns": turns[-self.keep:]},
+            {"session": session_id, "turns": turns[-self.max_turns:]},
             ensure_ascii=False))
 
     def prune(self) -> dict:
-        """Drop expired turns from disk; delete session files left empty.
-        Returns counts for the curate log/metrics."""
+        """Drop turns past the retention window from disk; delete session files
+        left empty. Returns counts for the curate log/metrics."""
         removed_turns = removed_files = 0
         for path in self.dir.glob("*.json") if self.dir.exists() else []:
             try:
@@ -106,7 +118,7 @@ class SessionStore:
                 removed_files += 1
                 continue
             turns = data.get("turns", [])
-            fresh = self._fresh(turns)
+            fresh = self._within(turns, self.retention_days * 24)
             removed_turns += len(turns) - len(fresh)
             if not fresh:
                 path.unlink(missing_ok=True)
@@ -121,7 +133,8 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
     that is the stale-credential fix — and injectable for tests."""
     boot = settings_factory()
     sessions = SessionStore(boot.data_dir, keep=boot.serve_session_turns,
-                            max_age_hours=boot.chat_history_max_age_hours)
+                            context_hours=boot.chat_history_max_age_hours,
+                            retention_days=boot.chat_history_retention_days)
     make_llm = llm_factory or (lambda s: LLM(s))
 
     class Handler(BaseHTTPRequestHandler):

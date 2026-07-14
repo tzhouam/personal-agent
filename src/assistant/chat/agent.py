@@ -65,6 +65,9 @@ put ingredient lists in the note, say in the reply that macros are estimates, an
 ingredients against the "wants covered" needs list. When asked about health status or
 improvements, analyze from the "## Health" computed numbers — BMI, weight trend, exercise
 minutes, daily calorie/protein averages, open needs — with concrete, practical suggestions.
+For a specific day ("昨天吃了多少"), read the per-day totals and the "recent records" list in
+that block — NEVER claim a meal wasn't logged without checking them first; a record you can
+see there IS logged, even if it isn't in the recent chat.
 You give wellness guidance, not medical diagnosis; for medical concerns recommend a doctor.
 
 The context sections all describe the SAME person — link them in every analysis instead of
@@ -171,8 +174,19 @@ def build_context(settings: Settings) -> str:
 
         store = HealthStore(settings.profile_dir)
         if store.records() or store.load()["profile"] or store.open_needs():
-            parts.append("## Health (computed — cite these numbers)\n"
-                         + render_health(store.summary()))
+            block = ["## Health (computed — cite these numbers)",
+                     render_health(store.summary())]
+            recent = store.records(days=3)[-16:]  # individual meals/exercise, so
+            if recent:                            # per-day questions are answerable
+                block.append("recent records (id · date time · what):")
+                block += [
+                    f"[{r['id']}] {r['date']} {r.get('time', '')} · "
+                    + (r.get("description") or r.get("activity", ""))
+                    + (f" · {r['calories_kcal']}kcal" if r.get("calories_kcal") else "")
+                    + (f" · {r['protein_g']}g蛋白" if r.get("protein_g") else "")
+                    + (f" · {r['duration_min']}min" if r.get("duration_min") else "")
+                    for r in recent]
+            parts.append("\n".join(block))
     except Exception:
         log.exception("context: health failed")
 
@@ -274,11 +288,32 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                     f"\n技术细节: {str(exc)[:200]}")
     if not isinstance(result, dict):
         return "(assistant error: unparseable model response)"
-    reply = str(result.get("reply", "")).strip() or "(empty reply)"
+    reply = str(result.get("reply", "")).strip()
     actions = result.get("actions") or []
     outcomes = execute(actions, settings)
     all_outcomes = list(outcomes)
     repair_rounds = 0
+
+    # Empty reply AND nothing done = the model returned nothing usable (mimo /
+    # other reasoning models occasionally do this on an ambiguous fragment).
+    # Retry once with a nudge; if still blank, degrade to a human ask — never
+    # surface a raw "(empty reply)" to the owner.
+    if not reply and not all_outcomes:
+        log.warning("empty model reply with no actions — retrying once")
+        try:
+            retry = llm.complete_json(
+                prompt + "\n\n(Your previous response was empty. Reply now with a "
+                "concrete answer, or emit the right action — as JSON.)",
+                system=system, max_tokens=6000, role="chat")
+            if isinstance(retry, dict):
+                reply = str(retry.get("reply", "")).strip()
+                actions = retry.get("actions") or []
+                outcomes = execute(actions, settings)
+                all_outcomes = list(outcomes)
+        except Exception:
+            log.exception("empty-reply retry failed")
+        if not reply and not all_outcomes:
+            reply = "抱歉，我刚才没组织好回复 🙏 可以再说一次，或者换个说法吗？"
 
     # Review-and-retry: when an action outcome reports a failure (bad params,
     # wrong id, unknown action), show the model exactly what it emitted and
@@ -315,7 +350,7 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
         all_outcomes += [f"(retry) {o}" for o in outcomes]
 
     if all_outcomes:
-        reply += "\n\n✔ " + "\n✔ ".join(all_outcomes)
+        reply = (reply + "\n\n" if reply else "") + "✔ " + "\n✔ ".join(all_outcomes)
     try:  # harness telemetry: per-turn latency/size/repair counts (best-effort)
         from datetime import datetime
 

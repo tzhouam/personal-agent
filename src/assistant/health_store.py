@@ -230,12 +230,20 @@ class HealthStore:
         meals = [r for r in window if r["kind"] == "meal"]
         kcal_days: dict[str, float] = {}
         protein_days: dict[str, float] = {}
+        meal_days: dict[str, int] = {}
         for r in meals:
+            meal_days[r["date"]] = meal_days.get(r["date"], 0) + 1
             if r.get("calories_kcal") is not None:
                 kcal_days[r["date"]] = kcal_days.get(r["date"], 0) + r["calories_kcal"]
             if r.get("protein_g") is not None:
                 protein_days[r["date"]] = protein_days.get(r["date"], 0) + r["protein_g"]
-        return {"days": days, "profile": profile,
+        # per-day totals (most recent first) — so "how many calories yesterday"
+        # is answerable directly, not just from the multi-day average.
+        by_day = [{"date": d, "meals": meal_days[d],
+                   "kcal": round(kcal_days.get(d, 0)) or None,
+                   "protein_g": round(protein_days.get(d, 0), 1) or None}
+                  for d in sorted(meal_days, reverse=True)]
+        return {"days": days, "profile": profile, "by_day": by_day,
                 "latest_weight": latest and {"kg": latest["weight_kg"],
                                              "date": latest["date"]},
                 "weight_delta": delta,
@@ -276,6 +284,13 @@ def render_summary(summary: dict) -> str:
     if summary["avg_daily_protein_g"] is not None:
         meal_bits.append(f"~{summary['avg_daily_protein_g']} g protein/day")
     lines.append(f"food last {summary['days']}d: " + ", ".join(meal_bits))
+    for day in summary.get("by_day", [])[:7]:  # per-day totals, recent first
+        bits = [f"{day['meals']} meals"]
+        if day["kcal"] is not None:
+            bits.append(f"{day['kcal']} kcal")
+        if day["protein_g"] is not None:
+            bits.append(f"{day['protein_g']} g protein")
+        lines.append(f"  {day['date']}: " + ", ".join(bits))
     if summary["needs"]:
         lines.append("wants covered: " + "; ".join(
             f"[{n['id']}] {n['item']}" + (f" ({n['why']})" if n.get("why") else "")
