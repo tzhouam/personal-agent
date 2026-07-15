@@ -147,6 +147,7 @@ class LLM:
         `layers` > 1 each further round of proposers refines against the last
         round's answers before the final aggregation. A member that errors is
         dropped as long as one proposal survives."""
+        import contextvars
         import logging
         from concurrent.futures import ThreadPoolExecutor
 
@@ -166,8 +167,15 @@ class LLM:
         responses: list[str] = []
         for _ in range(layers):
             layer_input = content if not responses else _augment(content, responses)
+            # Propagate the current context into each worker (a raw pool thread
+            # starts with a fresh context, which would drop the ContextVar-scoped
+            # tracer — so proposer llm spans would vanish). One copy per member,
+            # captured here in the calling thread. (tracing.py, DESIGN §3.)
+            ctxs = [contextvars.copy_context() for _ in members]
             with ThreadPoolExecutor(max_workers=min(8, len(members))) as ex:
-                responses = [r for r in ex.map(lambda m: propose(m, layer_input), members) if r]
+                responses = [r for r in ex.map(
+                    lambda cm: cm[0].run(propose, cm[1], layer_input),
+                    zip(ctxs, members)) if r]
             if not responses:
                 raise RuntimeError("all mixture proposers failed")
 
