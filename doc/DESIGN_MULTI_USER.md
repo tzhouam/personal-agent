@@ -1,8 +1,12 @@
 # personal-agent — Multi-User Support Plan (v3.5)
 
-Status: **proposal / not yet implemented.** Design + phased plan to take
-personal-agent from single-owner to multi-tenant without a rewrite. Current
-architecture: [DESIGN.md](DESIGN.md).
+Status: **implemented behind `DEPLOYMENT_MODE` (branch `feat/multiuser-phase0`)**
+— default `single_user` is unchanged; production enablement of `multi_tenant` is
+**gated on the §A.8 weixin spike** (real-hardware accountId verification) plus
+the enablement checklist in
+[WECHAT_OPENCLAW.md](WECHAT_OPENCLAW.md#multi-user-multi_tenant). Details in the
+implementation-status note under §15. Current single-user architecture:
+[DESIGN.md](DESIGN.md).
 
 > **v2 revision.** Incorporates a design review. The direction (Settings as the
 > isolation seam, per-user DATA_DIR, backward-compatible rollout, shared-WeCom
@@ -646,6 +650,29 @@ cost.
 
 Each phase is shippable, backward-compatible, and ends with prime-directive
 tests. **Security work is front-loaded, not deferred.**
+
+> **Implementation status (as of this branch).** The full multi-tenant machinery
+> is implemented behind `DEPLOYMENT_MODE` (default `single_user` = unchanged), with
+> unit tests; single-user behavior is byte-for-byte the same. Landed:
+> `Settings.for_user`/`uid`/`DEFAULT_UID` + `shared_dir` (§4); `uidsafe` opaque
+> uid + path containment (§4.3); `UserRegistry` (accountId/mailbox→uid, one
+> bridge-token hash, atomic writes — §A.1); authenticated `resolve_uid` with **no
+> fallback** in multi_tenant + mandatory bridge token on **every** endpoint (§A.2);
+> per-request per-user `SessionStore` + uid-scoped keys, and network image-paths
+> refused (§7, §A.4); ContextVar-scoped tracer + MoA `copy_context` (§3); reentrant
+> per-user `write.lock` (§8); the **durable SQLite job queue** with recovery /
+> dedupe / per-user fairness / cooperative cancellation, the in-process **worker
+> pool**, and the **DeliveryLedger** outbox (§6); the fan-out **scheduler** (§12);
+> `reboot` removed from the tenant action set (§10); the **admin CLI**
+> (`add-user`/`remove-user`/`list`/`bind-channel`/`set-bridge-token`/
+> `migrate-single-user`/`reboot`), the **ordered deletion protocol** + export, and
+> reversible single-user **migration** (§14); the bridge's `before_dispatch`
+> accountId routing, **fail-closed** weixin handling, capped image **bytes**, and
+> no-CLI fallback (§A.3, §A.5) — with a Node test suite. **Still gated:** the
+> **two-account weixin spike (§A.8)** must confirm stable per-account `accountId`
+> at `before_dispatch` on real hardware before `multi_tenant` is enabled in
+> production; per-user timezone, rate limiting, quotas, and encrypted secret
+> storage (Phases 3/5) remain future work.
 
 - **Phase 0 — foundations, threat model & process-model decision.** Write the
   threat model (§2); **choose the process model** (single multi-tenant process vs

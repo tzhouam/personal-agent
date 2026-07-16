@@ -1,0 +1,9 @@
+{
+  "id": "a8-spike-probe",
+  "name": "A.8 accountId spike probe",
+  "description": "Read-only: logs channel/accountId/sessionKey at before_dispatch (A.8 spike).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

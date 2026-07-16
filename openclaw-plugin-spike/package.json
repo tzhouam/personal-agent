@@ -1,0 +1,10 @@
+{
+  "name": "a8-spike-probe",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Read-only OpenClaw probe: logs channel/accountId/sessionKey at before_dispatch (A.8 spike)",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}

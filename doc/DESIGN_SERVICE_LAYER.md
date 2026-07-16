@@ -7,6 +7,15 @@ Supersedes nothing — refines the runtime topology of [DESIGN.md](DESIGN.md) §
 [WECHAT_OPENCLAW.md](WECHAT_OPENCLAW.md); the LangGraph pipeline and all task
 semantics are **unchanged**.
 
+> **Scope note (2026-07-16):** this doc describes the **`single_user`**
+> deployment. In `multi_tenant` ([DESIGN_MULTI_USER.md](DESIGN_MULTI_USER.md))
+> several claims below are superseded: Popen background jobs → the durable
+> SQLite queue + in-process worker pool (`jobs.py`/`worker.py`); the optional
+> `SERVE_TOKEN` → a **mandatory** bridge token on every endpoint; the
+> `before_agent_reply` hook → `before_dispatch` accountId routing; the
+> gateway-cron pipeline → the per-user fan-out scheduler (`scheduler.py`);
+> "owner-only sender auth" → per-account allowlist + registry-resolved uid.
+
 ## 1. Why change anything
 
 The current split (OpenClaw = transport via exec bridge, Python = brain) is
