@@ -187,7 +187,8 @@ def test_llm_builds_image_blocks(settings, tmp_path, monkeypatch):
     content = captured["messages"][0]["content"]
     assert content[0]["type"] == "image"
     assert content[0]["source"]["media_type"] == "image/png"
-    assert content[-1] == {"type": "text", "text": "look"}
+    assert content[1] == {"type": "text", "text": "look"}
+    assert content[-1]["text"].startswith("[temporal anchor]")  # clock at the tail
 
 
 def test_native_image_failure_falls_back_to_describe_with_backend(settings, tmp_path, monkeypatch):

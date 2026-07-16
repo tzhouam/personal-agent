@@ -205,7 +205,12 @@ def test_aliases_load_and_render(tmp_path):
 
 
 def test_ops_log_roundtrip(tmp_path):
-    append_ops_log(tmp_path, [{"op": "add_evidence", "name": "x"}], "2026-07-09")
+    from datetime import date, timedelta
+
+    # relative to the live clock — a hardcoded "recent" date rots out of the
+    # 7-day window (this test broke at a midnight rollover)
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    append_ops_log(tmp_path, [{"op": "add_evidence", "name": "x"}], yesterday)
     append_ops_log(tmp_path, [{"op": "add_project", "name": "old"}], "2020-01-01")
     recent = recent_ops(tmp_path, days=7)
     assert [o["name"] for o in recent] == ["x"]  # old entries filtered

@@ -122,7 +122,21 @@ class LLM:
         """One traced ``messages.create`` returning the concatenated text; the
         shared core of the single-model and mixture paths. Retried on transient
         errors here (rather than on ``complete``) so each mixture proposer and
-        the aggregator retry independently."""
+        the aggregator retry independently.
+
+        Appends the temporal anchor to the TAIL of the user content — the
+        model's only reliable clock. Tail placement adds nothing before any
+        existing token, so the cacheable prompt prefix (system + stable prompt
+        heads) stays byte-identical; never into ``system`` (that would bust the
+        static prefix every request). List content is copied, never mutated —
+        the mixture path passes one shared list to every proposer."""
+        from .timeutil import temporal_anchor
+
+        anchor = temporal_anchor()
+        if isinstance(content, str):
+            content = content + "\n\n" + anchor
+        else:
+            content = [*content, {"type": "text", "text": anchor}]
         kwargs: dict = {"model": model_id, "max_tokens": max_tokens,
                         "messages": [{"role": "user", "content": content}]}
         if system:
