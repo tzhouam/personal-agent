@@ -272,23 +272,31 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                                    **({"images": attach} if attach else {}))
     except Exception as exc:
         if attach:
-            # image call failed (provider switch, endpoint without vision, …):
-            # degrade to describe-then-reason, then to text — never a raw error
-            log.warning("native image call failed (%s) — falling back", exc)
+            # The native image call failed. When a SEPARATE vision backend is
+            # configured, degrade to describe-then-reason. Otherwise the main
+            # model IS the vision backend (llm_supports_images) — the failure
+            # was almost certainly transient, so RETRY the native call rather
+            # than routing to a backend that isn't there (which used to surface
+            # a bogus "视觉后端不可用" even though the model can read images).
+            log.warning("native image call failed (%s) — recovering", exc)
             from ..vision import describe_images, render_image_context
 
             try:
-                descriptions = describe_images(settings, attach)
-                fallback_prompt = prompt.replace(
-                    "## Attached images\n(the owner's images are attached "
-                    "to this message — look at them directly)",
-                    render_image_context(descriptions))
-                result = llm.complete_json(fallback_prompt, system=system,
-                                           max_tokens=6000)
+                if settings.vision_api_key and settings.vision_model:
+                    descriptions = describe_images(settings, attach)
+                    fallback_prompt = prompt.replace(
+                        "## Attached images\n(the owner's images are attached "
+                        "to this message — look at them directly)",
+                        render_image_context(descriptions))
+                    result = llm.complete_json(fallback_prompt, system=system,
+                                               max_tokens=6000)
+                else:
+                    result = llm.complete_json(prompt, system=system, max_tokens=6000,
+                                               role="chat", images=attach)
             except Exception:
-                log.exception("image fallback failed too")
-                return ("图片这次没能处理（当前模型/接口暂不支持图片输入）。"
-                        "文字部分请再发一次，或稍后重试图片。")
+                log.exception("image retry/fallback failed too")
+                return ("图片这次没能处理，请稍后重发一次 🙏 "
+                        "急的话也可以把关键内容用文字发我。")
         else:
             log.exception("chat LLM call failed")
             return ("我这边连不上大脑了（LLM 接口报错），请稍后再试。"

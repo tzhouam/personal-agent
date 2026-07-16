@@ -190,9 +190,13 @@ def test_llm_builds_image_blocks(settings, tmp_path, monkeypatch):
     assert content[-1] == {"type": "text", "text": "look"}
 
 
-def test_native_image_failure_falls_back_to_describe(settings, tmp_path, monkeypatch):
+def test_native_image_failure_falls_back_to_describe_with_backend(settings, tmp_path, monkeypatch):
+    # a SEPARATE vision backend is configured → native fail degrades to
+    # describe-then-reason (text-only main model style).
     pic = _png(tmp_path)
     settings.llm_supports_images = True
+    settings.vision_api_key = "vk"
+    settings.vision_model = "vm"
     monkeypatch.setattr("assistant.vision.describe_images",
                         lambda s, p: ["a receipt for ¥45"])
     calls = {"n": 0}
@@ -207,9 +211,52 @@ def test_native_image_failure_falls_back_to_describe(settings, tmp_path, monkeyp
 
     llm = FlakyLLM({"reply": "看到了收据，45元。", "actions": []})
     reply = handle_message("这是什么", settings, llm, image_paths=[str(pic)])
-    assert calls["n"] == 2                       # native try, then fallback
+    assert calls["n"] == 2                       # native try, then describe fallback
     assert "a receipt for ¥45" in llm.prompts[-1]  # description substituted
     assert reply.startswith("看到了收据")
+
+
+def test_native_image_failure_retries_when_no_vision_backend(settings, tmp_path, monkeypatch):
+    # The common config: main model IS the vision backend, no separate VISION_*.
+    # A transient native failure RETRIES the native call — it must never route to
+    # the nonexistent describe backend and surface "视觉后端不可用".
+    pic = _png(tmp_path)
+    settings.llm_supports_images = True
+    settings.vision_api_key = ""
+    settings.vision_model = ""
+    monkeypatch.setattr("assistant.vision.describe_images",
+                        lambda s, p: (_ for _ in ()).throw(AssertionError("describe ran")))
+    calls = {"n": 0}
+
+    class FlakyLLM(FakeLLM):
+        def complete_json(self, prompt, system=None, images=None, **kw):
+            calls["n"] += 1
+            self.prompts.append(prompt)
+            if calls["n"] == 1:
+                raise RuntimeError("temporary upstream timeout")
+            assert images  # the retry still sends the image to the model
+            return self.result
+
+    llm = FlakyLLM({"reply": "看到了会议邀请，周四21点。", "actions": []})
+    reply = handle_message("这是什么", settings, llm, image_paths=[str(pic)])
+    assert calls["n"] == 2 and reply.startswith("看到了会议邀请")
+
+
+def test_native_image_failure_exhausted_is_humane(settings, tmp_path):
+    # native fails and the retry fails too (no backend) → a neutral "try again",
+    # never the misleading "不支持图片输入" / "视觉后端不可用".
+    pic = _png(tmp_path)
+    settings.llm_supports_images = True
+    settings.vision_api_key = ""
+    settings.vision_model = ""
+
+    class DeadImgLLM(FakeLLM):
+        def complete_json(self, prompt, system=None, images=None, **kw):
+            raise RuntimeError("boom")
+
+    reply = handle_message("这是什么", settings, DeadImgLLM({}), image_paths=[str(pic)])
+    assert "重发" in reply
+    assert "不支持图片" not in reply and "视觉后端" not in reply
 
 
 def test_llm_error_without_images_is_humane(settings, tmp_path, monkeypatch):
