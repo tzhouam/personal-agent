@@ -65,9 +65,9 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
         if not any(f'"{name}"' in line for name in EXCLUDED_ACTIONS))  # admin actions for tenants (§10)
     system = _RUNNER_SYSTEM.format(actions=actions_block)
     try:
-        from .lessons_store import LessonsStore
+        from .lessons_store import combined_prompt_block
 
-        system += LessonsStore(settings.profile_dir).prompt_block()
+        system += combined_prompt_block(settings)   # shared G* then personal L*
     except Exception:
         log.exception("lessons injection failed")
     context = build_context(settings)

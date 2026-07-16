@@ -143,3 +143,35 @@ def test_cancel_before_dispatch_never_runs_body(q):
     finally:
         pool.stop()
     assert ran == []                             # cancelled job was never claimed/run
+
+
+def test_default_settings_for_global_sentinel(tmp_path, monkeypatch):
+    from assistant.config import Settings
+    from assistant.jobs import GLOBAL_UID
+    from assistant.worker import _default_settings_for
+
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    root = _default_settings_for(GLOBAL_UID)
+    assert root.data_dir == tmp_path                     # deployment ROOT
+    assert not (tmp_path / "users" / "__global__").exists()
+    user = _default_settings_for("alice1")
+    assert user.data_dir == tmp_path / "users" / "alice1"
+
+
+def test_global_job_dispatches_with_root_settings(q, tmp_path, monkeypatch):
+    from assistant.jobs import GLOBAL_UID
+
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    seen = []
+    q.enqueue(GLOBAL_UID, "global_evolve", {})
+    pool = WorkerPool(q, dispatch={"global_evolve":
+                                   lambda s, a, t: seen.append(s.data_dir)},
+                      poll_interval=0.02).start()        # default settings_for
+    try:
+        _drain(q, pool, 1)
+    finally:
+        pool.stop()
+    assert seen == [tmp_path]                            # root, not users/<uid>
+    assert q.counts() == {"done": 1}

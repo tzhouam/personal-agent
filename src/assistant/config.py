@@ -158,6 +158,11 @@ class Settings(BaseSettings):
     daily_run_hour: int = 7         # multi_tenant: from this local hour the poll
                                     # loop fans out the daily run per active user
                                     # (idempotent per day, §12)
+    weekly_day: int = 6             # multi_tenant: weekday (Mon=0…Sun=6) of the
+                                    # weekly self-evolution fan-out (§12b —
+                                    # replaces the retired Sunday-08:00 cron)
+    weekly_hour: int = 8            # from this local hour on weekly_day the
+                                    # weekly fan-out fires (idempotent per ISO week)
     serve_session_turns: int = 10   # exchanges of chat history kept per session
     chat_history_max_age_hours: int = 48  # context window: turns older than this
                                           # never enter a prompt (~2 days)

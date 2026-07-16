@@ -44,3 +44,35 @@ def test_single_user_is_a_noop(tmp_path, monkeypatch):
     monkeypatch.setenv("DEPLOYMENT_MODE", "single_user")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     assert enqueue_daily_runs(Settings(_env_file=None)) == []
+
+
+def test_weekly_fan_out_full_set(root):
+    from assistant.jobs import GLOBAL_UID
+    from assistant.scheduler import enqueue_weekly_jobs
+
+    settings, _ = root
+    labels = enqueue_weekly_jobs(settings, week="2026-W29")
+    assert sorted(labels) == ["alice1:consolidate", "alice1:evolve",
+                              "bob123:consolidate", "bob123:evolve",
+                              "global:evolve", "global:self_improve"]
+    q = JobQueue(settings.shared_dir)
+    assert q.counts() == {"queued": 6}
+    # the two global jobs carry the sentinel uid
+    kinds = {}
+    while (job := q.claim()) is not None:
+        kinds[job["kind"]] = job["uid"]
+        q.mark(job["id"], "done")
+    assert kinds["global_evolve"] == GLOBAL_UID
+    assert kinds["self_improve"] == GLOBAL_UID
+    assert kinds["run_phase"] in ("alice1", "bob123")
+    # idempotent within the week; fresh next week
+    assert enqueue_weekly_jobs(settings, week="2026-W29") == []
+    assert len(enqueue_weekly_jobs(settings, week="2026-W30")) == 6
+
+
+def test_weekly_single_user_is_a_noop(tmp_path, monkeypatch):
+    from assistant.scheduler import enqueue_weekly_jobs
+
+    monkeypatch.setenv("DEPLOYMENT_MODE", "single_user")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    assert enqueue_weekly_jobs(Settings(_env_file=None)) == []

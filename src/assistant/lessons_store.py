@@ -1,26 +1,44 @@
-"""Learned behavior: the agent's self-evolution store.
+"""Learned behavior: the agent's self-evolution stores.
 
-`lessons.yaml` lives in the profile git repo. Each lesson is one durable
-behavioral rule with provenance — `owner` (stated directly in chat: "以后…",
-"别再…", a correction) or `evolve` (distilled by the weekly self-analysis of
-chat sessions and task traces). Active lessons are injected into the system
-prompt of every chat and task turn, so learning here changes behavior
-immediately; retiring a lesson (never deleting) reverts it, and git history
-makes every change in how the agent behaves auditable.
+Two layers (doc/DESIGN_MULTI_USER.md §12b):
+
+- **Personal** — `lessons.yaml` in each user's profile git repo. One durable
+  behavioral rule per entry with provenance — `owner` (stated directly in chat:
+  "以后…", "别再…", a correction) or `evolve` (distilled by the weekly
+  self-analysis of that user's chats and task runs). Ids `L1, L2, …`.
+- **Shared** (multi_tenant) — `shared/lessons/lessons.yaml`, deployment-global:
+  user-agnostic rules distilled weekly from ALL users' evidence
+  (`tasks/global_evolve.py`, under the users' mutual authorization). Ids
+  `G1, G2, …` so the chat `retire_preference` action (which only touches the
+  personal store) can never collide. Injected into every user's prompts
+  **before** the personal block — personal rules take precedence.
+
+Active lessons are injected into the system prompt of every chat and task turn,
+so learning here changes behavior immediately; retiring a lesson (never
+deleting) reverts it, and git history (where the dir is a repo) makes every
+change in how the agent behaves auditable.
 
 Bounded on purpose: rules are length-capped, the active set is capped (oldest
 evolve-sourced lessons retire first when full), and near-duplicate rules are
 rejected so the prompt never silts up.
 """
 
+import logging
 import subprocess
 from datetime import date
 from pathlib import Path
 
 import yaml
 
+log = logging.getLogger("assistant")
+
 MAX_ACTIVE = 25
 MAX_RULE_CHARS = 240
+SHARED_MAX_ACTIVE = 12   # shared rules ride in EVERY user's prompts — keep small
+
+SHARED_HEADER = ("\n\nShared rules learned across all users of this assistant "
+                 "(user-agnostic operational lessons — follow them; the owner's "
+                 "personal rules below take precedence on any conflict):\n")
 
 
 class LessonsStore:
@@ -29,10 +47,16 @@ class LessonsStore:
 
     FILENAME = "lessons.yaml"
 
-    def __init__(self, repo_dir: Path):
-        """Bind to `lessons.yaml` inside `repo_dir` (the profile git repo)."""
+    def __init__(self, repo_dir: Path, id_prefix: str = "L",
+                 max_active: int = MAX_ACTIVE):
+        """Bind to `lessons.yaml` inside `repo_dir` (the profile git repo for
+        the personal store; a plain dir works too — git commit is best-effort).
+        `id_prefix` distinguishes stores in rendered prompts (`L*` personal,
+        `G*` shared); `max_active` caps the injected set."""
         self.repo_dir = repo_dir
         self.path = repo_dir / self.FILENAME
+        self.id_prefix = id_prefix
+        self.max_active = max_active
 
     def load(self) -> dict:
         """Parsed store, or an empty scaffold when missing/empty."""
@@ -63,12 +87,12 @@ class LessonsStore:
         active = [l for l in data["lessons"] if l["status"] == "active"]
         if any(_similar(l["rule"], rule) for l in active):
             return None
-        if len(active) >= MAX_ACTIVE:
+        if len(active) >= self.max_active:
             evolved = [l for l in active if l.get("source") == "evolve"]
             if not evolved:
                 return None  # full of owner rules — owner must retire one
             evolved[0]["status"] = "retired"
-        lesson = {"id": f"L{data['next_id']}", "rule": rule,
+        lesson = {"id": f"{self.id_prefix}{data['next_id']}", "rule": rule,
                   "why": str(why or "")[:200],
                   "source": "evolve" if source == "evolve" else "owner",
                   "status": "active", "created": date.today().isoformat()}
@@ -91,14 +115,48 @@ class LessonsStore:
         """Active lessons, oldest first."""
         return [l for l in self.load()["lessons"] if l["status"] == "active"]
 
-    def prompt_block(self) -> str:
-        """The system-prompt injection: numbered active rules, '' when none."""
+    def prompt_block(self, header: str | None = None) -> str:
+        """The system-prompt injection: numbered active rules, '' when none.
+        `header` overrides the personal-store default (the shared store passes
+        `SHARED_HEADER`)."""
         active = self.active()
         if not active:
             return ""
         lines = "\n".join(f"- [{l['id']}] {l['rule']}" for l in active)
-        return ("\n\nLearned rules from the owner's feedback and your own past "
-                "mistakes — follow them; the owner can retire any by id:\n" + lines)
+        if header is None:
+            header = ("\n\nLearned rules from the owner's feedback and your own "
+                      "past mistakes — follow them; the owner can retire any by "
+                      "id:\n")
+        return header + lines
+
+
+def shared_store(settings) -> LessonsStore:
+    """The deployment-global lessons store (multi_tenant): user-agnostic rules
+    under `shared_dir/lessons/` — a subdir so a later `git init` for audit
+    history never entangles `jobs.db`. Ids `G*`, small cap (they ride in every
+    user's prompts)."""
+    return LessonsStore(settings.shared_dir / "lessons",
+                        id_prefix="G", max_active=SHARED_MAX_ACTIVE)
+
+
+def combined_prompt_block(settings) -> str:
+    """Everything the prompts should learn from: the shared block (multi_tenant
+    only) **then** the personal block — personal last, so on any conflict the
+    user's own rules win by both the header contract and recency. Each store is
+    separately guarded: a broken shared store must never cost the user their
+    personal rules (and vice versa). In single_user this is byte-identical to
+    the legacy personal `prompt_block()`."""
+    parts = []
+    if settings.deployment_mode == "multi_tenant":
+        try:
+            parts.append(shared_store(settings).prompt_block(header=SHARED_HEADER))
+        except Exception:
+            log.exception("shared lessons injection failed")
+    try:
+        parts.append(LessonsStore(settings.profile_dir).prompt_block())
+    except Exception:
+        log.exception("personal lessons injection failed")
+    return "".join(parts)
 
 
 def _similar(a: str, b: str) -> bool:

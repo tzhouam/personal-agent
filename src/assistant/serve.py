@@ -422,6 +422,15 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
             enqueue_daily_runs(settings, day=now.strftime("%Y-%m-%d"))
         except Exception:
             log.exception("daily fan-out failed")
+    # weekly self-evolution set (§12b): per-user consolidate + evolve, plus the
+    # global evolve + self-improve jobs — idempotent per ISO week via dedupe keys
+    if now.weekday() == settings.weekly_day and now.hour >= settings.weekly_hour:
+        try:
+            from .scheduler import enqueue_weekly_jobs
+
+            enqueue_weekly_jobs(settings, week=now.strftime("%G-W%V"))
+        except Exception:
+            log.exception("weekly fan-out failed")
     polled_mailboxes: set = set()
     for uid in UserRegistry(settings.data_dir).active():
         try:

@@ -198,6 +198,13 @@ mailbox; background jobs run on a durable per-user queue
 per active user. Users are managed with the `assistant admin …` operator CLI —
 there are no per-user tokens or tenant-facing admin surfaces.
 
+Weekly (Sunday 08:00 by default) the deployment **self-evolves in three
+layers**: per-user profile consolidation and personal lessons; cross-user
+**global lessons** distilled from everyone's traces and chats (user-agnostic
+rules, privacy-filtered, reviewable via `assistant admin lessons`); and a
+code-level self-improvement pass that opens a **reviewable PR** (never
+auto-merged). See `doc/DESIGN_MULTI_USER.md` §12b.
+
 **Do not enable it in production yet**: enablement is gated on the two-account
 WeChat spike (stable per-account `accountId` on real hardware) plus a
 sender-allowlist check — the full checklist is in

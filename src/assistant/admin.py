@@ -72,6 +72,31 @@ def list_users(settings: Settings) -> str:
     return "\n".join(out)
 
 
+def list_shared_lessons(settings: Settings) -> str:
+    """The shared (cross-user) lessons roster: id · created · rule — why
+    (provenance). These render into EVERY user's prompts; retire what misfires."""
+    _require_multi_tenant(settings)
+    from .lessons_store import shared_store
+
+    rows = shared_store(settings).active()
+    if not rows:
+        return "(no active shared lessons)"
+    return "\n".join(f"[{l['id']}] {l.get('created', '?')}  {l['rule']}"
+                     + (f"\n      why: {l['why']}" if l.get("why") else "")
+                     for l in rows)
+
+
+def retire_shared_lesson(settings: Settings, lesson_id: str) -> str:
+    """Retire (never delete) one shared lesson — it leaves every user's prompts
+    on their next turn."""
+    _require_multi_tenant(settings)
+    from .lessons_store import shared_store
+
+    ok = shared_store(settings).retire(str(lesson_id))
+    return (f"retired shared lesson {lesson_id}" if ok
+            else f"no active shared lesson {lesson_id!r}")
+
+
 def _flock_bounded(path: Path, timeout: float) -> "int | None":
     """Try to take an exclusive flock on `path` within `timeout` seconds; return
     the held fd, or None if it stayed contended (a stuck run — escalate to a

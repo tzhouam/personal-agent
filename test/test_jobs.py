@@ -22,15 +22,19 @@ def test_enqueue_and_claim_roundtrip(q):
     assert q.counts() == {"done": 1}
 
 
-def test_enqueue_dedupe_blocks_active_duplicate(q):
+def test_enqueue_dedupe_blocks_duplicate_in_any_state(q):
     a = q.enqueue("alice1", "run", {}, dedupe_key="alice1:run:2026-07-15")
     b = q.enqueue("alice1", "run", {}, dedupe_key="alice1:run:2026-07-15")
     assert a is not None and b is None          # duplicate enqueue is idempotent
-    # once the first reaches a terminal state, the key is free again
+    # a COMPLETED job still blocks its period key — the poll loop keeps ticking
+    # past the daily gate, and re-enqueueing a finished run looped the pipeline
+    # all day (live incident 2026-07-16)
     q.claim()
     q.mark(a, "done")
-    c = q.enqueue("alice1", "run", {}, dedupe_key="alice1:run:2026-07-15")
-    assert c is not None
+    assert q.enqueue("alice1", "run", {}, dedupe_key="alice1:run:2026-07-15") is None
+    # a different period (or no key at all — manual trigger) still enqueues
+    assert q.enqueue("alice1", "run", {}, dedupe_key="alice1:run:2026-07-16") is not None
+    assert q.enqueue("alice1", "run", {}) is not None
 
 
 def test_recover_requeues_orphaned_running_jobs(tmp_path):
@@ -141,3 +145,16 @@ def test_delivery_ledger_unmark_releases_claim(tmp_path):
     led.unmark("digest", "2026-07-15")
     assert led.was_delivered("digest", "2026-07-15") is False
     assert led.mark_delivered("digest", "2026-07-15") is True   # retry claims again
+
+
+def test_singleton_blocked_job_stays_queued_until_run_finishes(q):
+    """A weekly run_phase queued while the same uid's daily run executes is
+    deferred (skipped by claim), NOT lost — and claimable once the run ends."""
+    run = q.enqueue("alice1", "run", {})
+    q.claim()                                            # daily run → running
+    phase = q.enqueue("alice1", "run_phase", {"phase": "consolidate"})
+    assert q.claim() is None                             # deferred, not claimed
+    assert q.get(phase)["state"] == "queued"             # still queued
+    q.mark(run, "done")
+    nxt = q.claim()
+    assert nxt["id"] == phase and nxt["args"] == {"phase": "consolidate"}

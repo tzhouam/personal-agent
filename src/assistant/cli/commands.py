@@ -313,6 +313,9 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
     if phase == "consolidate":
         from ..tasks.profile_consolidate import consolidate_profile
 
+        if not store.exists():  # un-bootstrapped user: weekly job no-ops, never fail-loops
+            print("no profile yet — skipping consolidate (run `assistant bootstrap`)")
+            return 0
         result = consolidate_profile(llm, store, settings)
         print(f"consolidate: {len(result['applied'])} ops applied; website {_push_site()}")
         return 0
