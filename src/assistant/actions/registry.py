@@ -470,11 +470,30 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
 # compose pass feeding the result back), not a mutation to confirm with a "✔".
 RETRIEVAL_ACTIONS = frozenset({"query_health", "query_transactions"})
 
+# Shared/admin actions affect the WHOLE deployment, so a tenant must never invoke
+# them: `reboot` restarts the daemon and disrupts every user (§10). In
+# multi_tenant these are refused on both the chat-action path and direct
+# /actions/* dispatch; they live behind `assistant admin …` instead. single_user
+# (one owner) keeps `reboot` as a normal action.
+SHARED_ADMIN_ACTIONS = frozenset({"reboot"})
 
-def prompt_block() -> str:
-    """The chat system prompt's action list, generated from the registry."""
-    return "\n".join(f"  {a.prompt_example}"
-                     for a in ACTIONS.values() if a.llm)
+
+def _tenant_forbidden(name: str, settings: Settings) -> bool:
+    """Whether `name` is a shared/admin action a tenant may not run in this mode."""
+    return settings.deployment_mode == "multi_tenant" and name in SHARED_ADMIN_ACTIONS
+
+
+def prompt_block(settings: Settings | None = None) -> str:
+    """The chat system prompt's action list, generated from the registry.
+
+    With `settings`, shared/admin actions a tenant may not run are omitted
+    (multi_tenant, §10) — the prompt must never advertise what dispatch would
+    refuse, or the model wastes a repair round emitting it. Without `settings`
+    (legacy callers) the full `llm` set is listed, matching single_user."""
+    acts = [a for a in ACTIONS.values() if a.llm]
+    if settings is not None:
+        acts = [a for a in acts if not _tenant_forbidden(a.name, settings)]
+    return "\n".join(f"  {a.prompt_example}" for a in acts)
 
 
 def execute(actions: list, settings: Settings, max_actions: int = 5) -> list[str]:
@@ -482,35 +501,51 @@ def execute(actions: list, settings: Settings, max_actions: int = 5) -> list[str
     line each. Only registry entries marked ``llm`` are honored here."""
     import logging
 
+    from ..locks import user_write_lock
+
     log = logging.getLogger("assistant")
     results = []
-    for raw in (actions or [])[:max_actions]:
-        if not isinstance(raw, dict):
-            continue
-        kind = raw.get("type")
-        if not kind:
-            continue
-        action = ACTIONS.get(kind)
-        if action is None or not action.llm:
-            results.append(f"unknown action {kind!r} ignored")
-            continue
-        error = validate(action, raw)
-        if error:
-            results.append(error)
-            continue
-        try:
-            results.append(action.handler(settings, raw))
-        except Exception as exc:  # one bad action must not eat the reply
-            log.exception("chat action %s failed", kind)
-            results.append(f"action {kind} failed: {exc}")
+    # Serialize this user's writes for the whole batch (chat action / routine /
+    # task): the stores load→mutate→git-commit with no lock of their own, and the
+    # daemon is multi-threaded, so concurrent turns would race the YAML/git repo.
+    # Per-user lock — other users proceed in parallel; reentrant so it's safe if
+    # a handler itself takes the lock (locks.py, DESIGN §8).
+    with user_write_lock(settings):
+        for raw in (actions or [])[:max_actions]:
+            if not isinstance(raw, dict):
+                continue
+            kind = raw.get("type")
+            if not kind:
+                continue
+            action = ACTIONS.get(kind)
+            if action is None or not action.llm:
+                results.append(f"unknown action {kind!r} ignored")
+                continue
+            if _tenant_forbidden(kind, settings):
+                results.append(f"action {kind!r} is admin-only (use `assistant admin`)")
+                continue
+            error = validate(action, raw)
+            if error:
+                results.append(error)
+                continue
+            try:
+                results.append(action.handler(settings, raw))
+            except Exception as exc:  # one bad action must not eat the reply
+                log.exception("chat action %s failed", kind)
+                results.append(f"action {kind} failed: {exc}")
     return results
 
 
 def run_action(name: str, params: dict, settings: Settings) -> str:
-    """Direct invocation (CLI / HTTP / slash commands) — any registry entry."""
+    """Direct invocation (CLI / HTTP / slash commands) — any registry entry.
+
+    In `multi_tenant`, shared/admin actions (e.g. `reboot`) are refused here too,
+    so a tenant can't reach one via `/actions/<name>` (§10)."""
     action = ACTIONS.get(name)
     if action is None:
         raise KeyError(name)
+    if _tenant_forbidden(name, settings):
+        raise ValueError(f"action {name!r} is admin-only in multi_tenant mode")
     error = validate(action, params)
     if error:
         raise ValueError(error)

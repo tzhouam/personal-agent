@@ -43,11 +43,14 @@ return; finish as soon as the task is genuinely done (don't pad steps)."""
 
 
 def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
-             notify: bool = True) -> dict:
+             notify: bool = True, cancel_check=None) -> dict:
     """Execute `request` agentically; returns the task record
     `{id, request, status, steps, report}` (status: done | aborted | error).
     `notify` pushes the report to WeChat — on by default because tasks run
-    detached; the CLI passes False when running in the foreground."""
+    detached; the CLI passes False when running in the foreground.
+    `cancel_check` (§6): optional zero-arg callable invoked at the top of every
+    turn; raising from it (the job worker passes `CancelToken.check`) aborts the
+    task between steps — the per-step checkpoint of cooperative cancellation."""
     from .actions import execute, looks_failed, prompt_block
     from .chat.agent import build_context
     from .llm import LLM
@@ -58,8 +61,8 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
                     "started": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "status": "running", "steps": [], "report": ""}
     actions_block = "\n".join(
-        line for line in prompt_block().splitlines()
-        if not any(f'"{name}"' in line for name in EXCLUDED_ACTIONS))
+        line for line in prompt_block(settings).splitlines()   # mode-aware: no
+        if not any(f'"{name}"' in line for name in EXCLUDED_ACTIONS))  # admin actions for tenants (§10)
     system = _RUNNER_SYSTEM.format(actions=actions_block)
     try:
         from .lessons_store import LessonsStore
@@ -71,6 +74,8 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
     consecutive_failures = 0
 
     for _ in range(max_turns):
+        if cancel_check is not None:   # §6: per-turn cancellation checkpoint —
+            cancel_check()             # outside the LLM try so the raise propagates
         transcript = "\n".join(
             f"[step {i + 1}] thought: {s['thought']}\n  action: "
             f"{json.dumps(s.get('action'), ensure_ascii=False)}\n  result: {s.get('outcome')}"

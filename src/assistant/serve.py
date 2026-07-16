@@ -34,15 +34,20 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from .actions import run_action
 from .chat.agent import handle_message
-from .config import Settings
+from .config import DEFAULT_UID, Settings
+from .identity import Unauthorized, resolve_uid
 from .llm import LLM
+from .registry import UserRegistry
 
 log = logging.getLogger("assistant")
 
 _MAX_BODY = 12 * 1024 * 1024  # base64 image attachments ride in /chat bodies
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024  # per-image cap (multi_tenant, §A.4) —
+                                    # matches the bridge's encodeBase64Capped
 
 
 class SessionStore:
@@ -164,11 +169,51 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
 
         def _authorized(self, settings: Settings) -> bool:
             """Gate a request on the bearer token: open when no `serve_token` is
-            configured, else require an exact `Authorization: Bearer <token>`."""
+            configured, else require an exact `Authorization: Bearer <token>`.
+
+            This is the **single_user** gate only. It must never authorize a
+            `multi_tenant` request — there the mandatory bridge-token check lives
+            in `resolve_uid` (an unset token is never open access); see §A.2."""
             if not settings.serve_token:
                 return True
             header = self.headers.get("Authorization", "")
             return header == f"Bearer {settings.serve_token}"
+
+        def _bearer(self) -> str:
+            """The presented `Authorization: Bearer <token>`, or `''`."""
+            header = self.headers.get("Authorization", "")
+            return header[7:] if header.startswith("Bearer ") else ""
+
+        def _query(self) -> dict:
+            """The request's query string as a flat `{key: first_value}` dict, so
+            a GET (which has no body) can still carry `account_id`/`channel` for
+            `resolve_uid` in `multi_tenant`."""
+            return {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+
+        def _resolve(self, body: dict):
+            """Resolve this request to `(uid, per-user Settings, SessionStore,
+            session-key prefix)`, or raise `Unauthorized`.
+
+            `single_user` keeps the legacy path byte-for-byte: the `serve_token`
+            bearer gate, the **boot-bound** `sessions` store (the `server.sessions`
+            test seam), and **unprefixed** session keys — so history files written
+            before multi-user still resolve. `multi_tenant` authenticates via the
+            mandatory **bridge token** (`resolve_uid` — an unset/empty token is
+            never open), builds a `SessionStore` rooted at the resolved user's own
+            `data_dir` (path isolation), and **uid-prefixes** session keys as
+            defense-in-depth. Neither `handle_message` nor the stores change — they
+            already take `settings`. See §7, §A.2."""
+            base = settings_factory()
+            if base.deployment_mode != "multi_tenant":
+                if not self._authorized(base):
+                    raise Unauthorized("bad or missing bearer token")
+                return DEFAULT_UID, base, sessions, ""
+            uid = resolve_uid(self._bearer(), body, base, UserRegistry(base.data_dir))
+            us = Settings.for_user(uid)
+            store = SessionStore(us.data_dir, keep=us.serve_session_turns,
+                                 context_hours=us.chat_history_max_age_hours,
+                                 retention_days=us.chat_history_retention_days)
+            return uid, us, store, f"{uid}:"
 
         def _body(self) -> dict:
             """Read and JSON-parse the request body as a dict, capped at
@@ -183,14 +228,18 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             return data if isinstance(data, dict) else {}
 
         def do_GET(self):
-            """Route GETs: `/healthz` (always open) and, behind auth,
-            `/status` → the run-status action; anything else is a 404."""
-            settings = settings_factory()
-            if self.path == "/healthz":
+            """Route GETs: `/healthz` (the only unauthenticated route) and, behind
+            per-user resolution, `/status` → that user's run-status; anything else
+            is a 404. In `multi_tenant`, `/status` needs `account_id` in the query
+            string (a GET has no body) or it's a 401 — no route bypasses
+            `resolve_uid` except `/healthz` (§A.2)."""
+            if urlsplit(self.path).path == "/healthz":
                 return self._send(200, {"ok": True})
-            if not self._authorized(settings):
-                return self._send(401, {"error": "bad or missing bearer token"})
-            if self.path == "/status":
+            try:
+                _uid, settings, _store, _pfx = self._resolve(self._query())
+            except Unauthorized as exc:
+                return self._send(401, {"error": str(exc)})
+            if urlsplit(self.path).path == "/status":
                 return self._send(200, {"status": run_action("run_status", {}, settings)})
             return self._send(404, {"error": f"no route {self.path}"})
 
@@ -198,15 +247,19 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             """Route authenticated POSTs: `/chat` (run one turn with rolling
             history and record it), `/run` (trigger a pipeline run, optionally
             resuming), and `/actions/<name>` (dispatch a named action, mapping
-            KeyError→404 and ValueError→400). Any unhandled exception becomes a
-            JSON 500 so a handler bug never hangs the client."""
-            settings = settings_factory()
-            if not self._authorized(settings):
-                return self._send(401, {"error": "bad or missing bearer token"})
+            KeyError→404 and ValueError→400). Every route first resolves the
+            request to one user (`_resolve` — mandatory bridge token in
+            `multi_tenant`); the resolved per-user `settings`/`store` flow into the
+            handler unchanged. Any unhandled exception becomes a JSON 500 so a
+            handler bug never hangs the client."""
             try:
                 body = self._body()
             except ValueError:
                 return self._send(400, {"error": "body is not valid JSON"})
+            try:
+                _uid, settings, store, prefix = self._resolve(body)
+            except Unauthorized as exc:
+                return self._send(401, {"error": str(exc)})
 
             try:
                 if self.path == "/chat":
@@ -214,12 +267,12 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                     images = _staged_images(body, settings)
                     if not text and not images:
                         return self._send(400, {"error": "missing 'text'"})
-                    session = str(body.get("session", "") or "default")
+                    skey = prefix + str(body.get("session", "") or "default")
                     reply = handle_message(text, settings, make_llm(settings),
-                                           history=sessions.history(session),
+                                           history=store.history(skey),
                                            image_paths=images or None)
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
-                    sessions.append(session, noted.strip(), reply)
+                    store.append(skey, noted.strip(), reply)
                     return self._send(200, {"reply": reply})
 
                 if self.path == "/run":
@@ -256,14 +309,21 @@ def _staged_images(body: dict, settings: Settings) -> list[str]:
     straight through; trusted because the socket is loopback + bearer-token)
     and `images` (`[{media_type, data(b64)}, …]`), which are decoded into
     `DATA_DIR/media/` for the vision chain. Bad entries are skipped, never
-    fatal."""
+    fatal.
+
+    In `multi_tenant`, caller-supplied `image_paths` are **refused** — a
+    filesystem path from the network is a traversal / cross-user-reference
+    vector (§A.4); such deployments send image **bytes** only. `settings` is
+    already the resolved user's, so decoded media lands under that user's
+    `data_dir/media/`."""
     from .vision import media_type_for
 
     out: list[str] = []
-    for p in body.get("image_paths") or []:
-        path = Path(str(p))
-        if path.is_file() and media_type_for(path):
-            out.append(str(path))
+    if settings.deployment_mode != "multi_tenant":
+        for p in body.get("image_paths") or []:
+            path = Path(str(p))
+            if path.is_file() and media_type_for(path):
+                out.append(str(path))
     suffix_of = {"image/png": ".png", "image/jpeg": ".jpg",
                  "image/gif": ".gif", "image/webp": ".webp"}
     for img in body.get("images") or []:
@@ -276,6 +336,12 @@ def _staged_images(body: dict, settings: Settings) -> list[str]:
             data = base64.b64decode(str(img.get("data", "")), validate=True)
         except Exception:
             continue
+        # Defense in depth (§A.4): the bridge already caps per-image size, but in
+        # multi_tenant the daemon must not rely on the caller — oversized blobs
+        # are dropped here too. single_user keeps today's behavior (bounded by
+        # _MAX_BODY anyway).
+        if settings.deployment_mode == "multi_tenant" and len(data) > _MAX_IMAGE_BYTES:
+            continue
         media_dir = settings.data_dir / "media"
         media_dir.mkdir(parents=True, exist_ok=True)
         path = media_dir / (
@@ -286,10 +352,59 @@ def _staged_images(body: dict, settings: Settings) -> list[str]:
     return out[:settings.vision_max_images]
 
 
+def _tick_tenants(settings: Settings, now: "datetime | None" = None) -> None:
+    """One multi-tenant proactive cycle: per-user reminders + routines, and the
+    daily-run fan-out (§12).
+
+    `settings` is the deployment-root Settings. For each **active** user this
+    builds `Settings.for_user(uid)` so reminders/routines read and send from
+    *that user's* data dir and credentials — the root data dir has none of it,
+    which is exactly the bug this fixes (root-scoped ticking meant tenant
+    reminders silently never fired). From `daily_run_hour` onward it also calls
+    `enqueue_daily_runs` — idempotent per (uid, day) via the queue's dedupe key,
+    so ticking every poll cycle can't double-run anyone. One user's failure
+    never blocks another's."""
+    from .registry import UserRegistry
+
+    now = now or datetime.now()
+    if now.hour >= settings.daily_run_hour:
+        try:
+            from .scheduler import enqueue_daily_runs
+
+            enqueue_daily_runs(settings, day=now.strftime("%Y-%m-%d"))
+        except Exception:
+            log.exception("daily fan-out failed")
+    for uid in UserRegistry(settings.data_dir).active():
+        try:
+            user = Settings.for_user(uid)
+        except Exception:
+            log.exception("tick: Settings.for_user(%s) failed", uid)
+            continue
+        try:  # proactive path: due reminders go out with no inbound command
+            from .notify import ReminderStore
+
+            for r in ReminderStore(user.data_dir).deliver_due(user):
+                log.info("reminder %s (%s) delivered: %.60s", r["id"], uid, r["message"])
+        except Exception:
+            log.exception("reminder delivery failed for %s", uid)
+        try:  # conditional routines (workdays / weather gates / …)
+            from .routines import fire_due
+
+            fire_due(user)
+        except Exception:
+            log.exception("routine firing failed for %s", uid)
+
+
 def _chat_poll_loop(settings_factory, sessions: SessionStore,
                     stop: threading.Event, llm_factory=None) -> None:
     """Email (+WeCom) chat polling, absorbed from the standalone listener.
-    Everything is rebuilt each cycle so `.env` edits apply within one poll."""
+    Everything is rebuilt each cycle so `.env` edits apply within one poll.
+
+    In `multi_tenant` the shared-inbox email poll is **disabled** (fail closed):
+    the root `.env`'s IMAP identity is nobody's tenant, and answering it would
+    read/write the root data dir — per-user mailbox pollers (§11.7) are the
+    Phase-2 replacement. Reminders/routines/daily-runs instead tick per active
+    user via `_tick_tenants`."""
     from .chat.service import build_channels
 
     make_llm = llm_factory or (lambda s: LLM(s))
@@ -297,6 +412,15 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
     while not stop.is_set():
         try:
             settings = settings_factory()
+            if settings.deployment_mode == "multi_tenant":
+                if first:
+                    log.info("multi_tenant: shared-inbox email poll disabled "
+                             "(per-user pollers are Phase 2); ticking %s",
+                             "reminders/routines/daily-runs per active user")
+                    first = False
+                _tick_tenants(settings)
+                stop.wait(settings.chat_poll_seconds)
+                continue
             channels = build_channels(settings, log_wecom=first)
             first = False
             for channel in channels:
@@ -359,10 +483,24 @@ def run_serve(settings: Settings) -> int:
         name="chat-poll", daemon=True)
     poller.start()
 
+    # multi_tenant background jobs run on the durable in-process queue instead of
+    # detached CLIs (§6); the pool recovers orphaned jobs on start. single_user
+    # keeps the legacy detached-Popen path, so no pool is needed there.
+    pool = None
+    if settings.deployment_mode == "multi_tenant":
+        from .jobs import JobQueue
+        from .worker import WorkerPool
+
+        pool = WorkerPool(JobQueue(settings.shared_dir),
+                          max_workers=settings.job_workers).start()
+        log.info("serve: job worker pool started (%d workers)", settings.job_workers)
+
     def _shutdown(signum, frame):
         """Signal handler: log the signal and trigger a graceful shutdown."""
         log.info("serve: signal %d — shutting down", signum)
         stop.set()
+        if pool is not None:
+            pool.stop()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -372,6 +510,8 @@ def run_serve(settings: Settings) -> int:
              server.server_address[1], settings.chat_poll_seconds)
     server.serve_forever()
     stop.set()
+    if pool is not None:
+        pool.stop()
     return 0
 
 
@@ -413,7 +553,13 @@ def reboot(settings: Settings, delay: float = 0.0, timeout: float = 20.0,
 
     `delay` (used by the chat `reboot` action) sleeps first so the reply flushes
     before the daemon goes down. Never signals its own pid, so it is safe to run
-    detached from inside the daemon. Returns `{status, pid}`."""
+    detached from inside the daemon. Returns `{status, pid}`.
+
+    multi_tenant (`assistant admin reboot`): reboot is **requeue**, not drain —
+    SIGTERM makes `_shutdown` stop the worker pool (bounded join); any job still
+    `running` when the process exits is requeued by `recover()` on the next
+    start, and the per-job side-effect guards (delivery ledger) keep the replay
+    from double-sending (§6)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if delay > 0:
         time.sleep(delay)

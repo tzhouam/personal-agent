@@ -89,3 +89,30 @@ def test_execute_task_handler_spawns_detached(settings, monkeypatch):
     import pytest
     with pytest.raises(ValueError, match="missing required 'request'"):
         run_action("execute_task", {"request": ""}, settings)
+
+
+def test_run_task_cancel_check_aborts_between_steps(settings):
+    """Cooperative cancellation (§6): `cancel_check` fires at the top of every
+    turn, so a cancel flagged after step 1 stops the task before step 2's LLM
+    call — and the raise propagates to the caller (the job worker)."""
+    import pytest
+
+    from assistant.worker import Cancelled
+
+    llm = ScriptedLLM([
+        {"thought": "step 1", "action": {"type": "add_todo", "title": "第一步"}},
+        {"thought": "step 2", "action": {"type": "add_todo", "title": "第二步"}},
+    ])
+    checks = {"n": 0}
+
+    def check():
+        checks["n"] += 1
+        if checks["n"] > 1:               # cancel lands after the first turn
+            raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        run_task("多步任务", settings, llm=llm, notify=False, cancel_check=check)
+    # exactly one turn ran: step 1 executed, step 2's LLM call never happened
+    assert len(llm.prompts) == 1
+    assert [t["title"] for t in TodoStore(settings.profile_dir).open_items()] \
+        == ["第一步"]

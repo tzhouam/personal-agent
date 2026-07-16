@@ -22,6 +22,40 @@ from .commands import (
 )
 
 
+def _dispatch_admin(settings: Settings, args) -> int:
+    """Run one `assistant admin …` operator command and print its result. These
+    manage the roster / deletion / migration protocols a tenant can never invoke
+    (§10, §14). Returns a process exit code."""
+    from .. import admin
+
+    try:
+        if args.admin_cmd == "add-user":
+            print(admin.add_user(settings, args.uid, args.display))
+        elif args.admin_cmd == "remove-user":
+            from pathlib import Path
+
+            print(admin.delete_user(settings, args.uid,
+                                    export_to=Path(args.export) if args.export else None))
+        elif args.admin_cmd == "list":
+            print(admin.list_users(settings))
+        elif args.admin_cmd == "bind-channel":
+            print(admin.bind_channel(settings, args.uid, args.channel, args.external_id))
+        elif args.admin_cmd == "set-bridge-token":
+            print(admin.set_bridge_token(settings, args.token))
+        elif args.admin_cmd == "migrate-single-user":
+            print(admin.migrate_single_user(settings, args.uid, dry_run=args.dry_run))
+        elif args.admin_cmd == "reboot":
+            from ..serve import reboot
+
+            result = reboot(settings)
+            print(f"[{result['status']}] {result.get('note', result.get('pid', ''))}")
+            return 0 if result["status"] == "rebooted" else 1
+    except (ValueError, KeyError, TimeoutError) as exc:
+        print(f"admin: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> None:
     """Parse argv and dispatch to the matching command handler / subsystem
     entry, exiting with its return code."""
@@ -104,8 +138,35 @@ def main() -> None:
                        help="attach a local image (repeatable); described by the "
                             "vision chain so the agent can answer about it")
 
+    admin_p = sub.add_parser("admin", help="operator tools (multi-tenant): manage "
+                                           "users, channels, the bridge token, migration")
+    admin_sub = admin_p.add_subparsers(dest="admin_cmd", required=True)
+    au = admin_sub.add_parser("add-user", help="register a new active user")
+    au.add_argument("uid")
+    au.add_argument("--display", default="", help="human display name (metadata)")
+    ru = admin_sub.add_parser("remove-user", help="delete a user (ordered §14 protocol)")
+    ru.add_argument("uid")
+    ru.add_argument("--export", metavar="PREFIX",
+                    help="export the user's data to PREFIX.tar.gz before deleting")
+    admin_sub.add_parser("list", help="list users, status, and bound channels")
+    bc = admin_sub.add_parser("bind-channel", help="bind a channel id to a user")
+    bc.add_argument("uid")
+    bc.add_argument("channel", choices=["weixin", "email"])
+    bc.add_argument("external_id", help="weixin accountId or email mailbox address")
+    st = admin_sub.add_parser("set-bridge-token", help="store the bridge token hash")
+    st.add_argument("token")
+    mig = admin_sub.add_parser("migrate-single-user",
+                               help="fold the current single-user DATA_DIR into users/<uid>/")
+    mig.add_argument("uid")
+    mig.add_argument("--dry-run", action="store_true", help="print the plan only")
+    admin_sub.add_parser("reboot", help="restart the shared daemon (graceful; "
+                                        "serve-supervisor respawns it)")
+
     args = parser.parse_args()
     settings = Settings()
+
+    if args.command == "admin":
+        sys.exit(_dispatch_admin(settings, args))
 
     if args.command == "init":
         from ..init_wizard import run_init

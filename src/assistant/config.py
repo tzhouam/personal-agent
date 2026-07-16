@@ -153,6 +153,11 @@ class Settings(BaseSettings):
     # local processes out.
     serve_port: int = 8377
     serve_token: str = ""
+    job_workers: int = 2            # in-process worker threads draining the durable
+                                    # job queue in multi_tenant (§6)
+    daily_run_hour: int = 7         # multi_tenant: from this local hour the poll
+                                    # loop fans out the daily run per active user
+                                    # (idempotent per day, §12)
     serve_session_turns: int = 10   # exchanges of chat history kept per session
     chat_history_max_age_hours: int = 48  # context window: turns older than this
                                           # never enter a prompt (~2 days)
@@ -258,6 +263,20 @@ class Settings(BaseSettings):
     def runs_dir(self) -> Path:
         """Directory holding per-run artifact/trace subdirectories."""
         return self.data_dir / "runs"
+
+    @property
+    def shared_dir(self) -> Path:
+        """Deployment-global directory (the durable job queue lives here, §6).
+
+        Global, **not** per-user: the whole deployment shares **one** `jobs.db`
+        so the scheduler has a single cross-user view for fairness. Resolves to
+        `<root>/shared` from either a per-user `Settings` (whose `data_dir` is
+        `<root>/users/<uid>`) or the deployment-root `Settings` (`data_dir` =
+        `<root>`, held by the daemon and scheduler). In `single_user` it sits
+        directly under the single data dir."""
+        if self.deployment_mode == "multi_tenant" and self.data_dir.parent.name == "users":
+            return self.data_dir.parent.parent / "shared"   # per-user Settings
+        return self.data_dir / "shared"                      # root or single_user
 
     @property
     def profile_dir(self) -> Path:

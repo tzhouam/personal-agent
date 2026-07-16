@@ -312,6 +312,23 @@ def build_graph(deps: Deps):
             log.info("dry-run: digest written to %s, email not sent", digest_path)
             _advance("curate")
             return {"email_sent": False, "digest_path": str(digest_path), "phase": "curate"}
+
+        # Outbox ledger (§6, multi_tenant only): the queue is at-least-once, so a
+        # job replayed after a crash-after-send must NOT re-email the digest.
+        # Claim-before-send; a send failure releases the claim so --resume /
+        # requeue retries for real. single_user keeps today's semantics (an
+        # intentional second `assistant run` re-sends).
+        ledger = None
+        if settings.deployment_mode == "multi_tenant":
+            from .jobs import DeliveryLedger
+
+            ledger = DeliveryLedger(settings.data_dir)
+            if not ledger.mark_delivered("digest", run_date):
+                log.info("digest %s already delivered (ledger) — skipping re-send",
+                         run_date)
+                _advance("curate")
+                return {"email_sent": False, "digest_path": str(digest_path),
+                        "phase": "curate"}
         try:
             transport = send_email(deps.settings,
                                    f"[assistant] Daily digest — {run_date}", html_body)
@@ -334,6 +351,8 @@ def build_graph(deps: Deps):
             return {"email_sent": True, "digest_path": str(digest_path), "phase": "curate"}
         except Exception as exc:
             log.exception("email delivery failed")
+            if ledger is not None:   # release the claim so the retry can re-claim
+                ledger.unmark("digest", run_date)
             # stay on deliver so --resume retries the send
             return {"email_sent": False, "digest_path": str(digest_path),
                     "phase": "deliver", "errors": [f"deliver: {exc}"]}
@@ -423,7 +442,8 @@ def build_graph(deps: Deps):
     return graph.compile()
 
 
-def run(settings: Settings, dry_run: bool = False, resume: bool = False) -> int:
+def run(settings: Settings, dry_run: bool = False, resume: bool = False,
+        cancel_check=None) -> int:
     """Single entry point for one pipeline run: cron, chat `trigger_run`, and
     manual CLI all funnel through here.
 
@@ -432,9 +452,15 @@ def run(settings: Settings, dry_run: bool = False, resume: bool = False) -> int:
     last unfinished run's `run_id` at its checkpointed phase and rehydrates the
     artifacts each downstream phase needs; otherwise mints a fresh timestamped
     `run_id` starting at `collect`. `dry_run` writes the digest but skips email.
-    Builds and invokes the graph, records the run's duration/error metrics, and
-    always closes stores and releases the lock. Returns 0 when the run reached
-    `done`, else 1 (or 3 for the lock conflict)."""
+    Builds the graph and streams it phase by phase, records the run's
+    duration/error metrics, and always closes stores and releases the lock.
+    Returns 0 when the run reached `done`, else 1 (or 3 for the lock conflict).
+
+    `cancel_check` (§6, cooperative cancellation): an optional zero-arg callable
+    invoked at every **phase boundary**; raising from it (the job worker passes
+    `CancelToken.check`) aborts the run between phases. The `state.json`
+    checkpoint written by the last completed phase makes `--resume` (or a
+    requeued job) continue exactly there, and stores/locks release normally."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     # Canonical single-run guard: cron, chat trigger_run, and manual CLI runs
@@ -484,7 +510,14 @@ def run(settings: Settings, dry_run: bool = False, resume: bool = False) -> int:
 
     run_start = time.monotonic()
     try:
-        final = build_graph(deps).invoke(initial)
+        # Stream (not invoke) so cooperative cancellation lands at phase
+        # boundaries: each yielded value is the full state after one node, and
+        # `cancel_check` may raise between nodes to abort — the phase checkpoint
+        # already persisted makes the run resumable from right there (§6).
+        final = initial
+        for final in build_graph(deps).stream(initial, stream_mode="values"):
+            if cancel_check is not None:
+                cancel_check()
         deps.events.record_metrics(run_id, "run", {
             "duration_s": round(time.monotonic() - run_start, 2),
             "errors": len(final.get("errors") or [])})
