@@ -668,11 +668,14 @@ tests. **Security work is front-loaded, not deferred.**
 > `migrate-single-user`/`reboot`), the **ordered deletion protocol** + export, and
 > reversible single-user **migration** (§14); the bridge's `before_dispatch`
 > accountId routing, **fail-closed** weixin handling, capped image **bytes**, and
-> no-CLI fallback (§A.3, §A.5) — with a Node test suite. **Still gated:** the
-> **two-account weixin spike (§A.8)** must confirm stable per-account `accountId`
-> at `before_dispatch` on real hardware before `multi_tenant` is enabled in
-> production; per-user timezone, rate limiting, quotas, and encrypted secret
-> storage (Phases 3/5) remain future work.
+> no-CLI fallback (§A.3, §A.5) — with a Node test suite; **per-user email
+> pollers** (§11.7 — each user's own IMAP creds are the identity, per-user
+> watermark/sessions, mailbox dedupe, failure isolation) ticked from the serve
+> poll loop. **Still gated:** the **two-account weixin spike (§A.8)** must
+> confirm stable per-account `accountId` at `before_dispatch` on real hardware
+> before `multi_tenant` is enabled in production; per-user timezone, rate
+> limiting, quotas, and encrypted secret storage (Phases 3/5) remain future
+> work.
 
 - **Phase 0 — foundations, threat model & process-model decision.** Write the
   threat model (§2); **choose the process model** (single multi-tenant process vs

@@ -352,20 +352,68 @@ def _staged_images(body: dict, settings: Settings) -> list[str]:
     return out[:settings.vision_max_images]
 
 
-def _tick_tenants(settings: Settings, now: "datetime | None" = None) -> None:
-    """One multi-tenant proactive cycle: per-user reminders + routines, and the
-    daily-run fan-out (§12).
+def _tick_user_email(user: Settings, make_llm, polled: set) -> None:
+    """One user's mailbox poll (§11.7): the user's **own IMAP creds are the
+    identity** — the poller already runs as `Settings.for_user(uid)`, so no
+    /chat auth is involved and the watermark (`chat_state.json`), media, and
+    session history all live in that user's own data dir.
+
+    `polled` dedupes mailboxes within a cycle: if two users configure the same
+    inbox, only the first polls it — otherwise one inbound mail would be
+    answered twice (the registry's unique email binding is the admin-time guard;
+    this is the runtime one)."""
+    from .chat.email_channel import EmailChannel
+    from .chat.service import _owner_addresses
+
+    email = EmailChannel(user, _owner_addresses(user))
+    if not email.enabled:
+        return
+    box = str(user.smtp_user).strip().lower()
+    if box in polled:
+        log.warning("mailbox %s also configured by %s — skipping duplicate poller",
+                    box, user.uid)
+        return
+    polled.add(box)
+    store = SessionStore(user.data_dir, keep=user.serve_session_turns,
+                         context_hours=user.chat_history_max_age_hours,
+                         retention_days=user.chat_history_retention_days)
+    try:
+        messages = email.poll()
+    except Exception as exc:
+        log.warning("email poll failed for %s: %s", user.uid, exc)
+        return
+    for message in messages:
+        log.info("email message for %s from %s: %.80s", user.uid,
+                 message.get("sender", "?"), message["text"])
+        try:
+            skey = f"{user.uid}:email:{message.get('sender', '')}"
+            reply = handle_message(message["text"], user, make_llm(user),
+                                   history=store.history(skey),
+                                   image_paths=message.get("images"))
+            store.append(skey, message["text"], reply)
+            email.send(reply, in_reply_to=message)
+            log.info("replied via email for %s (%d chars)", user.uid, len(reply))
+        except Exception:
+            log.exception("failed to answer email for %s", user.uid)
+
+
+def _tick_tenants(settings: Settings, now: "datetime | None" = None,
+                  llm_factory=None) -> None:
+    """One multi-tenant proactive cycle: per-user **email polling** (§11.7),
+    reminders + routines, and the daily-run fan-out (§12).
 
     `settings` is the deployment-root Settings. For each **active** user this
-    builds `Settings.for_user(uid)` so reminders/routines read and send from
-    *that user's* data dir and credentials — the root data dir has none of it,
-    which is exactly the bug this fixes (root-scoped ticking meant tenant
-    reminders silently never fired). From `daily_run_hour` onward it also calls
-    `enqueue_daily_runs` — idempotent per (uid, day) via the queue's dedupe key,
-    so ticking every poll cycle can't double-run anyone. One user's failure
-    never blocks another's."""
+    builds `Settings.for_user(uid)` so everything reads and sends from *that
+    user's* data dir and credentials — the root data dir has none of it, which
+    is exactly the bug this fixes (root-scoped ticking meant tenant reminders
+    silently never fired). Email is per-user only: WeCom is out of scope in
+    multi_tenant (§1), so this never builds the WeCom channel or its callback
+    server. From `daily_run_hour` onward it also calls `enqueue_daily_runs` —
+    idempotent per (uid, day) via the queue's dedupe key, so ticking every poll
+    cycle can't double-run anyone. One user's failure never blocks another's."""
     from .registry import UserRegistry
 
+    make_llm = llm_factory or (lambda s: LLM(s))
     now = now or datetime.now()
     if now.hour >= settings.daily_run_hour:
         try:
@@ -374,12 +422,17 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None) -> None:
             enqueue_daily_runs(settings, day=now.strftime("%Y-%m-%d"))
         except Exception:
             log.exception("daily fan-out failed")
+    polled_mailboxes: set = set()
     for uid in UserRegistry(settings.data_dir).active():
         try:
             user = Settings.for_user(uid)
         except Exception:
             log.exception("tick: Settings.for_user(%s) failed", uid)
             continue
+        try:  # per-user mailbox poller — the user's creds are the identity
+            _tick_user_email(user, make_llm, polled_mailboxes)
+        except Exception:
+            log.exception("email tick failed for %s", uid)
         try:  # proactive path: due reminders go out with no inbound command
             from .notify import ReminderStore
 
@@ -400,11 +453,11 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
     """Email (+WeCom) chat polling, absorbed from the standalone listener.
     Everything is rebuilt each cycle so `.env` edits apply within one poll.
 
-    In `multi_tenant` the shared-inbox email poll is **disabled** (fail closed):
-    the root `.env`'s IMAP identity is nobody's tenant, and answering it would
-    read/write the root data dir — per-user mailbox pollers (§11.7) are the
-    Phase-2 replacement. Reminders/routines/daily-runs instead tick per active
-    user via `_tick_tenants`."""
+    In `multi_tenant` the shared-inbox poll is replaced by `_tick_tenants`:
+    **per-user mailbox pollers** (§11.7 — each user's own IMAP creds are the
+    identity, state/sessions in their own data dir), per-user reminders and
+    routines, and the daily-run fan-out. The root `.env`'s inbox is nobody's
+    tenant and is never polled in that mode; WeCom is out of scope there."""
     from .chat.service import build_channels
 
     make_llm = llm_factory or (lambda s: LLM(s))
@@ -414,11 +467,10 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
             settings = settings_factory()
             if settings.deployment_mode == "multi_tenant":
                 if first:
-                    log.info("multi_tenant: shared-inbox email poll disabled "
-                             "(per-user pollers are Phase 2); ticking %s",
-                             "reminders/routines/daily-runs per active user")
+                    log.info("multi_tenant: ticking per-user email/reminders/"
+                             "routines/daily-runs for active users")
                     first = False
-                _tick_tenants(settings)
+                _tick_tenants(settings, llm_factory=make_llm)
                 stop.wait(settings.chat_poll_seconds)
                 continue
             channels = build_channels(settings, log_wecom=first)

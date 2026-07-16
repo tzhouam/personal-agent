@@ -161,6 +161,10 @@ def test_tick_tenants_per_user_and_daily_fanout(tmp_path, monkeypatch):
     data_dir.mkdir()
     monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
     monkeypatch.setenv("DATA_DIR", str(data_dir))
+    # never let the repo .env's real SMTP creds reach a test poller (env beats
+    # dotenv layers, so this forces EmailChannel.enabled=False for every user)
+    monkeypatch.setenv("SMTP_USER", "")
+    monkeypatch.setenv("SMTP_PASSWORD", "")
     reg = UserRegistry(data_dir)
     reg.add_user("alice1")
     reg.add_user("bob123")
@@ -212,3 +216,121 @@ def test_chat_accepts_image_bytes_and_caps_size(mt_server, monkeypatch):
     assert "Attached images" in llm.prompts[-1]
     staged = list((data_dir / "users" / "alice1" / "media").glob("chat-*.png"))
     assert len(staged) == 1                       # small staged, oversized dropped
+
+
+def test_tick_tenants_polls_each_users_own_mailbox(tmp_path, monkeypatch):
+    """Per-user email pollers (§11.7): each active user's mailbox is polled with
+    THEIR settings (identity = their own creds), replies/history land in their
+    own data dir, and a mailbox configured by two users is polled only once."""
+    from datetime import datetime
+
+    from assistant.serve import _tick_tenants
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+    reg = UserRegistry(data_dir)
+    boxes = {"alice1": "alice@example.com", "bob123": "bob@example.com",
+             "carol1": "alice@example.com"}          # carol shares alice's inbox
+    for uid, box in boxes.items():
+        reg.add_user(uid)
+        cfg = data_dir / "users" / uid / "config.env"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(f"SMTP_USER={box}\nSMTP_PASSWORD=pw\n")
+
+    polls, sent = [], []
+
+    class FakeEmail:
+        def __init__(self, settings, owners):
+            self.settings = settings
+            self.enabled = bool(settings.smtp_user)
+
+        def poll(self):
+            polls.append(self.settings.uid)
+            if self.settings.uid == "alice1":
+                return [{"sender": "alice@example.com", "text": "我的待办?"}]
+            return []
+
+        def send(self, reply, in_reply_to=None):
+            sent.append((self.settings.uid, reply))
+
+    monkeypatch.setattr("assistant.chat.email_channel.EmailChannel", FakeEmail)
+
+    class NoStore:                                    # keep the tick email-only
+        def __init__(self, d):
+            pass
+
+        def deliver_due(self, s):
+            return []
+
+    monkeypatch.setattr("assistant.notify.ReminderStore", NoStore)
+    monkeypatch.setattr("assistant.routines.fire_due", lambda s: None)
+
+    llm = FakeLLM()
+    _tick_tenants(Settings(_env_file=None), now=datetime(2026, 7, 16, 5, 0),
+                  llm_factory=lambda s: llm)
+
+    assert polls == ["alice1", "bob123"]              # carol's duplicate skipped
+    assert sent == [("alice1", "ok")]                 # alice answered via HER channel
+    # history spilled under ALICE's own data dir with the uid-scoped key
+    store = SessionStore(data_dir / "users" / "alice1")
+    assert [t["owner"] for t in store.history("alice1:email:alice@example.com")] \
+        == ["我的待办?"]
+    # bob's dir has no email history
+    assert SessionStore(data_dir / "users" / "bob123").history(
+        "bob123:email:alice@example.com") == []
+
+
+def test_tick_tenants_email_failure_isolated(tmp_path, monkeypatch):
+    """One user's broken mailbox (poll raising) must not stop the next user's
+    poller — failure isolation per user."""
+    from datetime import datetime
+
+    from assistant.serve import _tick_tenants
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+    reg = UserRegistry(data_dir)
+    for uid, box in (("alice1", "a@x.com"), ("bob123", "b@x.com")):
+        reg.add_user(uid)
+        cfg = data_dir / "users" / uid / "config.env"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(f"SMTP_USER={box}\nSMTP_PASSWORD=pw\n")
+
+    polls = []
+
+    class FlakyEmail:
+        def __init__(self, settings, owners):
+            self.settings = settings
+            self.enabled = True
+
+        def poll(self):
+            polls.append(self.settings.uid)
+            if self.settings.uid == "alice1":
+                raise OSError("imap down")
+            return []
+
+        def send(self, reply, in_reply_to=None):
+            pass
+
+    monkeypatch.setattr("assistant.chat.email_channel.EmailChannel", FlakyEmail)
+    monkeypatch.setattr("assistant.routines.fire_due", lambda s: None)
+
+    class NoStore:
+        def __init__(self, d):
+            pass
+
+        def deliver_due(self, s):
+            return []
+
+    monkeypatch.setattr("assistant.notify.ReminderStore", NoStore)
+    _tick_tenants(Settings(_env_file=None), now=datetime(2026, 7, 16, 5, 0),
+                  llm_factory=lambda s: FakeLLM())
+    assert polls == ["alice1", "bob123"]              # bob polled despite alice's error
