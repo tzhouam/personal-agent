@@ -18,6 +18,23 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]  # src/assistant/config.py → 
 # a missing uid is rejected (doc/DESIGN_MULTI_USER.md §6.1).
 DEFAULT_UID = "default"
 
+# Personal identity/credential fields. In `multi_tenant` these NEVER inherit
+# from the shared `.env` — a tenant gets them only from their own
+# `users/<uid>/config.env` (§4.1). Everything else (LLM/search/API infra,
+# serve and schedule knobs) stays shared. Live incident 2026-07-16: a freshly
+# added user's first daily run collected the owner's GitHub + Gmail because
+# her Settings inherited the owner's creds from the shared `.env`.
+PERSONAL_ENV_FIELDS = frozenset({
+    "github_token", "github_user",
+    "smtp_user", "smtp_password", "digest_to",
+    "resume_remote_url",
+    "wecom_corp_id", "wecom_secret", "wecom_agent_id", "wecom_owner_userid",
+    "wecom_token", "wecom_aes_key",
+    "website_password", "website_repo", "marks_repo", "marks_push_token",
+    "wechat_announce", "announce_account", "announce_to",
+    "chrome_history_path",
+})
+
 
 class Settings(BaseSettings):
     """All secrets come from .env (repo root first, then CWD overrides)."""
@@ -237,7 +254,13 @@ class Settings(BaseSettings):
         `<data_dir>/users/<uid>/` (uid validated + path-contained, `uidsafe`),
         with a per-user `config.env` layered over the shared config (later files
         win), and `settings.uid` set. A missing uid in `multi_tenant` is an
-        error — no default fallback (§4, §6.1)."""
+        error — no default fallback (§4, §6.1).
+
+        `PERSONAL_ENV_FIELDS` never inherit: every one of them is pinned via
+        init kwargs — the value from the user's own `config.env` when set,
+        its default otherwise. Init kwargs outrank env vars and every env
+        file, so neither the shared `.env` nor the process environment can
+        leak the owner's identity into another tenant (§4.1)."""
         base = cls()
         if base.deployment_mode != "multi_tenant":
             if uid not in (None, DEFAULT_UID):
@@ -250,7 +273,33 @@ class Settings(BaseSettings):
         env_files = (_REPO_ROOT / ".env", base.data_dir / "shared" / ".env",
                      udir / "config.env")   # precedence: per-user > shared > repo
         return cls(_env_file=env_files, data_dir=udir, uid=uid,
-                   deployment_mode="multi_tenant")
+                   deployment_mode="multi_tenant",
+                   **cls._personal_overrides(udir))
+
+    @classmethod
+    def _personal_overrides(cls, udir: Path) -> dict:
+        """Init kwargs pinning every `PERSONAL_ENV_FIELDS` entry: the value
+        from the user's own `config.env` when set (pydantic coerces/validates
+        at construction), else the field default — except `chrome_history_path`,
+        whose unset value points into the user's data dir (its class default
+        is the *host owner's* browser profile). An empty value in `config.env`
+        counts as unset, so `KEY=` on a bool/int field degrades to the default
+        instead of failing validation."""
+        cfg = udir / "config.env"
+        raw: dict = {}
+        if cfg.is_file():
+            from dotenv import dotenv_values
+            raw = {k.lower(): v for k, v in dotenv_values(cfg).items() if k}
+        overrides = {}
+        for name in PERSONAL_ENV_FIELDS:
+            value = raw.get(name)
+            if value not in (None, ""):
+                overrides[name] = value
+            elif name == "chrome_history_path":
+                overrides[name] = udir / "chrome" / "History"
+            else:
+                overrides[name] = cls.model_fields[name].default
+        return overrides
 
     @property
     def cheap_model(self) -> str:

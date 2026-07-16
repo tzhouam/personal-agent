@@ -17,7 +17,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .config import DEFAULT_UID, Settings
+from .config import DEFAULT_UID, PERSONAL_ENV_FIELDS, Settings
 from .jobs import JobQueue
 from .registry import UserRegistry
 from .uidsafe import user_data_dir, validate_uid
@@ -186,16 +186,50 @@ def _user_jobs(queue: JobQueue, uid: str) -> list[dict]:
             "SELECT * FROM jobs WHERE uid=?", (uid,)).fetchall()]
 
 
+def write_personal_env(settings: Settings, uid: str) -> Path:
+    """Materialize `users/<uid>/config.env` from `settings`' current values of
+    every `PERSONAL_ENV_FIELDS` entry (mode 0600; refuses to overwrite).
+
+    Needed because `Settings.for_user` pins personal fields to defaults unless
+    the user's own `config.env` sets them — so a migrated owner keeps working
+    only if their identity values move from the shared `.env` into their
+    tenant. Values are written verbatim (single-quoted); a value that can't be
+    safely quoted is skipped with a warning rather than written corrupted."""
+    validate_uid(uid)
+    udir = user_data_dir(settings.data_dir / "users", uid)
+    cfg = udir / "config.env"
+    if cfg.exists():
+        raise FileExistsError(f"{cfg} already exists — refusing to overwrite")
+    lines = [f"# {uid} — personal identity/credentials (never inherited from "
+             "the shared .env; see PERSONAL_ENV_FIELDS)."]
+    for name in sorted(PERSONAL_ENV_FIELDS):
+        value = getattr(settings, name)
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        else:
+            text = str(value)
+        if "\n" in text or "'" in text:
+            log.warning("config.env %s: value for %s not safely quotable — skipped",
+                        cfg, name)
+            continue
+        lines.append(f"{name.upper()}='{text}'")
+    udir.mkdir(parents=True, exist_ok=True)
+    cfg.touch(mode=0o600)
+    cfg.write_text("\n".join(lines) + "\n")
+    return cfg
+
+
 def migrate_single_user(settings: Settings, uid: str, dry_run: bool = False) -> str:
     """Reversibly fold a single-user `DATA_DIR` into `users/<uid>/` (§14).
 
     Moves every existing data entry (profile, events.db, sessions, …) under
     `DATA_DIR` into `users/<uid>/`, skipping the multi-user infra (`users/`,
-    `shared/`, `users.yaml`), then registers the user active. Reversible: the move
-    is a rename within the same DATA_DIR, so the inverse is moving the entries back
-    and dropping the registry entry. `--dry-run` reports the plan only. The `.env`
-    split (shared vs per-user secrets) is left to the operator — this touches only
-    data, never secrets."""
+    `shared/`, `users.yaml`), then registers the user active and materializes
+    `users/<uid>/config.env` with the owner's personal identity values (which
+    `Settings.for_user` no longer inherits from the shared `.env`, §4.1).
+    Reversible: the move is a rename within the same DATA_DIR, so the inverse
+    is moving the entries back and dropping the registry entry. `--dry-run`
+    reports the plan only."""
     root = settings.data_dir
     validate_uid(uid)
     reg = UserRegistry(root)
@@ -211,4 +245,6 @@ def migrate_single_user(settings: Settings, uid: str, dry_run: bool = False) -> 
     for p in movable:
         shutil.move(str(p), str(dest / p.name))
     reg.add_user(uid, display=uid)
+    if not (dest / "config.env").exists():
+        write_personal_env(settings, uid)
     return plan + f"\nregistered {uid!r} active — set channels with `admin bind-channel`"

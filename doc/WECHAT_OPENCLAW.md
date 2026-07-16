@@ -233,6 +233,13 @@ checklist — in order, all mandatory:**
    `assistant admin add-user <uid> --display "Name"`, then
    `assistant admin bind-channel <uid> weixin <accountId>` (the value read off
    the spike log) and optionally `… bind-channel <uid> email <mailbox>`.
+   A new user starts with **no identity credentials**: personal fields (GitHub,
+   SMTP/Gmail, digest recipient, announce, website/marks, …) never inherit from
+   the shared `.env` (`PERSONAL_ENV_FIELDS`, design §4.2) — put the user's own
+   values in `users/<uid>/config.env` (mode 600) to enable those features.
+   Note the login `--account <id>` flag is only an alias hint: the gateway
+   derives its own accountId (`…-im-bot`) — bind the derived id, read from the
+   channel's `accounts.json` or the spike log.
 5. **Flip the mode.** Set `DEPLOYMENT_MODE=multi_tenant` in `.env` and restart
    `assistant serve`. Background jobs now run on the durable per-user queue;
    `reboot` becomes admin-only (`assistant admin reboot`).

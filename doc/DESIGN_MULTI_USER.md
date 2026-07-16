@@ -230,6 +230,19 @@ present, tokens least-privilege), merges by the order above, sets
 decision (open):** per-user `ANTHROPIC_*` in the user layer enables *bring-your-
 own-key*, which cleanly isolates cost and rate limits.
 
+**Personal fields never inherit (`PERSONAL_ENV_FIELDS`, config.py).** Identity
+and credential fields — GitHub token/user, SMTP/Gmail, digest recipient,
+announce target, WeCom, website/marks repos & tokens, resume remote, Chrome
+history path — are pinned per user via init kwargs: the value from the user's
+**own** `config.env` when set, the field default otherwise. Neither the shared
+`.env` nor the process environment can supply them, so a tenant without their
+own creds simply has those features off. (Live incident 2026-07-16: a freshly
+added user's first daily run collected the owner's GitHub + Gmail into her
+tenant via inherited shared-`.env` creds — this rule is the fix.)
+`admin.migrate_single_user` therefore materializes the owner's current personal
+values into `users/<uid>/config.env` (mode 0600) so a migrated owner keeps
+working; `admin.write_personal_env` does the same standalone.
+
 ### 4.3 UID & path safety
 
 - UIDs are **opaque, immutable, generated** (e.g. ULID / 16-hex), validated

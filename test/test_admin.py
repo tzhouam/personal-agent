@@ -97,6 +97,34 @@ def test_migrate_single_user_dry_run_then_move(root):
     assert (dest / "events.db").exists() and (dest / "state.json").exists()
     assert not (data_dir / "profile").exists()       # moved out of the root
     assert UserRegistry(data_dir).status("owner1") == "active"
+    # personal identity materialized: for_user no longer inherits it (§4.1),
+    # so the migrated owner keeps working only via their own config.env
+    cfg = dest / "config.env"
+    assert cfg.exists() and (cfg.stat().st_mode & 0o777) == 0o600
+    assert "GITHUB_TOKEN=" in cfg.read_text()
+
+
+def test_migrated_owner_keeps_identity_via_config_env(root, monkeypatch):
+    settings, data_dir = root
+    (data_dir / "profile").mkdir(parents=True)
+    monkeypatch.setenv("GITHUB_TOKEN", "owners-token")
+    monkeypatch.setenv("SMTP_USER", "owner@example.com")
+    admin.migrate_single_user(Settings(_env_file=None), "owner1")
+    s = Settings.for_user("owner1")
+    assert s.github_token == "owners-token"          # via materialized config.env
+    assert s.smtp_user == "owner@example.com"
+    # a SECOND user still gets nothing of the owner's
+    UserRegistry(data_dir).add_user("guest1")
+    g = Settings.for_user("guest1")
+    assert g.github_token == "" and g.smtp_user == ""
+
+
+def test_write_personal_env_refuses_overwrite(root):
+    settings, data_dir = root
+    admin.add_user(settings, "carol1")
+    admin.write_personal_env(settings, "carol1")
+    with pytest.raises(FileExistsError):
+        admin.write_personal_env(settings, "carol1")
 
 
 def test_migrate_skips_infra_and_refuses_existing_uid(root):

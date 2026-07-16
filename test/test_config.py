@@ -47,3 +47,48 @@ def test_two_users_get_distinct_data_dirs(tmp_path, monkeypatch):
     b = Settings.for_user("bob123")
     assert a.data_dir != b.data_dir
     assert a.profile_dir != b.profile_dir
+
+
+# ── personal fields never inherit (§4.1; live incident 2026-07-16: a new
+# user's first run collected the owner's GitHub+Gmail via the shared .env) ──
+def test_multi_tenant_personal_fields_never_inherit(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    # owner identity in the shared config — set as env vars, the STRONGEST
+    # inheritance channel (env vars outrank every env file)
+    monkeypatch.setenv("GITHUB_TOKEN", "owner-secret")
+    monkeypatch.setenv("SMTP_USER", "owner@example.com")
+    monkeypatch.setenv("WECHAT_ANNOUNCE", "true")
+    monkeypatch.setenv("TAVILY_API_KEY", "shared-infra-key")
+    s = Settings.for_user("alice1")
+    assert s.github_token == ""                     # never the owner's
+    assert s.smtp_user == "" and s.recipient == ""  # no email identity/recipient
+    assert s.wechat_announce is False               # no owner-channel pings
+    # browser history points into HER dir, never the host owner's profile
+    assert s.chrome_history_path == s.data_dir / "chrome" / "History"
+    # non-personal infra still inherits — one shared LLM/search config
+    assert s.tavily_api_key == "shared-infra-key"
+
+
+def test_multi_tenant_own_config_env_beats_shared_and_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("GITHUB_TOKEN", "owner-secret")
+    cfg = tmp_path / "users" / "bob123" / "config.env"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("GITHUB_TOKEN='bobs-token'\nGITHUB_USER=bob\n"
+                   "WECHAT_ANNOUNCE=true\nSMTP_PASSWORD=\n")
+    s = Settings.for_user("bob123")
+    assert s.github_token == "bobs-token"     # his own, not the owner's env var
+    assert s.github_user == "bob"
+    assert s.wechat_announce is True          # coerced bool from config.env
+    assert s.smtp_password == ""              # KEY= (empty) counts as unset
+    assert s.smtp_user == ""                  # fields he didn't set stay reset
+
+
+def test_single_user_inheritance_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "single_user")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("GITHUB_TOKEN", "owner-secret")
+    s = Settings.for_user()
+    assert s.github_token == "owner-secret"   # today's behavior, byte-identical
