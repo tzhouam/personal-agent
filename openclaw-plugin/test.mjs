@@ -220,22 +220,31 @@ console.log("supervisor backoff: PASS");
 }
 
 // ── multi_tenant: before_dispatch routes weixin by accountId (§A.3) ──
+// Shapes below mirror the A.8 spike capture (2026-07-16): the channel is
+// EVENT.channel = "openclaw-weixin" (full plugin id, no ctx.channel), ctx has
+// accountId + account-global sessionKey + per-peer conversationId.
 {
   const envPath = join(work, "no-such.env");
   writeFileSync(envPath, "DEPLOYMENT_MODE=multi_tenant\nSERVE_TOKEN=bridgetok\n");
   process.env.PERSONAL_AGENT_PORT = "1"; // daemon down for the fail-closed checks
 
   // non-weixin channels pass through untouched
-  if (await dispatchHandler({ body: "hi" }, { channel: "telegram", accountId: "A" }) !== undefined)
+  if (await dispatchHandler({ body: "hi", channel: "telegram" }, { accountId: "A" }) !== undefined)
     throw new Error("non-weixin should pass through");
 
   // FAIL CLOSED: weixin turn with no accountId → safe reply, never a fall-through
-  let d = await dispatchHandler({ body: "hi" }, { channel: "weixin" });
+  let d = await dispatchHandler({ body: "hi", channel: "openclaw-weixin" },
+                                { channelId: "openclaw-weixin" });
   if (!(d?.handled === true && d.text === SAFE)) throw new Error("no-accountId must fail closed: " + JSON.stringify(d));
 
   // FAIL CLOSED: daemon down → safe reply, NO exec CLI fallback (no default-user run)
-  d = await dispatchHandler({ body: "你好" }, { channel: "weixin", accountId: "wxA", sessionKey: "s1" });
+  d = await dispatchHandler({ body: "你好", channel: "openclaw-weixin" },
+                            { accountId: "wxA", sessionKey: "agent:main:main" });
   if (!(d?.handled === true && d.text === SAFE)) throw new Error("daemon-down must fail closed: " + JSON.stringify(d));
+
+  // legacy/short shape (ctx.channel === "weixin") still claimed — fail closed here too
+  d = await dispatchHandler({ body: "hi" }, { channel: "weixin" });
+  if (!(d?.handled === true && d.text === SAFE)) throw new Error("short-name channel must be claimed: " + JSON.stringify(d));
 
   // daemon up: route with account_id + channel + uid-scoped session
   const reqs = [];
@@ -253,14 +262,21 @@ console.log("supervisor backoff: PASS");
   await new Promise((resolve) => dae.listen(0, "127.0.0.1", resolve));
   process.env.PERSONAL_AGENT_PORT = String(dae.address().port);
 
-  d = await dispatchHandler({ body: "你好" }, { channel: "weixin", accountId: "wxA", sessionKey: "s1" });
+  d = await dispatchHandler(
+    { body: "你好", content: "你好", channel: "openclaw-weixin", sessionKey: "agent:main:main" },
+    { channelId: "openclaw-weixin", accountId: "wxA", sessionKey: "agent:main:main",
+      conversationId: "peer-77@im.wechat" });
   if (d?.text !== "mt:wxA:你好") throw new Error("mt chat route failed: " + JSON.stringify(d));
   const chatReq = reqs.find((q) => q.path === "/chat");
-  if (chatReq.body.account_id !== "wxA" || chatReq.body.channel !== "weixin" || chatReq.body.session !== "oc:wxA:s1")
+  // per-peer memory: session keys on conversationId, not the account-global sessionKey
+  if (chatReq.body.account_id !== "wxA" || chatReq.body.channel !== "weixin"
+      || chatReq.body.session !== "oc:wxA:peer-77@im.wechat")
     throw new Error("mt chat body wrong: " + JSON.stringify(chatReq.body));
 
   // a slash command carries the SAME tenant identity (§A.2)
-  d = await dispatchHandler({ body: "/status" }, { channel: "weixin", accountId: "wxA", sessionKey: "s1" });
+  d = await dispatchHandler(
+    { body: "/status", channel: "openclaw-weixin" },
+    { channelId: "openclaw-weixin", accountId: "wxA", sessionKey: "agent:main:main" });
   if (d?.text !== "ok wxA") throw new Error("mt slash failed: " + JSON.stringify(d));
   if (reqs.find((q) => q.path === "/actions/run_status")?.body.account_id !== "wxA")
     throw new Error("mt slash missing account_id");

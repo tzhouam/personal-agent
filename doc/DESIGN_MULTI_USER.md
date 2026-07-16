@@ -982,6 +982,18 @@ holding the authenticated `UserContext` — no `Popen`, no capability to forge.
 
 ### A.8 Phase-0 spike — prove `@tencent-weixin/openclaw-weixin` (gate)
 
+> **✅ Spike run 2026-07-16 (single-account deployment) — PASSED with findings.**
+> `ctx.accountId` present and equal to the registered account id
+> (`accounts.json`) at both `message_received` and `before_dispatch`; text in
+> `event.body`/`event.content` (`cleanedBody` absent, as predicted). **Findings
+> that corrected the bridge:** the channel is `event.channel =
+> "openclaw-weixin"` (full plugin id — there is **no `ctx.channel`**, only
+> `ctx.channelId`), and `ctx.sessionKey` is **account-global**
+> (`agent:main:main`) — per-peer session memory must key on
+> `ctx.conversationId`. `ctx.senderId` is also present at `before_dispatch`.
+> The *distinct-across-accounts* property still needs a second account when one
+> joins; presence/stability/shape are verified.
+
 **Do not start registry work until this passes.** The generic SDK ≠ this plugin.
 
 1. Log in **two** WeChat accounts on one gateway.

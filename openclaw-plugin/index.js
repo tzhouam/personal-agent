@@ -442,18 +442,25 @@ export default {
     // below), so the live single-user path is unchanged.
     api.on("before_dispatch", async (event, ctx) => {
       if (!isMultiTenant()) return;              // single_user → handled below
-      if (ctx?.channel !== "weixin") return;     // scope: only weixin is per-account
+      // A.8-verified shape (2026-07-16): the channel rides on EVENT.channel as
+      // the full plugin id ("openclaw-weixin"); ctx has only channelId, no
+      // ctx.channel. Accept both spellings — an unmatched channel passes through.
+      const chanName = String(event?.channel ?? ctx?.channel ?? ctx?.channelId ?? "");
+      if (chanName !== "openclaw-weixin" && chanName !== "weixin") return;
       // From here it's a weixin turn we OWN: EVERY path returns {handled:true}
       // so a failure is a safe reply, never a fall-through to OpenClaw's model
       // with no tenant context (a leak). Fail CLOSED.
       const accountId = ctx?.accountId;
       if (!accountId) return { handled: true, text: SAFE };
       const sessionKey = ctx?.sessionKey ?? "default";
+      // A.8: sessionKey is account-global ("agent:main:main") — per-peer memory
+      // needs conversationId when present.
+      const convo = ctx?.conversationId ?? sessionKey;
       const body = String(event?.body ?? event?.content ?? "").trim();
       const images = takeInboundMedia([`${accountId}::${sessionKey}`,
                                        `${accountId}::${ctx?.conversationId}`]);
       const chan = { channel: "weixin", account_id: accountId,
-                     session: `oc:${accountId}:${sessionKey}`, multiTenant: true };
+                     session: `oc:${accountId}:${convo}`, multiTenant: true };
       if (!body && !images.length) return { handled: true, text: SAFE };
       try {
         const parsed = body.startsWith("/") ? parseSlash(body) : null;
