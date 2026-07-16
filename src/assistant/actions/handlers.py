@@ -74,13 +74,29 @@ def _unrelated_reading(settings: Settings, p: dict) -> str:
 
 # ── run control ──────────────────────────────────────────────────────
 
+def _enqueue(settings: Settings, kind: str, args: dict, dedupe_key: str | None = None):
+    """Enqueue a background job on the durable queue for **this** user (the
+    handler already holds the authenticated `settings.uid` — a job never names
+    another user). Returns the job id, or None if a duplicate was deduped. Only
+    used in `multi_tenant`; single_user keeps the legacy detached-CLI path (§6)."""
+    from ..jobs import JobQueue
+    return JobQueue(settings.shared_dir).enqueue(settings.uid, kind, args, dedupe_key)
+
+
 def _trigger_run(settings: Settings, p: dict) -> str:
     """Start a full daily run in the background (optionally `resume` the last
-    one), unless a run is already in progress. Detaches via Popen and logs to
-    the data dir."""
+    one), unless a run is already in progress.
+
+    `multi_tenant`: enqueue on the durable per-uid queue (an in-process worker
+    runs it — no CLI, no forgeable identity). `single_user` (legacy): detach via
+    Popen exactly as before."""
     state = load_state(settings.state_file) or {}
     if state.get("phase") not in (None, "done"):
         return f"a run is already in progress ({state.get('run_id')})"
+    if settings.deployment_mode == "multi_tenant":
+        self_ = _enqueue(settings, "run", {"resume": bool(p.get("resume"))})
+        return ("daily run queued" if self_ else
+                "a daily run is already queued for you")
     cmd = [sys.executable, "-m", "assistant.cli", "run"]
     if p.get("resume"):
         cmd.append("--resume")
@@ -142,6 +158,10 @@ def _run_phase(settings: Settings, p: dict) -> str:
         result = sync_website(settings, ProfileStore(settings.profile_dir).load(),
                               todos, reading=ReadingList(settings.profile_dir).open_items())
         return f"website sync: {result.get('status')} {result.get('url', '')}".strip()
+    if settings.deployment_mode == "multi_tenant":
+        _enqueue(settings, "run_phase", {"phase": phase})
+        return (f"phase '{phase}' queued — I'll have the results on the "
+                "website/next digest, or ask me in a few minutes")
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     log_file = (settings.data_dir / "phase_run.log").open("a")
     subprocess.Popen([sys.executable, "-m", "assistant.cli", "run-phase", phase],
@@ -598,6 +618,10 @@ def _execute_task(settings: Settings, p: dict) -> str:
     request = str(p.get("request", "")).strip()
     if not request:
         return "execute_task needs the request"
+    if settings.deployment_mode == "multi_tenant":
+        _enqueue(settings, "task", {"request": request})
+        return ("task queued — I'll work through it step by step and message "
+                "you the result on WeChat")
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     log_file = (settings.data_dir / "task_run.log").open("a")
     subprocess.Popen([sys.executable, "-m", "assistant.cli", "task", request],

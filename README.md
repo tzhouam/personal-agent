@@ -150,7 +150,8 @@ setup and the timezone caveat.
 | `assistant todo list\|add\|done` · `assistant reading list\|done\|unrelated` | Manage todos / reading list |
 | `assistant ask "…" [--image photo.png]` | Ask the chat agent one question locally (images welcome) |
 | `assistant task "…" [--no-notify]` | Agentically execute a multi-step task now (step trace under `~/.personal-agent/tasks/`) |
-| `assistant serve` | Local HTTP daemon (chat/actions API for the WeChat bridge) |
+| `assistant serve` | Local HTTP daemon (chat/actions API for the WeChat bridge; in multi-user mode also the per-user job worker pool) |
+| `assistant admin add-user\|remove-user\|list\|bind-channel\|set-bridge-token\|migrate-single-user\|reboot` | Operator tools for the multi-user mode (see below) — not a tenant surface |
 | `assistant send-test-email` | Verify email delivery |
 | `assistant resume-init\|resume-status\|approve-resume` | Résumé sync + approval gate |
 
@@ -184,6 +185,25 @@ Everything is under `~/.personal-agent/` (override with `DATA_DIR`):
 
 The profile is a git repo, so every daily change is a reviewable, revertible
 commit: `git -C ~/.personal-agent/profile log -p`.
+
+## Multi-user (experimental, gated)
+
+By default the agent is **single-user** (`DEPLOYMENT_MODE=single_user`) — one
+data dir, one implicit owner, everything above unchanged. Setting
+`DEPLOYMENT_MODE=multi_tenant` lets one deployment serve several independent
+owners: each user gets their own `DATA_DIR/users/<uid>/` (profile, sessions,
+media, runs), their own WeChat account routed by `accountId`, and their own
+mailbox; background jobs run on a durable per-user queue
+(`DATA_DIR/shared/jobs.db`) instead of detached CLIs, and daily runs fan out
+per active user. Users are managed with the `assistant admin …` operator CLI —
+there are no per-user tokens or tenant-facing admin surfaces.
+
+**Do not enable it in production yet**: enablement is gated on the two-account
+WeChat spike (stable per-account `accountId` on real hardware) plus a
+sender-allowlist check — the full checklist is in
+[doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md#multi-user-multi_tenant), the
+design in [doc/DESIGN_MULTI_USER.md](doc/DESIGN_MULTI_USER.md), and the spike
+probe in [`openclaw-plugin-spike/`](openclaw-plugin-spike/).
 
 ## Safety model (the short version)
 

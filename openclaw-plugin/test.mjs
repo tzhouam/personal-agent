@@ -24,21 +24,31 @@ process.env.HOME = work;
 process.env.WORK = work;
 mkdirSync(join(work, ".personal-agent"), { recursive: true });
 
-const { default: plugin, serveService, parseSlash } = await import("./index.js");
+const { default: plugin, serveService, parseSlash, SAFE, encodeBase64Capped, chanBody } =
+  await import("./index.js");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const log = { info() {}, warn() {}, error() {}, debug() {} };
 
 // ---- registration ----
-let handler, opts;
+let handler, opts, dispatchHandler;
 const services = [];
 plugin.register({
-  on: (name, h, o) => { if (name === "before_agent_reply") { handler = h; opts = o; } },
+  on: (name, h, o) => {
+    if (name === "before_agent_reply") { handler = h; opts = o; }
+    if (name === "before_dispatch") { dispatchHandler = h; }
+  },
   registerService: (s) => services.push(s),
 });
 if (!handler || opts.priority !== 100) throw new Error("hook not registered");
+if (!dispatchHandler) throw new Error("before_dispatch hook not registered");
 if (services.length !== 1 || services[0].id !== "serve-supervisor") throw new Error("service not registered");
+
+// before_dispatch is inert in single_user (no env file → single_user default),
+// so the live single-user path stays on before_agent_reply.
+if (await dispatchHandler({ body: "hi" }, { channel: "weixin", accountId: "A" }) !== undefined)
+  throw new Error("before_dispatch must be inert in single_user");
 
 // ---- parseSlash ----
 const cases = [
@@ -191,6 +201,78 @@ console.log("supervisor backoff: PASS");
   got = takeInboundMedia([undefined, undefined, undefined, undefined, "*"]);
   if (got.length !== 2) throw new Error(`wildcard fallback failed: ${got}`);
   console.log("inbound media cache: PASS");
+}
+
+// ── chanBody + encodeBase64Capped (media caps §A.4) ──
+{
+  if (JSON.stringify(chanBody("s")) !== JSON.stringify({ session: "s" }))
+    throw new Error("chanBody(string) wrong");
+  const cb = chanBody({ session: "x", channel: "weixin", account_id: "wxA" });
+  if (cb.session !== "x" || cb.channel !== "weixin" || cb.account_id !== "wxA")
+    throw new Error("chanBody(object) wrong");
+  // a non-image extension is dropped by the MIME allowlist; missing files skipped
+  const img = join(work, "shot.png");
+  writeFileSync(img, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const enc = encodeBase64Capped([img, "/tmp/does-not-exist.png", join(work, "note.txt")]);
+  if (enc.length !== 1 || enc[0].media_type !== "image/png" || !enc[0].data)
+    throw new Error("encodeBase64Capped wrong: " + JSON.stringify(enc));
+  console.log("chanBody + media caps: PASS");
+}
+
+// ── multi_tenant: before_dispatch routes weixin by accountId (§A.3) ──
+{
+  const envPath = join(work, "no-such.env");
+  writeFileSync(envPath, "DEPLOYMENT_MODE=multi_tenant\nSERVE_TOKEN=bridgetok\n");
+  process.env.PERSONAL_AGENT_PORT = "1"; // daemon down for the fail-closed checks
+
+  // non-weixin channels pass through untouched
+  if (await dispatchHandler({ body: "hi" }, { channel: "telegram", accountId: "A" }) !== undefined)
+    throw new Error("non-weixin should pass through");
+
+  // FAIL CLOSED: weixin turn with no accountId → safe reply, never a fall-through
+  let d = await dispatchHandler({ body: "hi" }, { channel: "weixin" });
+  if (!(d?.handled === true && d.text === SAFE)) throw new Error("no-accountId must fail closed: " + JSON.stringify(d));
+
+  // FAIL CLOSED: daemon down → safe reply, NO exec CLI fallback (no default-user run)
+  d = await dispatchHandler({ body: "你好" }, { channel: "weixin", accountId: "wxA", sessionKey: "s1" });
+  if (!(d?.handled === true && d.text === SAFE)) throw new Error("daemon-down must fail closed: " + JSON.stringify(d));
+
+  // daemon up: route with account_id + channel + uid-scoped session
+  const reqs = [];
+  const dae = createServer((req, res) => {
+    let raw = ""; req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const body = raw ? JSON.parse(raw) : {};
+      reqs.push({ path: req.url, body });
+      res.setHeader("Content-Type", "application/json");
+      if (req.url === "/chat") return res.end(JSON.stringify({ reply: `mt:${body.account_id}:${body.text}` }));
+      if (req.url.startsWith("/actions/")) return res.end(JSON.stringify({ result: `ok ${body.account_id}` }));
+      res.statusCode = 404; res.end(JSON.stringify({ error: "no route" }));
+    });
+  });
+  await new Promise((resolve) => dae.listen(0, "127.0.0.1", resolve));
+  process.env.PERSONAL_AGENT_PORT = String(dae.address().port);
+
+  d = await dispatchHandler({ body: "你好" }, { channel: "weixin", accountId: "wxA", sessionKey: "s1" });
+  if (d?.text !== "mt:wxA:你好") throw new Error("mt chat route failed: " + JSON.stringify(d));
+  const chatReq = reqs.find((q) => q.path === "/chat");
+  if (chatReq.body.account_id !== "wxA" || chatReq.body.channel !== "weixin" || chatReq.body.session !== "oc:wxA:s1")
+    throw new Error("mt chat body wrong: " + JSON.stringify(chatReq.body));
+
+  // a slash command carries the SAME tenant identity (§A.2)
+  d = await dispatchHandler({ body: "/status" }, { channel: "weixin", accountId: "wxA", sessionKey: "s1" });
+  if (d?.text !== "ok wxA") throw new Error("mt slash failed: " + JSON.stringify(d));
+  if (reqs.find((q) => q.path === "/actions/run_status")?.body.account_id !== "wxA")
+    throw new Error("mt slash missing account_id");
+
+  // in multi_tenant, before_agent_reply is inert (before_dispatch owns routing)
+  if (await handler({ cleanedBody: "hi" }, { trigger: "user" }) !== undefined)
+    throw new Error("before_agent_reply must be inert in multi_tenant");
+
+  dae.close();
+  process.env.PERSONAL_AGENT_PORT = "1";
+  writeFileSync(envPath, ""); // restore single_user
+  console.log("multi_tenant before_dispatch routing: PASS");
 }
 
 console.log("ALL PASS");

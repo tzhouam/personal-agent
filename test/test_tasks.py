@@ -84,3 +84,38 @@ def test_run_refuses_when_lock_held(settings):
         assert orchestrator.run(settings) == 3  # refuses before touching anything
     finally:
         holder.close()
+
+
+def test_run_streams_phases_and_cancels_at_boundaries(settings, monkeypatch):
+    """`run()` iterates the graph phase-by-phase (stream) so `cancel_check` can
+    abort at a phase boundary (§6); a completed stream still returns 0."""
+    import pytest
+
+    from assistant import orchestrator
+    from assistant.worker import Cancelled
+
+    class FakeGraph:
+        def __init__(self, phases):
+            self.phases = phases
+
+        def stream(self, initial, stream_mode=None):
+            assert stream_mode == "values"
+            for p in self.phases:
+                yield {**initial, "phase": p}
+
+    monkeypatch.setattr(orchestrator, "build_graph",
+                        lambda deps: FakeGraph(["collect", "done"]))
+    assert orchestrator.run(settings) == 0            # normal completion
+
+    monkeypatch.setattr(orchestrator, "build_graph",
+                        lambda deps: FakeGraph(["collect", "profile", "done"]))
+    seen = {"n": 0}
+
+    def check():
+        seen["n"] += 1
+        if seen["n"] > 2:                             # cancel after 2 phases
+            raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        orchestrator.run(settings, cancel_check=check)
+    assert seen["n"] == 3                             # checked at each boundary

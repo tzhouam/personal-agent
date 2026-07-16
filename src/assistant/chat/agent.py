@@ -23,7 +23,13 @@ log = logging.getLogger("assistant")
 
 _TODO_CONTEXT_LIMIT = 25
 
-_SYSTEM = f"""You are your owner's personal assistant, reachable by chat/email. Answer from the
+# Rendered per call by `system_prompt()` (NOT an import-time f-string): the
+# «ACTIONS»/«REBOOT» placeholders depend on `settings.deployment_mode`, so the
+# action list and the reboot guidance must be resolved when the mode is known —
+# in multi_tenant `reboot` is admin-only (§10) and must not be advertised.
+# Plain `.replace()` on unique tokens, not `.format()`: the prompt body contains
+# literal JSON braces.
+_SYSTEM_TEMPLATE = """You are your owner's personal assistant, reachable by chat/email. Answer from the
 context below (profile, open todos, reading list, active routines, pending reminders, finance
 ledger, health, last run).
 Be concise and direct — this is a chat reply, not a report. Answer in the language the owner
@@ -32,16 +38,14 @@ message — either attached directly (look at them) or as descriptions from a vi
 Respond to what the images show, and be upfront when an image could not be analyzed.
 
 You may execute actions, but ONLY when the owner explicitly asks for them:
-{prompt_block()}
+«ACTIONS»
 
 When the owner asks for something novel and multi-step that no other action covers, do NOT
 refuse: if the agent can complete it alone (research and summarize, find/compare options,
 gather information then set reminders), emit execute_task — it runs the task step by step in
 the background and reports to WeChat; if it needs the owner's own participation (attending,
 signing, in-person errands), emit plan_task so it's broken down and tracked instead. When the owner asks to run,
-refresh, or update part of the daily routine, emit run_phase with the closest phase. When the
-owner asks to restart / reboot the assistant ("重启", "重新启动", "restart", "reboot"), emit
-reboot — it reloads the agent and comes back in a few seconds. When a
+refresh, or update part of the daily routine, emit run_phase with the closest phase. «REBOOT» When a
 question needs current or external information you don't have, emit web_search instead of
 guessing or refusing. When the owner wants to be reminded or notified at/after some time,
 emit set_reminder — the agent messages WeChat by itself at that time. When the owner wants
@@ -102,21 +106,42 @@ sections. For every dominant cost area, drill into its sub-areas using the compu
 transaction, and the time-of-day pattern — then give ONE concrete suggestion per section.
 Numbers come from the computed blocks, never estimated.
 
-Respond with ONLY JSON: {{"reply": "<chat reply>", "actions": []}}
+Respond with ONLY JSON: {"reply": "<chat reply>", "actions": []}
 Never claim an action succeeded in the reply — outcomes are appended automatically."""
+
+# The «REBOOT» sentence, per mode. single_user keeps today's guidance verbatim;
+# multi_tenant tells the model reboot is admin-only instead of advertising an
+# action that dispatch would refuse (§10).
+_REBOOT_HINT_SINGLE = ('When the\nowner asks to restart / reboot the assistant '
+                       '("重启", "重新启动", "restart", "reboot"), emit\n'
+                       'reboot — it reloads the agent and comes back in a few seconds.')
+_REBOOT_HINT_MT = ('Restarting the assistant is admin-only in this deployment: when the owner '
+                   'asks to\nrestart / reboot ("重启", "restart"), explain that an administrator '
+                   'must run `assistant admin\nreboot` — do NOT emit any reboot action.')
+
+
+def _render_system(settings: Settings) -> str:
+    """Resolve the mode-dependent placeholders: the action list (admin actions
+    omitted for tenants) and the reboot guidance."""
+    mt = settings.deployment_mode == "multi_tenant"
+    return (_SYSTEM_TEMPLATE
+            .replace("«ACTIONS»", prompt_block(settings))
+            .replace("«REBOOT»", _REBOOT_HINT_MT if mt else _REBOOT_HINT_SINGLE))
 
 
 def system_prompt(settings: Settings) -> str:
-    """The chat system prompt: the static core plus the learned behavior
-    rules (lessons_store) — the agent's self-evolution surface. Rebuilt per
-    turn so a lesson learned in one message governs the next."""
+    """The chat system prompt: the static core (rendered for this deployment
+    mode) plus the learned behavior rules (lessons_store) — the agent's
+    self-evolution surface. Rebuilt per turn so a lesson learned in one message
+    governs the next."""
+    core = _render_system(settings)
     try:
         from ..lessons_store import LessonsStore
 
-        return _SYSTEM + LessonsStore(settings.profile_dir).prompt_block()
+        return core + LessonsStore(settings.profile_dir).prompt_block()
     except Exception:  # lessons are an enhancement, never a blocker
         log.exception("lessons injection failed")
-        return _SYSTEM
+        return core
 
 
 def build_context(settings: Settings) -> str:

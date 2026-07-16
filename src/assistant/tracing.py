@@ -163,31 +163,40 @@ class Tracer:
                 pass  # tracing must never break the agent
 
 
-# ── module-level default tracer + helpers ─────────────────────────────────────
-_default: Optional[Tracer] = None
+# ── default tracer + helpers ──────────────────────────────────────────────────
+# ContextVar-scoped, not a module global: concurrent runs (the multi-user
+# scheduler) must not overwrite each other's tracer — otherwise one user's spans
+# land in another's trace.jsonl. Each run/task runs in its own context and sees
+# only its own tracer. (doc/DESIGN_MULTI_USER.md §3.) Note: raw worker threads
+# start with a fresh context, so fan-out (e.g. MoA) must propagate it via
+# `contextvars.copy_context()` to keep those spans traced.
+_default: "contextvars.ContextVar[Optional[Tracer]]" = contextvars.ContextVar(
+    "trace_default", default=None)
 
 
 def init(run_id: str, out_path: os.PathLike | str) -> Optional[Tracer]:
-    """Install the default tracer for this run. No-op (returns None) when
-    tracing is disabled via AGENT_TRACE=0."""
-    global _default
+    """Install the default tracer for the current context. No-op (returns None)
+    when tracing is disabled via AGENT_TRACE=0."""
     if not _ENABLED:
         return None
-    _default = Tracer(run_id, out_path)
-    return _default
+    tracer = Tracer(run_id, out_path)
+    _default.set(tracer)
+    return tracer
 
 
 def span(name: str, **attr: Any):
-    """Open a span on the default tracer. A plain ``with`` context manager,
-    safe in sync and async code. No-op if tracing is off or uninitialized."""
-    if _default is None or not _ENABLED:
+    """Open a span on the current context's tracer. A plain ``with`` context
+    manager, safe in sync and async code. No-op if tracing is off or
+    uninitialized."""
+    tracer = _default.get()
+    if tracer is None or not _ENABLED:
         return contextlib.nullcontext(_NULL)
-    return _default.span(name, **attr)
+    return tracer.span(name, **attr)
 
 
 def enabled() -> bool:
-    """True when tracing is on and a default tracer is installed."""
-    return _ENABLED and _default is not None
+    """True when tracing is on and a tracer is installed in this context."""
+    return _ENABLED and _default.get() is not None
 
 
 def set_usage(sp: Any, usage: Any, stop_reason: str = "") -> None:

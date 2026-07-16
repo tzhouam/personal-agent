@@ -29,14 +29,18 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
+import { extname } from "node:path";
 
 const ASSISTANT_BIN = process.env.PERSONAL_AGENT_BIN ?? "/rebase/.venv/bin/assistant";
 const ENV_FILE = process.env.PERSONAL_AGENT_ENV ?? "/rebase/personal-agent/.env";
 const TIMEOUT_MS = 120_000;
 const IMAGE_TIMEOUT_MS = 300_000; // vision pass first (local VLM cold-load)
 const ACTION_TIMEOUT_MS = 20_000;
+// Safe fail-closed reply for a weixin turn we couldn't route/answer — never
+// leaks internals, never falls through to OpenClaw's own model (§A.3).
+export const SAFE = "系统暂时不可用，请稍后再试 🙏";
 const PID_FILE = `${homedir()}/.personal-agent/chat_listener.pid`;
 // Container clock is UTC; pin the owner's zone so "today" in chat replies and
 // digest dates match his morning (needs the system tzdata package).
@@ -50,14 +54,20 @@ const childEnv = () => {
   return env;
 };
 
-/** SERVE_PORT/SERVE_TOKEN from the personal-agent .env — re-read per call so
- * a token rotation applies without a gateway restart. */
+/** SERVE_PORT/SERVE_TOKEN/DEPLOYMENT_MODE from the personal-agent .env — re-read
+ * per call so a token rotation or a mode switch applies without a gateway
+ * restart. `SERVE_TOKEN` is the single bridge↔daemon token (§A.6): in
+ * multi_tenant its hash lives in the registry (`admin set-bridge-token`); in
+ * single_user it's the optional serve bearer. */
 function daemonConfig() {
-  const cfg = { port: 8377, token: "" };
+  const cfg = { port: 8377, token: "", mode: "single_user" };
   try {
     for (const line of readFileSync(ENV_FILE, "utf8").split("\n")) {
-      const m = line.match(/^\s*(SERVE_PORT|SERVE_TOKEN)\s*=\s*(\S*)\s*$/);
-      if (m) cfg[m[1] === "SERVE_PORT" ? "port" : "token"] = m[2];
+      const m = line.match(/^\s*(SERVE_PORT|SERVE_TOKEN|DEPLOYMENT_MODE)\s*=\s*(\S*)\s*$/);
+      if (!m) continue;
+      if (m[1] === "SERVE_PORT") cfg.port = m[2];
+      else if (m[1] === "SERVE_TOKEN") cfg.token = m[2];
+      else cfg.mode = m[2];
     }
   } catch {
     // no .env — defaults
@@ -65,6 +75,11 @@ function daemonConfig() {
   if (process.env.PERSONAL_AGENT_PORT) cfg.port = process.env.PERSONAL_AGENT_PORT;
   cfg.port = parseInt(cfg.port, 10) || 8377;
   return cfg;
+}
+
+/** Whether this deployment routes per-user by WeChat accountId (§11.3). */
+export function isMultiTenant() {
+  return daemonConfig().mode === "multi_tenant";
 }
 
 async function daemonPost(path, body, timeoutMs) {
@@ -99,18 +114,61 @@ function askExec(text, imagePaths = []) {
   });
 }
 
-async function ask(text, session, imagePaths = []) {
+/** {channel?, account_id?, session, multiTenant?} → the identity fields of a
+ * /chat|/actions body. Only defined fields are sent; the daemon's resolve_uid
+ * ignores channel/account_id in single_user and requires them in multi_tenant. */
+export function chanBody(chan) {
+  const c = typeof chan === "string" ? { session: chan } : (chan ?? {});
+  const out = { session: c.session };
+  if (c.channel) out.channel = c.channel;
+  if (c.account_id) out.account_id = c.account_id;
+  return out;
+}
+
+// Media caps applied BEFORE base64 (§A.4): don't ship a huge or non-image blob
+// through the daemon. Bytes (not paths) are sent in multi_tenant so the daemon
+// never trusts a caller-supplied filesystem path.
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGES = 3;
+const MIME_BY_EXT = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                      ".gif": "image/gif", ".webp": "image/webp" };
+
+export function encodeBase64Capped(paths) {
+  const out = [];
+  for (const p of (paths ?? []).slice(0, MAX_IMAGES)) {
+    const mime = MIME_BY_EXT[extname(String(p)).toLowerCase()];
+    if (!mime) continue; // MIME allowlist
+    try {
+      if (statSync(p).size > MAX_IMAGE_BYTES) continue; // per-image size cap
+      out.push({ media_type: mime, data: readFileSync(p).toString("base64") });
+    } catch {
+      // unreadable staged file — skip, never fatal
+    }
+  }
+  return out;
+}
+
+async function ask(text, chan, imagePaths = []) {
   // Image turns pay a vision-model pass first (local VLM cold-load ≈60-90s),
   // so give them a longer leash than plain text.
   const timeoutMs = imagePaths.length ? IMAGE_TIMEOUT_MS : TIMEOUT_MS;
+  const mt = typeof chan === "object" && chan?.multiTenant;
   try {
-    const body = { session, text };
-    if (imagePaths.length) body.image_paths = imagePaths;
+    const body = { ...chanBody(chan), text };
+    if (imagePaths.length) {
+      // multi_tenant: capped bytes (daemon refuses network paths, §A.4).
+      // single_user: staged local paths straight through (loopback trust).
+      if (mt) body.images = encodeBase64Capped(imagePaths);
+      else body.image_paths = imagePaths;
+    }
     const data = await daemonPost("/chat", body, timeoutMs);
     if (data?.reply) return { ok: true, text: data.reply };
     return { ok: false, error: "daemon returned an empty reply" };
-  } catch {
-    return askExec(text, imagePaths); // daemon down — degraded but never dark
+  } catch (err) {
+    // multi_tenant: NO CLI fallback (§A.5) — a default-user CLI run would answer
+    // as the wrong tenant. Report the outage; the caller fails closed.
+    if (mt) return { ok: false, error: String(err?.message ?? err).slice(0, 200) };
+    return askExec(text, imagePaths); // single_user: degraded but never dark
   }
 }
 
@@ -134,10 +192,20 @@ export function cacheInboundMedia(event, ctx) {
   if (!images.length) return;
   // sessionKey is the one identifier both hooks reliably share (weixin sets
   // no SenderId, and the reply hook has no conversationId — verified against
-  // openclaw 2026.6.11). "*" is the single-owner fallback: this gateway only
-  // talks to the owner, so an unmatched image can still bind to the very
-  // next message.
-  const keys = [event?.sessionKey, ctx?.conversationId, event?.senderId, md.senderId, "*"];
+  // openclaw 2026.6.11).
+  let keys;
+  if (isMultiTenant()) {
+    // multi-account: an image MUST be scoped to its receiving account or it
+    // could attach to another tenant's turn (§A.4). No "*" fallback here — an
+    // image we can't scope to an accountId is dropped, not leaked.
+    const acct = ctx?.accountId ? String(ctx.accountId) : null;
+    if (!acct) return;
+    keys = [event?.sessionKey, ctx?.conversationId].filter(Boolean).map((k) => `${acct}::${k}`);
+  } else {
+    // single-owner: this gateway only talks to the owner, so "*" lets an
+    // unmatched image bind to the very next message.
+    keys = [event?.sessionKey, ctx?.conversationId, event?.senderId, md.senderId, "*"];
+  }
   for (const key of keys) {
     if (!key) continue;
     const entry = mediaCache.get(String(key));
@@ -268,10 +336,14 @@ export function parseSlash(body) {
   return { usage: "usage: /read [list] | /read done <id> | /read unrelated <id>" };
 }
 
-async function handleSlash(parsed) {
+async function handleSlash(parsed, chan) {
   if (parsed.usage) return parsed.usage;
   try {
-    const data = await daemonPost(`/actions/${parsed.action}`, parsed.params,
+    // Merge the tenant identity (channel/account_id) into the action body so a
+    // slash command resolves to the same uid as a chat turn (§A.2). single_user
+    // ignores the extra fields.
+    const params = { ...chanBody(chan), ...parsed.params };
+    const data = await daemonPost(`/actions/${parsed.action}`, params,
                                   parsed.timeoutMs ?? ACTION_TIMEOUT_MS);
     return data?.result ?? "(empty result)";
   } catch (err) {
@@ -363,9 +435,40 @@ export default {
     // Fire-and-forget on every inbound message; harvests staged image paths
     // for the reply hook below (the reply event itself is text-only).
     api.on("message_received", cacheInboundMedia);
+
+    // multi_tenant: route weixin turns by accountId at before_dispatch (the only
+    // hook exposing ctx.accountId; before_agent_reply has cleanedBody but no
+    // accountId — §A.3). Inert in single_user (which uses before_agent_reply
+    // below), so the live single-user path is unchanged.
+    api.on("before_dispatch", async (event, ctx) => {
+      if (!isMultiTenant()) return;              // single_user → handled below
+      if (ctx?.channel !== "weixin") return;     // scope: only weixin is per-account
+      // From here it's a weixin turn we OWN: EVERY path returns {handled:true}
+      // so a failure is a safe reply, never a fall-through to OpenClaw's model
+      // with no tenant context (a leak). Fail CLOSED.
+      const accountId = ctx?.accountId;
+      if (!accountId) return { handled: true, text: SAFE };
+      const sessionKey = ctx?.sessionKey ?? "default";
+      const body = String(event?.body ?? event?.content ?? "").trim();
+      const images = takeInboundMedia([`${accountId}::${sessionKey}`,
+                                       `${accountId}::${ctx?.conversationId}`]);
+      const chan = { channel: "weixin", account_id: accountId,
+                     session: `oc:${accountId}:${sessionKey}`, multiTenant: true };
+      if (!body && !images.length) return { handled: true, text: SAFE };
+      try {
+        const parsed = body.startsWith("/") ? parseSlash(body) : null;
+        const result = parsed ? { ok: true, text: await handleSlash(parsed, chan) }
+                              : await ask(body, chan, images);
+        return { handled: true, text: (result?.ok && result.text) ? result.text : SAFE };
+      } catch {
+        return { handled: true, text: SAFE };    // daemon down / bad response → safe
+      }
+    });
+
     api.on(
       "before_agent_reply",
       async (event, ctx) => {
+        if (isMultiTenant()) return;   // multi_tenant is handled at before_dispatch
         // Claim only real user messages. Heartbeats and cron agent-turns
         // (ctx.trigger "heartbeat"/"cron") keep OpenClaw's normal behavior —
         // piping a cron prompt into the chat agent would misfire actions.
