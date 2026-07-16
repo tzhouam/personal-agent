@@ -595,6 +595,31 @@ cost.
 
 ---
 
+## 12b. Weekly self-evolution: three layers (implemented)
+
+Every user of the deployment has **mutually authorized** using their traces and
+chat history to improve the shared agent. The Sunday fan-out
+(`scheduler.enqueue_weekly_jobs`, gated `weekly_day`/`weekly_hour`, idempotent
+per ISO week) schedules:
+
+1. **Personal** (per active user): `run_phase:consolidate` (profile editorial)
+   + `evolve` (personal lessons `L*` from their own chats/tasks —
+   preferences differ, so these never cross users and always take precedence).
+2. **Global lessons** (one `global_evolve` job, GLOBAL_UID): mines all active
+   users' sessions + task records + pipeline traces for **user-agnostic** rules
+   → shared store (`shared/lessons/`, ids `G*`, cap 12) injected into every
+   user's prompts before their personal block. Privacy: hard prompt constraints
+   + a deterministic post-filter (no uids/display names/emails/channel ids in a
+   rule); provenance kept in `why`, never rendered. Admin reviews via
+   `assistant admin lessons list|retire`.
+3. **Code/workflow self-improvement** (one `self_improve` job, GLOBAL_UID): the
+   `scripts/self-improve.sh` harness — cross-user evidence brief → Opus edits in
+   a throwaway worktree off origin/main → sensitive-path guard → full pytest →
+   **PR only, never merged** (the human-review gate for self-modifying changes);
+   artifacts under `shared/self-improve/`.
+
+---
+
 ## 13. Scale, cost, secrets
 
 - **LLM cost/rate limits are the dominant constraint** (N × daily pipeline + MoA

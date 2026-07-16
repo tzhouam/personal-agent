@@ -131,14 +131,15 @@ def _render_system(settings: Settings) -> str:
 
 def system_prompt(settings: Settings) -> str:
     """The chat system prompt: the static core (rendered for this deployment
-    mode) plus the learned behavior rules (lessons_store) — the agent's
-    self-evolution surface. Rebuilt per turn so a lesson learned in one message
-    governs the next."""
+    mode) plus the learned behavior rules — shared cross-user rules first
+    (multi_tenant, `G*`), then the user's personal rules (`L*`, which take
+    precedence) — the agent's self-evolution surface. Rebuilt per turn so a
+    lesson learned in one message governs the next."""
     core = _render_system(settings)
     try:
-        from ..lessons_store import LessonsStore
+        from ..lessons_store import combined_prompt_block
 
-        return core + LessonsStore(settings.profile_dir).prompt_block()
+        return core + combined_prompt_block(settings)
     except Exception:  # lessons are an enhancement, never a blocker
         log.exception("lessons injection failed")
         return core
@@ -282,12 +283,22 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
     prompt += f"## Owner message\n{text.strip()[:4000]}"
     try:  # learned rules ride next to the owner message too — end-of-prompt
         # placement keeps them salient for long system prompts
-        from ..lessons_store import LessonsStore
+        from ..lessons_store import LessonsStore, shared_store
 
-        rules = LessonsStore(settings.profile_dir).active()
+        mt = settings.deployment_mode == "multi_tenant"
+        rules: list = []
+        if mt:
+            try:  # shared G* rules first; a broken shared store never costs L*
+                rules += shared_store(settings).active()
+            except Exception:
+                log.exception("shared lessons prompt injection failed")
+        rules += LessonsStore(settings.profile_dir).active()
         if rules:
+            # single_user header stays byte-identical to the legacy prompt
+            scope = (" (G* rules are shared across all users; personal L* rules "
+                     "win on conflict)" if mt else "")
             prompt += ("\n\n## Learned rules — apply to your reply AND to every "
-                       "action's parameters\n"
+                       f"action's parameters{scope}\n"
                        + "\n".join(f"- [{l['id']}] {l['rule']}" for l in rules))
     except Exception:
         log.exception("lessons prompt injection failed")

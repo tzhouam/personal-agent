@@ -334,3 +334,51 @@ def test_tick_tenants_email_failure_isolated(tmp_path, monkeypatch):
     _tick_tenants(Settings(_env_file=None), now=datetime(2026, 7, 16, 5, 0),
                   llm_factory=lambda s: FakeLLM())
     assert polls == ["alice1", "bob123"]              # bob polled despite alice's error
+
+
+def test_tick_tenants_weekly_gate(tmp_path, monkeypatch):
+    """Sunday >= weekly_hour fires the weekly self-evolution set (idempotent);
+    Saturday or too-early Sunday doesn't."""
+    from datetime import datetime
+
+    from assistant.jobs import GLOBAL_UID, JobQueue
+    from assistant.serve import _tick_tenants
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    monkeypatch.setenv("SMTP_USER", "")
+    monkeypatch.setenv("SMTP_PASSWORD", "")
+    reg = UserRegistry(data_dir)
+    reg.add_user("alice1")
+
+    class NoStore:
+        def __init__(self, d):
+            pass
+
+        def deliver_due(self, s):
+            return []
+
+    monkeypatch.setattr("assistant.notify.ReminderStore", NoStore)
+    monkeypatch.setattr("assistant.routines.fire_due", lambda s: None)
+    root = Settings(_env_file=None)
+    q = JobQueue(root.shared_dir)
+
+    # Saturday, and Sunday before weekly_hour: only daily runs fire (one per day)
+    _tick_tenants(root, now=datetime(2026, 7, 18, 9, 0))    # Saturday
+    _tick_tenants(root, now=datetime(2026, 7, 19, 7, 30))   # Sunday 07:30 < 8
+    assert q.counts() == {"queued": 2}                      # Sat + Sun daily runs
+    # Sunday 09:00: weekly set fires — consolidate+evolve for alice, 2 globals
+    _tick_tenants(root, now=datetime(2026, 7, 19, 9, 0))
+    _tick_tenants(root, now=datetime(2026, 7, 19, 10, 0))   # repeat tick dedupes
+    counts = q.counts()
+    assert counts == {"queued": 6}                          # 2 daily + 4 weekly
+    kinds = []
+    while (job := q.claim()) is not None:
+        kinds.append((job["kind"], job["uid"]))
+        q.mark(job["id"], "done")
+    assert ("global_evolve", GLOBAL_UID) in kinds
+    assert ("self_improve", GLOBAL_UID) in kinds
+    assert ("evolve", "alice1") in kinds
+    assert ("run_phase", "alice1") in kinds

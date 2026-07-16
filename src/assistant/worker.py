@@ -14,9 +14,11 @@ is escaped by a daemon restart (`recover()` requeues).
 
 import contextvars
 import logging
+import os
 import threading
 
 from .config import Settings
+from .jobs import GLOBAL_UID
 
 log = logging.getLogger("assistant")
 
@@ -69,11 +71,59 @@ def _dispatch_task(settings, args, token):
     run_task(str(args.get("request", "")), settings, cancel_check=token.check)
 
 
+def _dispatch_evolve(settings, args, token):
+    """Weekly per-user personal-lessons pass (§12b layer 1)."""
+    from .tasks.evolve import evolve
+    token.check()
+    evolve(settings)
+
+
+def _dispatch_global_evolve(settings, args, token):
+    """Weekly cross-user shared-lessons pass (§12b layer 2). `settings` is the
+    deployment ROOT (GLOBAL_UID job)."""
+    from .tasks.global_evolve import global_evolve
+    token.check()
+    global_evolve(settings)
+
+
+def _dispatch_self_improve(settings, args, token):
+    """Weekly code/workflow self-improvement (§12b layer 3): runs the existing
+    PR-only harness (`scripts/self-improve.sh` — worktree off origin/main,
+    pytest gate, sensitive-path guard, never merges). An operator-level GLOBAL
+    job — a subprocess here carries no forgeable user identity (the no-Popen
+    rule is about *tenant* jobs). Nonzero exit raises so the queue retries/fails
+    visibly."""
+    import subprocess
+    from pathlib import Path
+
+    token.check()
+    script = Path(__file__).resolve().parents[2] / "scripts" / "self-improve.sh"
+    env = dict(os.environ, SELF_IMPROVE_DAYS=str(args.get("days", 7)))
+    proc = subprocess.run(["bash", str(script), "live"], env=env,
+                          capture_output=True, text=True, timeout=3900)
+    if proc.returncode != 0:
+        raise RuntimeError(f"self-improve exited {proc.returncode}: "
+                           f"{(proc.stdout or '')[-300:]}{(proc.stderr or '')[-300:]}")
+
+
 DEFAULT_DISPATCH = {
     "run": _dispatch_run,
     "run_phase": _dispatch_run_phase,
     "task": _dispatch_task,
+    "evolve": _dispatch_evolve,
+    "global_evolve": _dispatch_global_evolve,
+    "self_improve": _dispatch_self_improve,
 }
+
+
+def _default_settings_for(uid: str) -> Settings:
+    """Per-user Settings for a job's uid — except the global sentinel: a
+    deployment-global job (global_evolve / self_improve) runs under the ROOT
+    Settings, cross-user by design, and must never materialize a users/<uid>
+    dir (GLOBAL_UID can't even pass uid validation)."""
+    if uid == GLOBAL_UID:
+        return Settings()
+    return Settings.for_user(uid)
 
 
 class WorkerPool:
@@ -86,7 +136,7 @@ class WorkerPool:
     def __init__(self, queue, settings_for=None, dispatch=None,
                  max_workers: int = 2, poll_interval: float = 1.0):
         self.queue = queue
-        self.settings_for = settings_for or (lambda uid: Settings.for_user(uid))
+        self.settings_for = settings_for or _default_settings_for
         self.dispatch = dispatch or DEFAULT_DISPATCH
         self.max_workers = max_workers
         self.poll_interval = poll_interval

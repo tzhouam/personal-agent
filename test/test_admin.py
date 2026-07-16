@@ -104,3 +104,24 @@ def test_migrate_skips_infra_and_refuses_existing_uid(root):
     admin.add_user(settings, "taken1")
     with pytest.raises(ValueError):
         admin.migrate_single_user(settings, "taken1")
+
+
+def test_shared_lessons_list_and_retire(root):
+    settings, _ = root
+    from assistant.lessons_store import shared_store
+
+    assert admin.list_shared_lessons(settings) == "(no active shared lessons)"
+    shared_store(settings).learn("verify dates before reminders",
+                                 why="alice1+bob123 evidence", source="evolve")
+    listed = admin.list_shared_lessons(settings)
+    assert "[G1]" in listed and "verify dates" in listed and "why:" in listed
+    assert "retired shared lesson G1" == admin.retire_shared_lesson(settings, "G1")
+    assert admin.list_shared_lessons(settings) == "(no active shared lessons)"
+    assert "no active shared lesson" in admin.retire_shared_lesson(settings, "G9")
+
+
+def test_shared_lessons_require_multi_tenant(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "single_user")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    with pytest.raises(ValueError):
+        admin.list_shared_lessons(Settings(_env_file=None))

@@ -31,6 +31,12 @@ from pathlib import Path
 # run.lock anyway; enforcing it here avoids pointless lock-contention churn).
 _SINGLETON_KINDS = ("run", "run_phase")
 
+# Sentinel uid for deployment-global jobs (weekly global evolve / self-improve,
+# §12b). Deliberately FAILS `uidsafe.validate_uid` (underscores) so it can never
+# be registered, resolved to a user, or turned into a users/<uid> path — the
+# worker's default settings_for special-cases it to the deployment-ROOT Settings.
+GLOBAL_UID = "__global__"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,16 +93,21 @@ class JobQueue:
     # ── enqueue ──────────────────────────────────────────────────────
     def enqueue(self, uid: str, kind: str, args: dict | None = None,
                 dedupe_key: str | None = None) -> int | None:
-        """Add a `queued` job for `uid`. If `dedupe_key` matches an already
-        **active** (queued/running) job, do nothing and return None — a duplicate
-        enqueue is idempotent. Returns the new job id otherwise."""
+        """Add a `queued` job for `uid`. If `dedupe_key` matches ANY existing
+        job — including a completed/failed/cancelled one — do nothing and return
+        None. Keys are date/week-scoped (`uid:run:<day>`), so this means "at
+        most once per period": a finished daily run must NOT be re-enqueued by
+        the next poll tick (that was a live runaway — the pipeline looped all
+        day once the first run completed), and a failed/cancelled one stays down
+        for its period (retries happen at the attempt level, not by re-enqueue;
+        a manual re-trigger passes no dedupe key). Returns the new job id
+        otherwise."""
         payload = json.dumps(args or {}, ensure_ascii=False)
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             if dedupe_key:
-                dup = c.execute(
-                    "SELECT id FROM jobs WHERE dedupe_key=? AND state IN ('queued','running')",
-                    (dedupe_key,)).fetchone()
+                dup = c.execute("SELECT id FROM jobs WHERE dedupe_key=?",
+                                (dedupe_key,)).fetchone()
                 if dup:
                     return None
             now = _now()

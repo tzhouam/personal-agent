@@ -93,3 +93,46 @@ def _gather_evidence(settings: Settings) -> str:
                          f"failed_steps={len(failed)}"
                          + (f" first_failure={failed[0]['outcome'][:150]}" if failed else ""))
     return "\n---\n".join(parts)
+
+
+def _trace_evidence(settings: Settings, days: int = 7) -> str:
+    """Pipeline-trace signals for the evolve passes: one compact line per recent
+    run — total wall, the slowest phases, LLM volume, and suspicious spans
+    (>45s LLM calls, `max_tokens` truncations). Only full daily runs produce
+    `trace.jsonl` (chat/task turns record to events.db/tasks instead), so this
+    is the operations view of the agent, per user."""
+    from .. import tracing
+
+    runs_dir = settings.runs_dir
+    if not runs_dir.exists():
+        return ""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("run-%Y%m%d")
+    lines: list[str] = []
+    for run_dir in sorted(p for p in runs_dir.glob("run-*") if p.is_dir()):
+        if run_dir.name[:len(cutoff)] < cutoff:
+            continue
+        spans = tracing.load_spans(run_dir / "trace.jsonl")
+        if not spans:
+            continue
+        wall_s = (max(s.get("end", 0) for s in spans)
+                  - min(s.get("start", 0) for s in spans))
+        phases = sorted((s for s in spans if s.get("name") == "phase"),
+                        key=lambda s: -s.get("dur_ms", 0))[:3]
+        phase_txt = ", ".join(
+            f"{s.get('attr', {}).get('phase', '?')}={s.get('dur_ms', 0) / 1000:.0f}s"
+            for s in phases)
+        llm_spans = [s for s in spans if s.get("name") == "llm"]
+        tok_in = sum(s.get("attr", {}).get("prompt_tokens") or 0 for s in llm_spans)
+        tok_out = sum(s.get("attr", {}).get("completion_tokens") or 0 for s in llm_spans)
+        suspicious = []
+        for s in llm_spans:
+            attr = s.get("attr", {})
+            if s.get("dur_ms", 0) > 45_000:
+                suspicious.append(f"slow llm {s['dur_ms'] / 1000:.0f}s "
+                                  f"({attr.get('model', '?')})")
+            if attr.get("stop_reason") == "max_tokens":
+                suspicious.append(f"truncated at max_tokens ({attr.get('model', '?')})")
+        lines.append(f"run {run_dir.name}: wall={wall_s:.0f}s slowest[{phase_txt}] "
+                     f"llm_calls={len(llm_spans)} tokens={tok_in}->{tok_out}"
+                     + (f" SUSPECT[{'; '.join(suspicious[:4])}]" if suspicious else ""))
+    return "\n".join(lines)

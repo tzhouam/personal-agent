@@ -44,6 +44,14 @@ def _dispatch_admin(settings: Settings, args) -> int:
             print(admin.set_bridge_token(settings, args.token))
         elif args.admin_cmd == "migrate-single-user":
             print(admin.migrate_single_user(settings, args.uid, dry_run=args.dry_run))
+        elif args.admin_cmd == "lessons":
+            if args.op == "list":
+                print(admin.list_shared_lessons(settings))
+            else:
+                if not args.id:
+                    print("admin: lessons retire needs a lesson id (G3)", file=sys.stderr)
+                    return 1
+                print(admin.retire_shared_lesson(settings, args.id))
         elif args.admin_cmd == "reboot":
             from ..serve import reboot
 
@@ -159,6 +167,10 @@ def main() -> None:
                                help="fold the current single-user DATA_DIR into users/<uid>/")
     mig.add_argument("uid")
     mig.add_argument("--dry-run", action="store_true", help="print the plan only")
+    les = admin_sub.add_parser("lessons", help="review the SHARED (cross-user) "
+                                               "lessons injected into every user's prompts")
+    les.add_argument("op", choices=["list", "retire"])
+    les.add_argument("id", nargs="?", help="lesson id (G3) for retire")
     admin_sub.add_parser("reboot", help="restart the shared daemon (graceful; "
                                         "serve-supervisor respawns it)")
 

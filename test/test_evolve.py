@@ -5,6 +5,7 @@ import json
 
 from assistant.actions import run_action
 from assistant.chat.agent import handle_message, system_prompt
+from assistant.config import Settings
 from assistant.lessons_store import MAX_ACTIVE, LessonsStore
 from assistant.tasks.evolve import evolve
 
@@ -102,3 +103,62 @@ def test_self_evolve_action(settings, monkeypatch):
     monkeypatch.setattr("assistant.llm.LLM.__init__", lambda self, s: None)
     out = run_action("self_evolve", {}, settings)
     assert "no new durable lesson" in out
+
+
+# ── shared-store mechanics + two-layer injection (multi-user §12b) ────────
+
+def test_store_prefix_cap_and_header(tmp_path):
+    from assistant.lessons_store import LessonsStore
+
+    store = LessonsStore(tmp_path / "shared", id_prefix="G", max_active=2)
+    assert store.learn("rule one", source="evolve")["id"] == "G1"
+    assert store.learn("rule two", source="evolve")["id"] == "G2"
+    store.learn("rule three", source="evolve")           # cap 2 → evicts oldest
+    ids = [l["id"] for l in store.active()]
+    assert ids == ["G2", "G3"]
+    block = store.prompt_block(header="\n\nSHARED:\n")
+    assert block.startswith("\n\nSHARED:\n") and "[G2]" in block
+    # default header unchanged for the personal store
+    assert "owner can retire any by id" in store.prompt_block()
+
+
+def test_combined_block_single_user_ignores_planted_shared_file(settings):
+    from assistant.lessons_store import LessonsStore, combined_prompt_block, shared_store
+
+    LessonsStore(settings.profile_dir).learn("personal rule")
+    # plant a shared store — single_user must NOT read it
+    shared = LessonsStore(settings.shared_dir / "lessons", id_prefix="G")
+    shared.learn("shared rule", source="evolve")
+    block = combined_prompt_block(settings)
+    assert "personal rule" in block and "shared rule" not in block
+    assert block == LessonsStore(settings.profile_dir).prompt_block()  # byte-identical
+
+
+def test_combined_block_multi_tenant_orders_shared_then_personal(tmp_path, monkeypatch):
+    from assistant.chat.agent import system_prompt
+    from assistant.lessons_store import LessonsStore, combined_prompt_block, shared_store
+
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    user = Settings.for_user("alice1")
+    shared_store(user).learn("never guess amounts", source="evolve")
+    LessonsStore(user.profile_dir).learn("reply in Cantonese")
+    block = combined_prompt_block(user)
+    assert block.index("[G1]") < block.index("[L1]")     # personal last → wins
+    assert "personal rules below take precedence" in block
+    sp = system_prompt(user)
+    assert "[G1] never guess amounts" in sp and "[L1] reply in Cantonese" in sp
+
+
+def test_combined_block_survives_broken_shared_store(tmp_path, monkeypatch):
+    from assistant.lessons_store import LessonsStore, combined_prompt_block
+
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    user = Settings.for_user("alice1")
+    LessonsStore(user.profile_dir).learn("personal rule")
+    # shared lessons dir path exists as a FILE → shared store read raises
+    (tmp_path / "shared").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "shared" / "lessons").write_text("not a dir")
+    block = combined_prompt_block(user)
+    assert "personal rule" in block                      # personal block survives
