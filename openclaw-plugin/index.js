@@ -236,6 +236,30 @@ export function takeInboundMedia(keys) {
   return [];
 }
 
+/**
+ * Self-echo guard (A.8 live finding #2, 2026-07-16): the weixin channel
+ * re-delivers the bot's OWN outbound reply as an inbound message at
+ * `before_dispatch` (and `ctx.trigger` does not exist there to filter it, and
+ * `senderId` arrives undefined). Without this, reply → echo → reply loops
+ * forever. Remember what we sent per account and silently consume a matching
+ * inbound (`{handled:true}` with no text ends the turn without a new send).
+ */
+const ECHO_TTL_MS = 10 * 60_000;
+const recentReplies = new Map(); // accountId → [{text, ts}]
+
+export function rememberReply(accountId, text) {
+  const key = String(accountId);
+  const list = (recentReplies.get(key) ?? []).filter((e) => Date.now() - e.ts < ECHO_TTL_MS);
+  list.push({ text: String(text).trim(), ts: Date.now() });
+  recentReplies.set(key, list.slice(-6));
+}
+
+export function isEchoOfOwnReply(accountId, body) {
+  const list = recentReplies.get(String(accountId)) ?? [];
+  const b = String(body).trim();
+  return b.length > 0 && list.some((e) => Date.now() - e.ts < ECHO_TTL_MS && e.text === b);
+}
+
 /** "/todo add buy GPU due:2026-07-15" → {action, params, timeoutMs?} | {usage} | null
  * (null = not ours, let OpenClaw built-ins have it). */
 export function parseSlash(body) {
@@ -457,17 +481,26 @@ export default {
       // needs conversationId when present.
       const convo = ctx?.conversationId ?? sessionKey;
       const body = String(event?.body ?? event?.content ?? "").trim();
+      // A.8 finding #2: our own delivered reply comes back as an inbound turn —
+      // consume it silently (claimed, no new send) or it loops forever.
+      if (isEchoOfOwnReply(accountId, body)) return { handled: true };
       const images = takeInboundMedia([`${accountId}::${sessionKey}`,
                                        `${accountId}::${ctx?.conversationId}`]);
       const chan = { channel: "weixin", account_id: accountId,
                      session: `oc:${accountId}:${convo}`, multiTenant: true };
-      if (!body && !images.length) return { handled: true, text: SAFE };
+      if (!body && !images.length) {
+        rememberReply(accountId, SAFE);
+        return { handled: true, text: SAFE };
+      }
       try {
         const parsed = body.startsWith("/") ? parseSlash(body) : null;
         const result = parsed ? { ok: true, text: await handleSlash(parsed, chan) }
                               : await ask(body, chan, images);
-        return { handled: true, text: (result?.ok && result.text) ? result.text : SAFE };
+        const text = (result?.ok && result.text) ? result.text : SAFE;
+        rememberReply(accountId, text);          // arm the echo guard for THIS reply
+        return { handled: true, text };
       } catch {
+        rememberReply(accountId, SAFE);          // a SAFE reply echoes too
         return { handled: true, text: SAFE };    // daemon down / bad response → safe
       }
     });

@@ -293,3 +293,31 @@ console.log("supervisor backoff: PASS");
 
 console.log("ALL PASS");
 process.exit(0);
+
+// ── self-echo guard (A.8 live finding #2) ──
+{
+  const { rememberReply, isEchoOfOwnReply } = await import("./index.js");
+  rememberReply("wxA", "这是机器人刚发出的回复 ✔ done");
+  if (!isEchoOfOwnReply("wxA", "这是机器人刚发出的回复 ✔ done"))
+    throw new Error("echo of own reply must be detected");
+  if (!isEchoOfOwnReply("wxA", "  这是机器人刚发出的回复 ✔ done  "))
+    throw new Error("echo detection must be whitespace-tolerant");
+  if (isEchoOfOwnReply("wxB", "这是机器人刚发出的回复 ✔ done"))
+    throw new Error("echo memory must be per-account");
+  if (isEchoOfOwnReply("wxA", "一条正常的新消息"))
+    throw new Error("normal messages must not be swallowed");
+  if (isEchoOfOwnReply("wxA", ""))
+    throw new Error("empty body is not an echo");
+
+  // end-to-end: the mt handler consumes an echo silently (claimed, no text)
+  const envPath = join(work, "no-such.env");
+  writeFileSync(envPath, "DEPLOYMENT_MODE=multi_tenant\nSERVE_TOKEN=bridgetok\n");
+  rememberReply("wxE", "刚发出的长回复内容");
+  const e = await dispatchHandler(
+    { body: "刚发出的长回复内容", channel: "openclaw-weixin" },
+    { channelId: "openclaw-weixin", accountId: "wxE", sessionKey: "agent:main:main" });
+  if (!(e?.handled === true && e.text === undefined))
+    throw new Error("echo must be consumed with no reply: " + JSON.stringify(e));
+  writeFileSync(envPath, "");
+  console.log("self-echo guard: PASS");
+}
