@@ -51,7 +51,10 @@ class CancelToken:
 def _dispatch_run(settings, args, token):
     from .orchestrator import run
     token.check()
-    run(settings, resume=bool(args.get("resume")), cancel_check=token.check)
+    # Default resume=True: a REQUEUED job (daemon restart mid-run) then continues
+    # from its state.json checkpoint instead of restarting from collect. Safe for
+    # fresh runs too — run() only resumes when the previous run is incomplete.
+    run(settings, resume=bool(args.get("resume", True)), cancel_check=token.check)
 
 
 def _dispatch_run_phase(settings, args, token):
