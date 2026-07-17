@@ -62,10 +62,14 @@ def _search_gemini(query: str, api_key: str, model: str) -> dict:
     search the whole web with one AI Studio key. Returns the grounded ANSWER
     plus its cited sources in a single call (free tier: ~1500/day on
     2.5-class models)."""
+    from .timeutil import temporal_anchor
+
+    # anchored so date-relative queries ("today's news", "本周") ground on the
+    # right day — this call bypasses LLM._call, which anchors everything else
     resp = httpx.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         params={"key": api_key},
-        json={"contents": [{"parts": [{"text": query}]}],
+        json={"contents": [{"parts": [{"text": query + "\n\n" + temporal_anchor()}]}],
               "tools": [{"google_search": {}}]},
         timeout=45)
     resp.raise_for_status()

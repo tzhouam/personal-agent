@@ -73,6 +73,33 @@ def test_gemini_grounding_preferred_and_falls_back(settings, monkeypatch):
     assert web_search_answer("q", settings=s)["results"][0]["title"] == "T"
 
 
+def test_gemini_query_carries_temporal_anchor(settings, monkeypatch):
+    # _search_gemini bypasses LLM._call, so it anchors its own query tail —
+    # date-relative searches ("today's news") must ground on the right day
+    from datetime import datetime, timedelta, timezone
+
+    from assistant import timeutil
+
+    frozen = datetime(2026, 7, 17, 9, 32, tzinfo=timezone(timedelta(hours=8), "HKT"))
+    monkeypatch.setattr(timeutil, "_now", lambda: frozen)
+
+    class GeminiResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "ans"}]}}]}
+
+    captured = {}
+    monkeypatch.setattr(search_mod.httpx, "post",
+                        lambda url, **k: captured.update(k) or GeminiResp())
+    s = settings.model_copy(update={"gemini_api_key": "gm"})
+    web_search_answer("today's ai news", settings=s)
+    text = captured["json"]["contents"][0]["parts"][0]["text"]
+    assert text.startswith("today's ai news")               # query first
+    assert text.endswith(timeutil.temporal_anchor())        # anchor at the tail
+
+
 def test_web_search_action_uses_grounded_answer(settings, monkeypatch):
     monkeypatch.setattr(
         "assistant.search.web_search_answer",

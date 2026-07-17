@@ -238,6 +238,88 @@ def test_retry_lives_on_call_not_complete():
     assert not hasattr(LLM.complete, "retry")
 
 
+# ── temporal anchor: appended to the user-content TAIL of every call, never
+# the system prompt, never before existing tokens (cache-safety) ────────────
+from datetime import datetime, timedelta, timezone as _tz
+
+_FROZEN = datetime(2026, 7, 17, 9, 32, tzinfo=_tz(timedelta(hours=8), "HKT"))
+
+
+def _freeze_clock(monkeypatch):
+    from assistant import timeutil
+    monkeypatch.setattr(timeutil, "_now", lambda: _FROZEN)
+    return timeutil.temporal_anchor()
+
+
+class _Resp:
+    content = [type("B", (), {"type": "text", "text": "ok"})()]
+    stop_reason = "end_turn"
+    usage = None
+
+
+def test_anchor_appended_to_user_tail_never_system(monkeypatch):
+    anchor = _freeze_clock(monkeypatch)
+    _fake_anthropic(monkeypatch)
+    captured = {}
+    llm = LLM(_settings())
+    llm.client.messages = type("M", (), {"create": staticmethod(
+        lambda **kw: captured.update(kw) or _Resp())})()
+    llm.complete("the stable long prompt", system="STATIC SYSTEM")
+    content = captured["messages"][0]["content"]
+    assert content.startswith("the stable long prompt")   # prefix byte-identical
+    assert content.endswith(anchor)                       # anchor at the very tail
+    assert content.count("[temporal anchor]") == 1
+    assert "[temporal anchor]" not in captured["system"]  # static prefix untouched
+
+
+def test_anchor_on_image_content_list(monkeypatch, tmp_path):
+    anchor = _freeze_clock(monkeypatch)
+    _fake_anthropic(monkeypatch)
+    captured = {}
+    pic = tmp_path / "pic.png"
+    pic.write_bytes(b"png-bytes")
+    llm = LLM(_settings())
+    llm.client.messages = type("M", (), {"create": staticmethod(
+        lambda **kw: captured.update(kw) or _Resp())})()
+    llm.complete("look at this", images=[str(pic)])
+    blocks = captured["messages"][0]["content"]
+    assert blocks[0]["type"] == "image"                            # order kept
+    assert blocks[1] == {"type": "text", "text": "look at this"}
+    assert blocks[-1] == {"type": "text", "text": anchor}
+
+
+def test_anchor_never_mutates_shared_list_content(monkeypatch):
+    # the mixture path hands ONE list to every proposer — an in-place append
+    # would stack one anchor per call onto the shared prompt
+    anchor = _freeze_clock(monkeypatch)
+    _fake_anthropic(monkeypatch)
+    seen = []
+    llm = LLM(_settings())
+    llm.client.messages = type("M", (), {"create": staticmethod(
+        lambda **kw: seen.append(kw["messages"][0]["content"]) or _Resp())})()
+    shared = [{"type": "text", "text": "prompt"}]
+    llm._call(llm.client, "m", shared, None, 100)
+    llm._call(llm.client, "m", shared, None, 100)
+    assert shared == [{"type": "text", "text": "prompt"}]   # caller's list untouched
+    for content in seen:
+        anchors = [b for b in content if b == {"type": "text", "text": anchor}]
+        assert len(anchors) == 1 and content[-1] == anchors[0]
+
+
+def test_mixture_calls_each_carry_one_anchor(monkeypatch):
+    _freeze_clock(monkeypatch)
+    make_client, calls = _mixture_client({"m1": "a1", "m2": "a2", "agg": "FINAL"})
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
+    assert llm.complete("go", role="pipeline") == "FINAL"
+    assert len(calls) == 3                                  # m1 + m2 + aggregator
+    for _model, content in calls:
+        text = content if isinstance(content, str) else str(content)
+        assert text.count("[temporal anchor]") == 1
+
+
 def test_malformed_mixture_config_degrades(monkeypatch):
     # a broken LLM_MIXTURE/LLM_ROLES must degrade to {} — never crash Settings.
     # (classic cause: a multi-line value dotenv truncates to its first line.)

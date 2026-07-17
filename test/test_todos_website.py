@@ -300,10 +300,12 @@ def test_todo_expiry_after_a_month(tmp_path):
     store.upsert("k-old", title="Stale item", source="github")
     store.upsert("k-new", title="Fresh item", source="github")
     store.upsert("k-due", title="Old but scheduled", source="manual", due="2026-08-01")
-    data = store.load()  # age two items past the cutoff
-    for item in data["items"]:
+    data = store.load()  # pin every created date — upsert stamps the live
+    for item in data["items"]:  # clock, and the fixed cutoffs below rot otherwise
         if item["key"] in ("k-old", "k-due"):
             item["created"] = "2026-05-01"
+        elif item["key"] == "k-new":
+            item["created"] = "2026-07-10"
     store._save(data, "age items for test")
 
     expired = store.expire_stale(days=30, today=date(2026, 7, 2))
