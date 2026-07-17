@@ -30,6 +30,8 @@ from pathlib import Path
 
 import yaml
 
+from .locks import locked_transaction
+
 log = logging.getLogger("assistant")
 
 MAX_ACTIVE = 25
@@ -57,6 +59,7 @@ class LessonsStore:
         self.path = repo_dir / self.FILENAME
         self.id_prefix = id_prefix
         self.max_active = max_active
+        self._lock_file = repo_dir.parent / "write.lock"
 
     def load(self) -> dict:
         """Parsed store, or an empty scaffold when missing/empty."""
@@ -75,6 +78,7 @@ class LessonsStore:
             subprocess.run(["git", "commit", "-q", "-m", message], cwd=self.repo_dir,
                            capture_output=True)
 
+    @locked_transaction
     def learn(self, rule: str, why: str = "", source: str = "owner") -> dict | None:
         """Store one behavioral rule; None when empty or a near-duplicate of
         an active lesson. When the active set is full, the oldest
@@ -101,6 +105,7 @@ class LessonsStore:
         self._save(data, f"lessons: learn {lesson['id']} ({lesson['source']})")
         return lesson
 
+    @locked_transaction
     def retire(self, lesson_id: str) -> bool:
         """Retire (never delete) lesson `lesson_id`. True if one was active."""
         data = self.load()

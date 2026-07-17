@@ -12,11 +12,16 @@ from pathlib import Path
 
 import yaml
 
+from .locks import locked_transaction
+
 
 class _YamlItems:
     """Base for the git-versioned YAML item stores. Subclasses set ``FILENAME``
     and the display-``id`` ``ID_PREFIX``; every mutation rewrites the file and
-    commits it (when the dir is a git repo) so the history is auditable."""
+    commits it (when the dir is a git repo) so the history is auditable.
+    Mutating methods hold the per-user write lock for their whole
+    load→mutate→save transaction (locks.py) — chat actions, pipeline phases,
+    and background tasks all write these files and the shared git index."""
 
     FILENAME = "items.yaml"
     ID_PREFIX = "x"
@@ -25,6 +30,7 @@ class _YamlItems:
         """Bind to ``FILENAME`` inside ``repo_dir`` (the profile git repo)."""
         self.repo_dir = repo_dir
         self.path = repo_dir / self.FILENAME
+        self._lock_file = repo_dir.parent / "write.lock"
 
     def load(self) -> dict:
         """Return the parsed store, or an empty ``{next_id, items}`` scaffold
@@ -39,13 +45,16 @@ class _YamlItems:
         alongside the profile. Git failures are swallowed (capture_output)
         so persistence never crashes the caller."""
         self.repo_dir.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp.replace(self.path)  # atomic — an unlocked reader never sees a torn file
         if (self.repo_dir / ".git").exists():  # versioned alongside the profile
             subprocess.run(["git", "add", self.FILENAME], cwd=self.repo_dir,
                            capture_output=True)
             subprocess.run(["git", "commit", "-q", "-m", message], cwd=self.repo_dir,
                            capture_output=True)
 
+    @locked_transaction
     def upsert(self, key: str, **fields) -> dict | None:
         """Add an item unless an open item with the same key already exists."""
         data = self.load()
@@ -58,6 +67,7 @@ class _YamlItems:
         self._save(data, f"{self.FILENAME}: add {item['id']} {fields.get('title', '')[:50]}")
         return item
 
+    @locked_transaction
     def mark_done(self, item_id: str) -> bool:
         """Close the open item with display id ``item_id``, stamping
         ``done_at``. Returns whether a matching open item was found."""
@@ -70,6 +80,7 @@ class _YamlItems:
                 return True
         return False
 
+    @locked_transaction
     def close_by_key(self, key: str) -> bool:
         """Auto-close (e.g. a resume-approval todo once it's been approved)."""
         data = self.load()
@@ -86,6 +97,7 @@ class _YamlItems:
         """The still-open items (what the CLI, website, and email render)."""
         return [i for i in self.load()["items"] if i["status"] == "open"]
 
+    @locked_transaction
     def expire_stale(self, days: int = 30, today: date | None = None) -> list[dict]:
         """Mark fully-stale open items as outdated (never delete — the status
         change removes them from the open list, website, and email).
@@ -127,6 +139,7 @@ class ReadingList(_YamlItems):
     FILENAME = "reading_list.yaml"
     ID_PREFIX = "r"
 
+    @locked_transaction
     def mark_unrelated(self, item_id: str) -> bool:
         """Negative feedback: the owner says this should never have been
         surfaced. Removed from the open list AND recorded so the research

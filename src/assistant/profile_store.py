@@ -17,6 +17,8 @@ from pathlib import Path
 
 import yaml
 
+from .locks import locked_transaction
+
 # Sections the LLM may never touch — manually curated facts.
 PROTECTED_SECTIONS = {"identity", "education", "experience", "preferences"}
 # The daily updater's write surface (profile-v2: merge/move added so
@@ -54,6 +56,7 @@ class ProfileStore:
         self.dir = profile_dir
         self.yaml_path = profile_dir / "profile.yaml"
         self.md_path = profile_dir / "PROFILE.md"
+        self._lock_file = profile_dir.parent / "write.lock"
 
     # ── git plumbing ────────────────────────────────────────────────
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -80,12 +83,15 @@ class ProfileStore:
         """Return the parsed profile.yaml, or {} when the file is empty/absent."""
         return yaml.safe_load(self.yaml_path.read_text()) or {}
 
+    @locked_transaction
     def save(self, profile: dict, message: str) -> str:
         """Write yaml + rendered md, commit, return the commit's diff (empty if no change)."""
         self.ensure_repo()
-        self.yaml_path.write_text(
+        tmp = self.yaml_path.with_name(self.yaml_path.name + ".tmp")
+        tmp.write_text(
             yaml.safe_dump(profile, sort_keys=False, allow_unicode=True, width=100)
         )
+        tmp.replace(self.yaml_path)  # atomic — readers never see a torn file
         self.md_path.write_text(render_markdown(profile))
         self._git("add", "-A")
         if not self._git("status", "--porcelain").stdout.strip():

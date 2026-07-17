@@ -21,6 +21,8 @@ from pathlib import Path
 
 import yaml
 
+from .locks import locked_transaction
+
 RECORD_KINDS = ("meal", "exercise", "weight")
 
 
@@ -34,6 +36,7 @@ class HealthStore:
         """Bind to `health.yaml` inside `repo_dir` (the profile git repo)."""
         self.repo_dir = repo_dir
         self.path = repo_dir / self.FILENAME
+        self._lock_file = repo_dir.parent / "write.lock"
 
     def load(self) -> dict:
         """Parsed store, or an empty scaffold when missing/empty."""
@@ -48,7 +51,9 @@ class HealthStore:
     def _save(self, data: dict, message: str) -> None:
         """Write back and git-commit (best-effort) so history is auditable."""
         self.repo_dir.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp.replace(self.path)  # atomic — readers never see a torn file
         if (self.repo_dir / ".git").exists():
             subprocess.run(["git", "add", self.FILENAME], cwd=self.repo_dir,
                            capture_output=True)
@@ -56,6 +61,7 @@ class HealthStore:
                            capture_output=True)
 
     # ── static profile ───────────────────────────────────────────────
+    @locked_transaction
     def set_profile(self, **fields) -> dict:
         """Update the static body profile (sex, birth_year, height_cm) with
         the validated subset of `fields`; unknown/invalid ones are ignored.
@@ -78,6 +84,7 @@ class HealthStore:
         return profile
 
     # ── records ──────────────────────────────────────────────────────
+    @locked_transaction
     def add(self, kind: str, when: str = "", time: str = "",
             source: str = "chat", **fields) -> tuple[str, dict | None]:
         """Append one `meal`/`exercise`/`weight` record →
@@ -152,6 +159,7 @@ class HealthStore:
         self._save(data, f"health: {kind} {label} ({record['id']})")
         return "created", record
 
+    @locked_transaction
     def void(self, record_id: str) -> bool:
         """Mark a record voided (never delete). True if one was voided."""
         data = self.load()
@@ -192,6 +200,7 @@ class HealthStore:
         return out[-limit:]
 
     # ── needs (nutrients / ingredients wanted) ───────────────────────
+    @locked_transaction
     def add_need(self, item: str, why: str = "") -> dict | None:
         """Track a nutrient/ingredient the owner wants covered; None when the
         item is empty or already open."""
@@ -209,6 +218,7 @@ class HealthStore:
         self._save(data, f"health: need {item} ({need['id']})")
         return need
 
+    @locked_transaction
     def done_need(self, need_id: str) -> bool:
         """Mark need `need_id` covered. True if one was open."""
         data = self.load()

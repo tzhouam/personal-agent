@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from .config import Settings
+from .locks import locked_transaction
 
 log = logging.getLogger("assistant")
 
@@ -99,6 +100,7 @@ class ReminderStore:
     def __init__(self, data_dir: Path):
         """Bind the store to ``data_dir/reminders.yaml`` (created lazily)."""
         self.path = data_dir / "reminders.yaml"
+        self._lock_file = data_dir / "write.lock"
 
     def _load(self) -> dict:
         """Read the reminders file, returning a fresh empty structure when it's
@@ -112,6 +114,7 @@ class ReminderStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
+    @locked_transaction
     def add(self, message: str, due_at: datetime) -> dict:
         """Append a new unsent reminder due at ``due_at`` (message capped at 500
         chars), assign it the next id, persist, and return the stored record."""
@@ -127,6 +130,7 @@ class ReminderStore:
         """Reminders not yet sent or cancelled."""
         return [r for r in self._load()["reminders"] if not r.get("sent_at")]
 
+    @locked_transaction
     def cancel(self, reminder_id: str) -> bool:
         """Mark the pending reminder ``reminder_id`` as cancelled so it never
         fires. True if one was cancelled, False if unknown or already sent."""
@@ -140,20 +144,34 @@ class ReminderStore:
 
     def deliver_due(self, settings: Settings, now: datetime | None = None,
                     send=send_wechat) -> list[dict]:
-        """Send every due, unsent reminder; mark sent only on success so a
-        gateway hiccup retries next cycle. Returns what was delivered."""
+        """Send every due, unsent reminder — claim-then-send (the deliver-phase
+        ledger pattern): due reminders are marked sent under the write lock
+        BEFORE sending, so a concurrent cancel or second poll cycle can never
+        double-send; a failed send un-claims under the lock, so the next cycle
+        retries. Returns what was actually delivered."""
+        from .locks import _path_lock
+
         now = now or datetime.now()
-        data = self._load()
+        stamp = now.strftime("%Y-%m-%d %H:%M")
+        with _path_lock(self._lock_file):     # claim: mark before sending
+            data = self._load()
+            claimed = [r for r in data["reminders"]
+                       if not r.get("sent_at") and r["due_at"] <= stamp]
+            for r in claimed:
+                r["sent_at"] = stamp
+            if claimed:
+                self._save(data)
         delivered = []
-        for r in data["reminders"]:
-            if r.get("sent_at") or r["due_at"] > now.strftime("%Y-%m-%d %H:%M"):
-                continue
+        for r in claimed:                     # send outside the lock
             status = send(settings, f"⏰ Reminder: {r['message']}")
             if status == "sent":
-                r["sent_at"] = now.strftime("%Y-%m-%d %H:%M")
                 delivered.append(r)
-            else:
-                log.warning("reminder %s delivery failed: %s", r["id"], status)
-        if delivered:
-            self._save(data)
+                continue
+            log.warning("reminder %s delivery failed: %s", r["id"], status)
+            with _path_lock(self._lock_file):  # release the claim → retried
+                data = self._load()
+                for row in data["reminders"]:
+                    if row["id"] == r["id"] and row.get("sent_at") == stamp:
+                        row["sent_at"] = None
+                self._save(data)
         return delivered

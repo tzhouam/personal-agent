@@ -22,6 +22,7 @@ from pathlib import Path
 import yaml
 
 from .config import Settings
+from .locks import locked_transaction
 
 log = logging.getLogger("assistant")
 
@@ -99,6 +100,7 @@ class RoutineStore:
     def __init__(self, data_dir: Path):
         """Bind the store to ``data_dir/routines.yaml`` (created lazily)."""
         self.path = data_dir / "routines.yaml"
+        self._lock_file = data_dir / "write.lock"
 
     def _load(self) -> dict:
         """Read the routines file, returning a fresh empty structure when it's
@@ -112,6 +114,7 @@ class RoutineStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
+    @locked_transaction
     def add(self, task: str, time: str, days: str = "daily",
             condition: str = "") -> dict | None:
         """Validate and store a new routine, returning the record — or None if
@@ -136,6 +139,7 @@ class RoutineStore:
         """Routines not cancelled."""
         return [r for r in self._load()["routines"] if not r.get("cancelled")]
 
+    @locked_transaction
     def cancel(self, routine_id: str) -> bool:
         """Flag routine ``routine_id`` as cancelled so it stops firing. True if
         one was cancelled, False if unknown or already cancelled."""
@@ -157,6 +161,7 @@ class RoutineStore:
                 and r["time"] <= now.strftime("%H:%M")
                 and r.get("last_checked") != today]
 
+    @locked_transaction
     def mark_checked(self, routine_id: str, day: date | None = None) -> None:
         """Record that ``routine_id`` was checked on ``day`` (default today) so
         ``due`` won't return it again that day — set before condition evaluation
@@ -166,6 +171,27 @@ class RoutineStore:
             if r["id"] == routine_id:
                 r["last_checked"] = (day or date.today()).isoformat()
         self._save(data)
+
+    @locked_transaction
+    def claim_due(self, now: datetime | None = None) -> list[dict]:
+        """Atomically select the due routines and mark them checked — one
+        locked load→mark→save, so a concurrent poller can't double-fire them
+        and a concurrent `cancel` can't be lost between the read and the
+        write. Returns the claimed routines (the caller then runs them
+        outside the lock)."""
+        now = now or datetime.now()
+        today = now.date().isoformat()
+        data = self._load()
+        due = [r for r in data["routines"]
+               if not r.get("cancelled")
+               and day_matches(r["days"], now.date())
+               and r["time"] <= now.strftime("%H:%M")
+               and r.get("last_checked") != today]
+        for r in due:
+            r["last_checked"] = today
+        if due:
+            self._save(data)
+        return due
 
 
 def check_condition(settings: Settings, condition: str) -> tuple[bool, str]:
@@ -199,8 +225,7 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
 
     store = RoutineStore(settings.data_dir)
     outcomes = []
-    for routine in store.due(now):
-        store.mark_checked(routine["id"], (now or datetime.now()).date())
+    for routine in store.claim_due(now):  # atomic select+mark (one locked write)
         holds, why = check_condition(settings, routine.get("condition", ""))
         if not holds:
             log.info("routine %s: condition not met (%s)", routine["id"], why)

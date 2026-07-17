@@ -206,8 +206,11 @@ def consolidate_profile(llm: LLM, store: ProfileStore, settings: Settings,
 
     diff = ""
     if all_applied:
-        diff = store.save(profile, f"weekly consolidation {today} ({len(all_applied)} ops)")
-        append_ops_log(store.dir, all_applied, today)
+        from ..locks import repo_write_lock
+
+        with repo_write_lock(store.dir):  # save + ops-log as one locked transaction
+            diff = store.save(profile, f"weekly consolidation {today} ({len(all_applied)} ops)")
+            append_ops_log(store.dir, all_applied, today)
 
     emailed = False
     try:

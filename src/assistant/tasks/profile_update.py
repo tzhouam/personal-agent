@@ -102,9 +102,16 @@ def update_profile(llm: LLM, store: ProfileStore, observations: list[dict],
     result = llm.complete_json(prompt, system=_SYSTEM, max_tokens=16000, role="pipeline")
     ops = result.get("ops", []) if isinstance(result, dict) else []
 
-    profile, applied, rejected = store.apply_ops(profile, ops, today=today)
-    diff = store.save(profile, f"daily update {today} ({len(applied)} ops)") if applied else ""
-    append_ops_log(store.dir, applied, today)
+    # One locked read-modify-write: re-load fresh state under the per-user
+    # write lock, then apply→save→ops-log as a single transaction (the LLM
+    # call above stays outside — the lock is held milliseconds, not minutes).
+    from ..locks import repo_write_lock
+
+    with repo_write_lock(store.dir):
+        profile = store.load()
+        profile, applied, rejected = store.apply_ops(profile, ops, today=today)
+        diff = store.save(profile, f"daily update {today} ({len(applied)} ops)") if applied else ""
+        append_ops_log(store.dir, applied, today)
 
     return {
         "profile_diff": diff,

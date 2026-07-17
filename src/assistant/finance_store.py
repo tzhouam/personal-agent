@@ -17,6 +17,8 @@ from pathlib import Path
 
 import yaml
 
+from .locks import locked_transaction
+
 CATEGORIES = ["food", "transport", "housing", "utilities", "entertainment",
               "shopping", "health", "education", "travel", "salary", "bonus",
               "investment", "transfer", "other"]
@@ -32,6 +34,7 @@ class FinanceStore:
         """Bind to `finance.yaml` inside `repo_dir` (the profile git repo)."""
         self.repo_dir = repo_dir
         self.path = repo_dir / self.FILENAME
+        self._lock_file = repo_dir.parent / "write.lock"
 
     def load(self) -> dict:
         """Parsed store, or an empty scaffold when missing/empty."""
@@ -42,13 +45,16 @@ class FinanceStore:
     def _save(self, data: dict, message: str) -> None:
         """Write back and git-commit (best-effort) so the ledger is auditable."""
         self.repo_dir.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp.replace(self.path)  # atomic — readers never see a torn file
         if (self.repo_dir / ".git").exists():
             subprocess.run(["git", "add", self.FILENAME], cwd=self.repo_dir,
                            capture_output=True)
             subprocess.run(["git", "commit", "-q", "-m", message], cwd=self.repo_dir,
                            capture_output=True)
 
+    @locked_transaction
     def add(self, kind: str, amount: float, category: str = "other",
             note: str = "", when: str = "", time: str = "", currency: str = "CNY",
             source: str = "chat") -> tuple[str, dict | None]:
@@ -129,6 +135,7 @@ class FinanceStore:
                 and r["currency"] == record["currency"]
                 and str(r["date"]) == str(record["date"])]
 
+    @locked_transaction
     def set_category(self, record_id: str, category: str) -> str | None:
         """Recategorize an active record (owner corrections like 物业费 →
         housing). Returns the old category, or None when the id is unknown
@@ -142,6 +149,7 @@ class FinanceStore:
                 return old
         return None
 
+    @locked_transaction
     def void(self, record_id: str) -> bool:
         """Mark a record voided (never delete). True if one was voided."""
         data = self.load()
