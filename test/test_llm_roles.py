@@ -378,3 +378,238 @@ def test_mixture_chat_abandons_slow_proposer(monkeypatch):
     out = llm.complete("batch job", role="pipeline")
     assert time.monotonic() - t0 >= 5                # waited for slowpoke
     assert "late answer" in out or "answer-from-fastie" in out
+
+
+# ── provider circuit breaker + all-fail fallback (MoA resilience) ─────────
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clean_breaker():
+    llm_mod._reset_breaker()
+    yield
+    llm_mod._reset_breaker()
+
+
+class _Err(Exception):
+    """Stub API error carrying a status_code (non-retryable → fast tests)."""
+    def __init__(self, status=None, msg="boom"):
+        super().__init__(msg)
+        if status is not None:
+            self.status_code = status
+
+
+def _reset400():
+    return _Err(400, "recvAddress(..) failed: Connection reset by peer")
+
+
+def _scripted(monkeypatch, behavior, calls):
+    """Fake Anthropic client whose per-model behavior comes from `behavior`:
+    model → callable(kw) returning text (or raising)."""
+    class Resp:
+        def __init__(self, text):
+            self.content = [type("B", (), {"type": "text", "text": text})()]
+            self.stop_reason = "end_turn"; self.usage = None
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    calls.append(kw["model"])
+                    return Resp(behavior[kw["model"]](kw))
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+
+
+def _mix_settings(**kw):
+    return _settings(llm_mixture={
+        "members": [{"model": "m1", "base_url": "https://prov-a/x", "api_key": "ka"},
+                    {"model": "m2", "base_url": "https://prov-b/x", "api_key": "kb"}],
+        "aggregator": {"model": "agg", "base_url": "https://prov-c/x", "api_key": "kc"},
+        "roles": ["pipeline"]}, **kw)
+
+
+def _raise(exc):
+    def f(kw):
+        raise exc
+    return f
+
+
+def test_classify_failure_scopes():
+    import httpx
+    assert llm_mod._classify_failure(_Err(429)) == "prov"
+    assert llm_mod._classify_failure(_Err(401)) == "prov"
+    assert llm_mod._classify_failure(_reset400()) == "prov"
+    assert llm_mod._classify_failure(_Err(500)) == "model"
+    assert llm_mod._classify_failure(_Err(400, "invalid param")) is None
+    assert llm_mod._classify_failure(TypeError("bug")) is None
+    req = httpx.Request("POST", "https://x")
+    assert llm_mod._classify_failure(
+        llm_mod.anthropic.APIConnectionError(request=req)) == "prov"
+
+
+def test_allfail_falls_back_to_aggregator(monkeypatch):
+    calls = []
+    _scripted(monkeypatch, {"m1": _raise(_reset400()), "m2": _raise(_reset400()),
+                            "agg": lambda kw: "AGG-DIRECT"}, calls)
+    out = LLM(_mix_settings()).complete("q", role="pipeline")
+    assert out == "AGG-DIRECT"                      # no RuntimeError
+    assert calls.count("agg") == 1
+
+
+def test_fallback_chain_role_then_default(monkeypatch):
+    calls = []
+    _scripted(monkeypatch, {
+        "m1": _raise(_reset400()), "m2": _raise(_reset400()),
+        "agg": lambda kw: "",                        # blank = failed fallback
+        "role-model": lambda kw: "ROLE-ANSWER",
+        "default-model": lambda kw: "unused"}, calls)
+    llm = LLM(_mix_settings(llm_roles={"pipeline": {
+        "model": "role-model", "base_url": "https://prov-d/x", "api_key": "kd"}}))
+    assert llm.complete("q", role="pipeline") == "ROLE-ANSWER"
+    assert calls.count("agg") == 1                  # tried, blank, moved on
+
+
+def test_fallback_dedupes_aggregator_sharing_member_route(monkeypatch):
+    calls = []
+    _scripted(monkeypatch, {"m1": _raise(_reset400()), "m2": _raise(_reset400()),
+                            "default-model": lambda kw: "DEFAULT-ANSWER"}, calls)
+    # no explicit aggregator → agg IS members[0]; its route already failed
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1", "base_url": "https://prov-a/x", "api_key": "ka"},
+                    {"model": "m2", "base_url": "https://prov-b/x", "api_key": "kb"}],
+        "roles": ["pipeline"]}))
+    assert llm.complete("q", role="pipeline") == "DEFAULT-ANSWER"
+    assert calls.count("m1") == 1                   # never re-attempted as aggregator
+
+
+def test_role_route_overlapping_failed_member_skipped(monkeypatch):
+    calls = []
+    _scripted(monkeypatch, {"m1": _raise(_reset400()), "m2": _raise(_reset400()),
+                            "agg": _raise(_reset400()),
+                            "default-model": lambda kw: "DEFAULT-ANSWER"}, calls)
+    # role route == m2's exact route → must be skipped in the chain
+    llm = LLM(_mix_settings(llm_roles={"pipeline": {
+        "model": "m2", "base_url": "https://prov-b/x", "api_key": "kb"}}))
+    assert llm.complete("q", role="pipeline") == "DEFAULT-ANSWER"
+    assert calls.count("m2") == 1
+
+
+def test_breaker_skips_sick_member_after_threshold(monkeypatch):
+    calls = []
+    _scripted(monkeypatch, {"m1": lambda kw: "answer-from-m1",
+                            "m2": _raise(_reset400()),
+                            "agg": lambda kw: "SYNTH"}, calls)
+    for turn in range(3):                            # fresh LLM per turn (per-request)
+        out = LLM(_mix_settings()).complete("q", role="pipeline")
+        assert out == "SYNTH"
+    # threshold=2: turns 1+2 attempted m2, turn 3 skipped it
+    assert calls.count("m2") == 2
+    assert calls.count("m1") == 3
+
+
+def test_cross_model_provider_suppression(monkeypatch):
+    calls = []
+    _scripted(monkeypatch, {"m1": lambda kw: "answer-from-m1",
+                            "m2": _raise(_reset400()),
+                            "m3": lambda kw: "answer-from-m3",
+                            "m4": lambda kw: "answer-from-m4",
+                            "agg": lambda kw: "SYNTH"}, calls)
+    for _ in range(2):                               # open prov-b (m2's provider)
+        LLM(_mix_settings()).complete("q", role="pipeline")
+    # m3 = DIFFERENT model on the same provider+credential → suppressed;
+    # m4 = same provider, DIFFERENT credential → not suppressed
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m3", "base_url": "https://prov-b/x", "api_key": "kb"},
+                    {"model": "m4", "base_url": "https://prov-b/x", "api_key": "OTHER"}],
+        "aggregator": {"model": "agg", "base_url": "https://prov-c/x", "api_key": "kc"},
+        "roles": ["pipeline"]}))
+    assert llm.complete("q", role="pipeline") == "SYNTH"
+    assert calls.count("m3") == 0                    # cross-model suppression
+    assert calls.count("m4") == 1                    # other tenant unaffected
+
+
+def test_call_local_provider_dedupe_in_fallback(monkeypatch):
+    calls = []
+    # aggregator = different model on m2's provider+credential; m1+m2 die with
+    # provider-scoped failures → the chain must NOT try agg on the dead provider
+    _scripted(monkeypatch, {"m1": _raise(_reset400()), "m2": _raise(_reset400()),
+                            "agg-on-b": lambda kw: "should not run",
+                            "default-model": lambda kw: "DEFAULT-ANSWER"}, calls)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1", "base_url": "https://prov-a/x", "api_key": "ka"},
+                    {"model": "m2", "base_url": "https://prov-b/x", "api_key": "kb"}],
+        "aggregator": {"model": "agg-on-b", "base_url": "https://prov-b/x",
+                       "api_key": "kb"},
+        "roles": ["pipeline"]}))
+    assert llm.complete("q", role="pipeline") == "DEFAULT-ANSWER"
+    assert calls.count("agg-on-b") == 0              # no fresh window on dead endpoint
+
+
+def test_multilayer_keeps_prior_proposals_on_later_failure(monkeypatch):
+    calls = []
+    seen = {"m1": 0}
+
+    def m1(kw):
+        seen["m1"] += 1
+        if seen["m1"] > 1:
+            raise _reset400()
+        return "L1-ANSWER"
+
+    _scripted(monkeypatch, {"m1": m1, "m2": _raise(_reset400()),
+                            "agg": lambda kw: "SYNTH:" + kw["messages"][0]["content"][-300:]},
+              calls)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "m1", "base_url": "https://prov-a/x", "api_key": "ka"},
+                    {"model": "m2", "base_url": "https://prov-b/x", "api_key": "kb"}],
+        "aggregator": {"model": "agg", "base_url": "https://prov-c/x", "api_key": "kc"},
+        "layers": 2, "roles": ["pipeline"]}))
+    out = llm.complete("q", role="pipeline")
+    assert out.startswith("SYNTH:") and "L1-ANSWER" in out   # layer-1 retained
+
+
+def test_fail_fast_when_everything_cooling(monkeypatch):
+    calls = []
+    _scripted(monkeypatch, {"m1": _raise(_reset400()), "m2": _raise(_reset400()),
+                            "agg": _raise(_reset400()),
+                            "default-model": _raise(_reset400())}, calls)
+    s = _mix_settings()
+    for _ in range(2):                               # open every route
+        with pytest.raises(RuntimeError):
+            LLM(s).complete("q", role="pipeline")
+    calls.clear()
+    with pytest.raises(RuntimeError):                # third call: zero attempts
+        LLM(s).complete("q", role="pipeline")
+    assert calls == []
+
+
+def test_probe_lease_and_stale_gen_units():
+    cooldown = 180
+    scopes = llm_mod._route_scopes(_settings(), "https://prov-z/x", "kz", "mz")
+    # open both scopes
+    for _ in range(2):
+        mode, gens, claimed = llm_mod._breaker_check(scopes, cooldown)
+        llm_mod._breaker_record(scopes, gens, claimed, "prov", 2, cooldown)
+        llm_mod._breaker_record(scopes, gens, claimed, "model", 2, cooldown)
+    assert llm_mod._breaker_check(scopes, cooldown)[0] == "open"
+    # force expiry → exactly one probe admitted
+    with llm_mod._BREAKER_LOCK:
+        for e in llm_mod._BREAKER.values():
+            e["until"] = 0.0
+    mode1, gens1, claimed1 = llm_mod._breaker_check(scopes, cooldown)
+    mode2, _, _ = llm_mod._breaker_check(scopes, cooldown)
+    assert mode1 == "probe" and mode2 == "open"      # single admission
+    # neutral outcome releases the lease → a new probe is possible
+    llm_mod._breaker_record(scopes, gens1, claimed1, None, 2, cooldown)
+    mode3, gens3, claimed3 = llm_mod._breaker_check(scopes, cooldown)
+    assert mode3 == "probe"
+    # STALE success (older gen) must not close the current open state
+    stale_gens = {k: g - 1 for k, g in gens3.items()}
+    llm_mod._breaker_record(scopes, stale_gens, frozenset(), "ok", 2, cooldown)
+    assert llm_mod._breaker_check(scopes, cooldown)[0] == "open"  # lease3 held
+    # a REAL probe success closes it
+    llm_mod._breaker_record(scopes, gens3, claimed3, "ok", 2, cooldown)
+    assert llm_mod._breaker_check(scopes, cooldown)[0] == "closed"

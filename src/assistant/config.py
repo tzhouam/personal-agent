@@ -175,6 +175,10 @@ class Settings(BaseSettings):
     moa_chat_proposer_timeout_s: int = 60   # chat-role MoA: abandon a proposer
                                             # slower than this once one proposal
                                             # is in (0 = wait for all)
+    moa_member_fail_threshold: int = 2      # consecutive provider/model failures
+                                            # before the circuit breaker opens
+    moa_member_cooldown_s: int = 180        # how long an open breaker skips the
+                                            # route (then one half-open probe)
     daily_run_hour: int = 7         # multi_tenant: from this local hour the poll
                                     # loop fans out the daily run per active user
                                     # (idempotent per day, §12)
