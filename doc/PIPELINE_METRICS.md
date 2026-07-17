@@ -1,6 +1,9 @@
 # Daily-Pipeline Metrics — per-step measurement plan
 
-Status: researched & designed 2026-07-09; not yet instrumented.
+Status: researched & designed 2026-07-09; **instrumented** since 2026-07-10 —
+`src/assistant/metrics.py` (per-phase extractors + the digest Health footer),
+the orchestrator's `_instrumented` wrapper, the weekly judge audit riding
+consolidation, and the adaptive paper quota. Baseline snapshot: [BASELINE.md](BASELINE.md).
 Sources: two verified sweeps — pipeline/LLM observability (Google SRE golden
 signals & pipeline SLOs, Monte Carlo data-observability pillars, RAGAS,
 LLM-as-judge/Zheng 2023, Langfuse cost conventions, BFCL, τ-bench pass^k,

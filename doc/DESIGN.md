@@ -278,11 +278,30 @@ profile, routines, finance, health) into any single-domain analysis.
 `task_runner.py` handles requests with no built-in pipeline (the copilot
 pattern): a bounded ReAct loop — one registry action per turn, real outcome
 fed back with the same `looks_failed` review as chat, adapt on failure,
-finish with a report. Budgets: 12 turns, 3 consecutive failures. Runs
-detached (`assistant task` via Popen, like trigger_run), persists every turn
-to `DATA_DIR/tasks/<id>.json`, and delivers the report over WeChat.
-`execute_task`/`plan_task`/`trigger_run` are excluded from its action set
-(no recursion, no surprise pipeline runs).
+finish with a report. Runs detached (`assistant task` via Popen, like
+trigger_run), persists every turn atomically to `DATA_DIR/tasks/<id>.json`
+(collision-safe ids), writes its own trace (`<id>-trace.jsonl`) and a numeric
+`task` metrics row, and delivers the report over WeChat.
+`execute_task`/`plan_task`/`trigger_run`/`approve_task` are excluded from its
+action set (no recursion, no surprise pipeline runs, no self-approval).
+
+**Execution depth adapts to difficulty.** Each task is first assessed (one
+cheap single-model call + deterministic keyword clamps that only raise the
+tier): *simple* → no plan, a 3-turn budget, every call single-model (no MoA);
+*medium* → a short persisted plan (drafted single-model), 12 turns, still no
+MoA; *complex* → the plan is drafted on the configured `task` role (the one
+MoA-worthy spot) and carries per-milestone status the model ticks each turn
+plus a verify check the finish report must address.
+
+**Approval is gated at action dispatch, at every tier.** The registry's
+`risky` metadata (`run_phase website` publishes; `reboot`) is the boundary —
+an unapproved task that reaches a risky action pauses as `awaiting_approval`
+with the pending action persisted and the owner notified ("批准请回复:
+批准任务 <id>"); a complex task whose assessment shows publishing intent
+pauses before its first step. The owner's `approve_task` action releases it
+(locked `awaiting_approval → queued → running` transitions, idempotent
+double-approval, resume from persisted steps — executed steps never replay,
+and terminal tasks refuse re-runs).
 
 ### Self-evolution
 
@@ -295,6 +314,19 @@ turn (`system_prompt()`), so learning changes behavior immediately;
 everything is git-audited, retire-only (never deleted), capped at 25 active
 (evolve-sourced rotate out first, owner rules never auto-evict), and
 near-duplicates are rejected.
+
+### Write concurrency
+
+One user's YAML stores share one git repo and one daemon serves chat, the
+pipeline, routines, and background tasks concurrently — so every mutating
+store method holds the per-user write lock for its whole load→mutate→save+
+commit transaction (`locks.locked_transaction`; the same reentrant
+`data_dir/write.lock` the chat executor's batch lock uses, so nesting is
+safe). Saves are atomic (`tmp` + `os.replace` — no torn reads), the daily
+profile update re-loads and applies its ops *inside* the lock (LLM call
+outside), and reminders/routines claim-before-send so a poll race can't
+double-fire and a concurrent cancel can't be lost. Locks are held for
+milliseconds — never across LLM or network calls.
 
 ### Proactive messaging
 
@@ -373,7 +405,7 @@ probes run non-interactively with a ✅/⚠️/❌ report.
 
 **Multi-model routing.** The `ANTHROPIC_*` settings are the default provider/model; `LLM_ROLES` (a JSON role→{model, base_url?, api_key?} map) routes task roles (chat, pipeline, research, task, evolve) to different models — and, since a model often lives on a different endpoint, different base URLs + keys — so e.g. chat runs on mimo-v2.5 while research runs on qwen3.6-plus at once. `LLM._resolve` maps role→(client, model) and caches one client per provider; an unset role falls back to the cheap or default model. When `LLM_MIXTURE` gives >=2 members, the listed roles run **Mixture-of-Agents** (Wang et al. 2024): every member proposes in parallel and an aggregator synthesizes one best answer (optionally over several refine layers) — trading ~2x cost/latency for quality on the offline reasoning roles. Each member and the aggregator is `{model, base_url?, api_key?}` (same shape as an `LLM_ROLES` entry), so proposers can live on different providers — e.g. MiMo + Qwen proposing into a DeepSeek aggregator — and a member reusing the default endpoint just omits `base_url`/`api_key`. The offline generation calls (research query-gen + summaries, résumé edit) carry a role so they participate; interactive paths (chat, `plan_task`, `web_search`) and pure judges stay single-model, to keep replies fast.
 
-Both are **degrade-safe by construction**: `LLM_ROLES`/`LLM_MIXTURE` are parsed by a tolerant validator (`config.py`, via `NoDecode`) that falls back to `{}` on malformed JSON rather than raising — a bad optional routing config must never crash startup, since every command builds `Settings()`. A common malform is a *multi-line* value in `.env`: `dotenv` reads only its first physical line unless the whole JSON is wrapped in `'single quotes'`, so keep each on one line or quote it. In the MoA path itself (`llm._mixture`), a proposer that errors is dropped and one that errors on a transient blip is retried (retry lives on `_call`, so members retry independently); if the aggregator raises *or returns empty* (e.g. a reasoning model that spends its whole budget on hidden thinking), it falls back to a surviving proposal rather than yielding nothing.
+Both are **degrade-safe by construction**: `LLM_ROLES`/`LLM_MIXTURE` are parsed by a tolerant validator (`config.py`, via `NoDecode`) that falls back to `{}` on malformed JSON rather than raising — a bad optional routing config must never crash startup, since every command builds `Settings()`. A common malform is a *multi-line* value in `.env`: `dotenv` reads only its first physical line unless the whole JSON is wrapped in `'single quotes'`, so keep each on one line or quote it. In the MoA path itself (`llm._mixture`), a proposer that errors is dropped and one that errors on a transient blip is retried (retry lives on `_call`, so members retry independently); if the aggregator raises *or returns empty* (e.g. a reasoning model that spends its whole budget on hidden thinking), it falls back to a surviving proposal rather than yielding nothing. Every mixture call is observable: each member/aggregator/fallback LLM span is stage-tagged, a parent `mixture` span summarizes the call, and a numeric `moa` metrics row (members, proposals_ok, aggregator_ok, fallback_used, abandoned, duration) lands in events.db even for chat/task turns that have no tracer — so MoA overhead is measurable against the cost metrics. `complete(..., mixture=False)` is the per-call escape hatch the task runner uses to keep simple/medium work single-model.
 
 Data lives under `DATA_DIR` (default `~/.personal-agent/`): `profile/` (git),
 `events.db`, `runs/<id>/`, `state.json`, `sessions/`, plus `todos.yaml`,

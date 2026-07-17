@@ -207,6 +207,109 @@ def probe_profile(s: Settings):
     return OK, f"profile.yaml ✓ · {aliases}"
 
 
+# Roles the code actually routes (llm.py): the five task roles plus the
+# cheap-tier aliases accepted by _CHEAP_ROLES.
+_KNOWN_ROLES = {"chat", "pipeline", "research", "task", "evolve",
+                "cheap", "bulk", "score"}
+_ROUTING_KEYS = ("LLM_ROLES", "LLM_MIXTURE")
+
+
+def _effective_raw(name: str, env_files: tuple | None = None) -> tuple[str, str]:
+    """The raw string pydantic-settings would resolve for env var `name`, plus
+    the source that supplied it ("process env" / the winning .env path / "").
+
+    Mirrors the precedence `Settings` uses: process environment over dotenv,
+    and later files in the env-file tuple over earlier ones (config.py: repo
+    `.env`, then CWD `.env`). The value is returned for *parsing* only — callers
+    must never print it (LLM_ROLES/LLM_MIXTURE entries can carry `api_key`)."""
+    import os
+
+    if os.environ.get(name):
+        return os.environ[name], "process env"
+    from dotenv import dotenv_values
+
+    files = env_files or (_REPO_ROOT / ".env", Path(".env"))
+    for path in reversed([Path(f) for f in files]):
+        if path.is_file():
+            value = (dotenv_values(path).get(name) or "").strip()
+            if value:
+                return value, path.name if path.parent == Path(".") else str(path)
+    return "", ""
+
+
+def _summarize_roles(parsed: dict) -> tuple[list[str], str]:
+    """Safe one-line summary of a parsed LLM_ROLES dict (role→model ids only;
+    never keys/URLs) plus structural warnings."""
+    warns, bits = [], []
+    for role, spec in parsed.items():
+        model = spec.get("model") if isinstance(spec, dict) else None
+        bits.append(f"{role}→{model or '?'}")
+        if role not in _KNOWN_ROLES:
+            warns.append(f"unknown role {role!r} (known: {', '.join(sorted(_KNOWN_ROLES))})")
+        if not model:
+            warns.append(f"role {role!r} has no \"model\"")
+    return warns, "roles " + (", ".join(bits) or "(empty)")
+
+
+def _summarize_mixture(parsed: dict) -> tuple[list[str], str]:
+    """Safe one-line summary of a parsed LLM_MIXTURE dict (member/aggregator
+    model ids + roles) plus structural warnings — including the chat-latency
+    one (priority: chat stays single-model by default)."""
+    warns = []
+    members = parsed.get("members") or []
+    models = [m.get("model") if isinstance(m, dict) else None for m in members]
+    if members and any(not m for m in models):
+        warns.append('a mixture member has no "model"')
+    if len(members) < 2:
+        warns.append("fewer than 2 members — MoA stays off")
+    agg = parsed.get("aggregator") or (members[0] if members else {})
+    agg_model = agg.get("model", "?") if isinstance(agg, dict) else "?"
+    roles = parsed.get("roles") or ["pipeline", "research", "task", "evolve"]
+    if "chat" in roles:
+        warns.append("mixture includes the chat role — MoA ~doubles reply "
+                     "latency; interactive chat is best single-model")
+    return warns, (f"mixture {len(members)} member(s) "
+                   f"({', '.join(str(m or '?') for m in models) or 'none'}) "
+                   f"→ agg {agg_model}; roles {', '.join(map(str, roles))}")
+
+
+def probe_model_routing(s: Settings, env_files: tuple | None = None):
+    """Diagnose `LLM_ROLES` / `LLM_MIXTURE` — the two optional JSON knobs that
+    `config.py` deliberately degrades to `{}` on malformed input so a broken
+    routing config can never crash startup. The flip side is that a typo
+    silently turns the whole feature off; this probe makes that visible. Reads
+    the effective raw value from the same ordered sources Settings uses and
+    names the winning source — never the value. Returns `(status, detail)`."""
+    import json
+
+    parts, warns, failed = [], [], False
+    for name, summarize in ((_ROUTING_KEYS[0], _summarize_roles),
+                            (_ROUTING_KEYS[1], _summarize_mixture)):
+        raw, source = _effective_raw(name, env_files)
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            failed = True
+            parts.append(f"{name} malformed JSON (from {source}) — dotenv reads "
+                         "a multi-line value as only its first physical line; "
+                         "keep it on one line or wrap the whole value in "
+                         "'single quotes'")
+            continue
+        if not isinstance(parsed, dict):
+            failed = True
+            parts.append(f"{name} is valid JSON but not an object (from {source})")
+            continue
+        w, summary = summarize(parsed)
+        warns += w
+        parts.append(summary)
+    if not parts:
+        return SKIP, "LLM_ROLES/LLM_MIXTURE unset — every role runs the default model"
+    detail = " · ".join(parts + [f"⚠ {w}" for w in warns])
+    return (FAIL if failed else WARN if warns else OK), detail
+
+
 def probe_schedule(s: Settings):
     """Check the OpenClaw cron has both the daily-digest and weekly-consolidate
     jobs registered (WARN, not FAIL, since cron/systemd is a valid alternative
@@ -291,7 +394,8 @@ STEPS = [
 ]
 
 # doctor-only checks (no fields to prompt for)
-EXTRA_CHECKS = [("Collectors", probe_collectors), ("Profile", probe_profile),
+EXTRA_CHECKS = [("Model routing", probe_model_routing),
+                ("Collectors", probe_collectors), ("Profile", probe_profile),
                 ("Schedule", probe_schedule)]
 
 

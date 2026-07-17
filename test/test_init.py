@@ -4,7 +4,8 @@ from pathlib import Path
 
 import assistant.init_wizard as iw
 from assistant.init_wizard import (FAIL, OK, SKIP, WARN, probe_email, probe_marks,
-                                   probe_search, run_check, run_wizard, upsert_env)
+                                   probe_model_routing, probe_search, run_check,
+                                   run_wizard, upsert_env)
 
 
 # ── env editing ──────────────────────────────────────────────────────
@@ -50,6 +51,67 @@ def test_probe_search_fallback_warning(settings):
     assert probe_search(settings)[0] == WARN
     assert probe_search(settings.model_copy(update={"gemini_api_key": "g"})) \
         == (OK, "Gemini grounding configured")
+
+
+def test_probe_model_routing_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_ROLES", raising=False)
+    monkeypatch.delenv("LLM_MIXTURE", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("OTHER=1\n")
+    status, detail = probe_model_routing(None, env_files=(env,))
+    assert status == SKIP and "unset" in detail
+
+
+def test_probe_model_routing_malformed_multiline(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_ROLES", raising=False)
+    monkeypatch.delenv("LLM_MIXTURE", raising=False)
+    env = tmp_path / ".env"
+    # the classic trap: multi-line JSON without single quotes — dotenv sees
+    # only the first physical line
+    env.write_text('LLM_MIXTURE={"members":[\n  {"model":"m1"},{"model":"m2"}]}\n')
+    status, detail = probe_model_routing(None, env_files=(env,))
+    assert status == FAIL
+    assert "malformed JSON" in detail and "single quotes" in detail
+    assert env.name in detail  # names the source
+
+
+def test_probe_model_routing_valid_summary_no_secrets(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_ROLES", raising=False)
+    monkeypatch.delenv("LLM_MIXTURE", raising=False)
+    env = tmp_path / ".env"
+    env.write_text(
+        'LLM_ROLES={"chat": {"model": "mimo-v2.5"}, '
+        '"research": {"model": "qwen3.6-plus", "api_key": "sk-SECRET-123"}}\n'
+        'LLM_MIXTURE={"members": [{"model": "m1"}, {"model": "m2"}], '
+        '"aggregator": {"model": "m2"}, "roles": ["pipeline"]}\n')
+    status, detail = probe_model_routing(None, env_files=(env,))
+    assert status == OK
+    assert "chat→mimo-v2.5" in detail and "research→qwen3.6-plus" in detail
+    assert "2 member(s)" in detail and "agg m2" in detail
+    assert "sk-SECRET-123" not in detail  # never echo values
+
+
+def test_probe_model_routing_warnings(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_ROLES", raising=False)
+    monkeypatch.delenv("LLM_MIXTURE", raising=False)
+    env = tmp_path / ".env"
+    env.write_text(
+        'LLM_ROLES={"chta": {"model": "m"}}\n'   # typo'd role name
+        'LLM_MIXTURE={"members": [{"model": "m1"}, {"model": "m2"}], '
+        '"roles": ["chat"]}\n')                  # MoA on interactive chat
+    status, detail = probe_model_routing(None, env_files=(env,))
+    assert status == WARN
+    assert "unknown role 'chta'" in detail
+    assert "chat role" in detail and "single-model" in detail
+
+
+def test_probe_model_routing_process_env_wins(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text('LLM_ROLES={"chat": {"model": "from-file"}}\n')
+    monkeypatch.setenv("LLM_ROLES", '{"chat": {"model": "from-env"}}')
+    monkeypatch.delenv("LLM_MIXTURE", raising=False)
+    status, detail = probe_model_routing(None, env_files=(env,))
+    assert status == OK and "chat→from-env" in detail and "from-file" not in detail
 
 
 # ── doctor ───────────────────────────────────────────────────────────

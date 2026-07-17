@@ -5,8 +5,8 @@ trigger: about to live-test chat actions, stores, or the daemon with made-up dat
 modules: [finance_store, health_store, lessons_store, todo_store, serve]
 status: active
 created_at: 2026-07-12
-last_used_at: 2026-07-12
-run_count: 0
+last_used_at: 2026-07-17
+run_count: 1
 ---
 
 # Verify against scratch data, never the live stores
@@ -44,3 +44,11 @@ dir holds all test writes.
   behave identically under a scratch `DATA_DIR`.
 - Deleting owner rows to clean up your mess — only ever remove rows you
   yourself fabricated, with content verification, and say so.
+- **pytest helpers that build `Settings(...)` by hand without pinning
+  `data_dir`** — the default is the LIVE `~/.personal-agent`, and any code
+  path that writes through settings (e.g. the MoA `moa` metrics sink in
+  `llm.py`, 2026-07-17: 138 stray rows in the live root events.db from
+  `test_llm_roles._settings`) lands there. Every such helper needs a
+  `data_dir=tmp_path/...` kwarg or an autouse `monkeypatch.setenv("DATA_DIR",
+  str(tmp_path/"data"))` fixture; after adding a new settings-driven write
+  path, rerun the suite and check the live dir gained nothing.

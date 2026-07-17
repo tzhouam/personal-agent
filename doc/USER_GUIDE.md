@@ -357,8 +357,19 @@ Hand it something with no built-in pipeline — *"查一下明天深圳的天气
 that searches, acts through its own capabilities (reminders, todos, ledgers,
 phases), reviews each result, adapts after failures, and messages you the
 report on WeChat when done (`/task`, or just ask). Each run's full step
-trace is kept under `~/.personal-agent/tasks/` for audit. Budgeted: at most
-12 steps, and three consecutive failures stop it with a partial report.
+trace is kept under `~/.personal-agent/tasks/` for audit.
+
+Effort matches the task: a trivial ask runs a couple of quick steps with no
+planning overhead; a multi-step one gets a short plan first; a genuinely
+complex one tracks plan milestones as it works and verifies before
+reporting. Budgets stay hard: at most 12 steps (3 for trivial tasks), and
+three consecutive failures stop it with a partial report.
+
+**Outward steps wait for you.** If a task reaches something with outside
+effects — publishing the website, restarting the agent — it pauses instead
+of acting, messages you the plan and the pending step, and only continues
+after you reply **批准任务 \<task-id\>** (or "approve task \<id\>"). Nothing
+outward happens on the agent's own authority.
 
 ### Teaching it (self-evolution)
 
@@ -517,6 +528,7 @@ directly.
 |---|---|
 | No digest email arrived | Check delivery: `assistant send-test-email`. If that works, check the run: `assistant run --dry-run` and read the console. |
 | LLM errors ("authentication", "no JSON found") | Bad/expired key → `assistant init --check`. "No JSON / truncated" on a reasoning model means the token budget was too low — already tuned, but see the `llm-json-truncation-reasoning-models` skill if you hit it in new code. |
+| `LLM_ROLES`/`LLM_MIXTURE` seems ignored | Probably malformed JSON — the config deliberately degrades to "feature off" rather than crashing. `assistant init --check` (the **Model routing** line) names the broken variable and its source; the usual cause is a multi-line value not wrapped in 'single quotes'. It also warns when the mixture covers the `chat` role (MoA ~doubles reply latency). |
 | Run crashed midway | `assistant run --resume` re-enters the exact phase it stopped at, reusing saved artifacts. |
 | Profile learned something wrong | It's git: `git -C ~/.personal-agent/profile revert HEAD`. Then fix `aliases.yaml` or the protected sections if needed. |
 | A collector returns nothing | Chrome: the History file is locked while Chrome runs / may not exist on this machine (the agent skips it gracefully). Gmail: needs SMTP creds. GitHub: check the token. `--check` shows each collector's status. |

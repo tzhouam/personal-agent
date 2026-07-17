@@ -1,0 +1,236 @@
+{
+  "generated": "2026-07-17T17:35:30",
+  "window_days": 30,
+  "users": {
+    "user-1": {
+      "runs_30d": 12,
+      "run_duration_s": {
+        "p50": 726.98,
+        "p95": 1215.59
+      },
+      "runs_with_errors": 1,
+      "phase": {
+        "collect": {
+          "n": 17,
+          "dur_p50": 16.06,
+          "dur_p95": 21.15,
+          "error_runs": 1
+        },
+        "profile": {
+          "n": 16,
+          "dur_p50": 94.8,
+          "dur_p95": 190.2,
+          "error_runs": 0
+        },
+        "resume": {
+          "n": 16,
+          "dur_p50": 0.02,
+          "dur_p95": 0.19,
+          "error_runs": 0
+        },
+        "digest": {
+          "n": 16,
+          "dur_p50": 77.16,
+          "dur_p95": 207.3,
+          "error_runs": 0
+        },
+        "todos": {
+          "n": 16,
+          "dur_p50": 152.02,
+          "dur_p95": 255.13,
+          "error_runs": 0
+        },
+        "research": {
+          "n": 12,
+          "dur_p50": 436.28,
+          "dur_p95": 599.49,
+          "error_runs": 0
+        },
+        "website": {
+          "n": 12,
+          "dur_p50": 3.27,
+          "dur_p95": 4.06,
+          "error_runs": 1
+        },
+        "deliver": {
+          "n": 12,
+          "dur_p50": 4.68,
+          "dur_p95": 5.7,
+          "error_runs": 0
+        },
+        "curate": {
+          "n": 12,
+          "dur_p50": 0.04,
+          "dur_p95": 0.06,
+          "error_runs": 0
+        }
+      },
+      "profile_ops": {
+        "applied": 102,
+        "rejected": 22
+      },
+      "digest": {
+        "red": 323,
+        "suppressed": 161
+      },
+      "observations_per_run": {
+        "p50": 68.0,
+        "zero_runs": 0
+      },
+      "website_pushed": {
+        "ok": 11,
+        "n": 12
+      },
+      "email_sent": {
+        "ok": 9,
+        "n": 12
+      },
+      "chat": {
+        "turns_30d": 123,
+        "latency_s": {
+          "p50": 41.04,
+          "p95": 196.59,
+          "max": 508.1
+        },
+        "turns_with_actions": 73,
+        "turns_with_repair": 2,
+        "repair_rounds_total": 2,
+        "turns_failures_left": 2,
+        "turns_over_60s": 44,
+        "turns_over_120s": 14
+      },
+      "tasks": {
+        "total": 3,
+        "done": 3,
+        "aborted": 0,
+        "error": 0,
+        "steps_p50": 5
+      },
+      "llm_usage_traced": {
+        "runs_traced": 16,
+        "llm_calls": 230,
+        "prompt_tokens": 794216,
+        "completion_tokens": 679061,
+        "cache_read_tokens": 57664,
+        "calls_per_run": 14.4,
+        "prompt_tok_per_run": 49638,
+        "completion_tok_per_run": 42441
+      }
+    },
+    "user-2": {
+      "runs_30d": 1,
+      "run_duration_s": {
+        "p50": 0.08,
+        "p95": 0.08
+      },
+      "runs_with_errors": 1,
+      "phase": {
+        "collect": {
+          "n": 1,
+          "dur_p50": 0.04,
+          "dur_p95": 0.04,
+          "error_runs": 1
+        },
+        "profile": {
+          "n": 1,
+          "dur_p50": 0.0,
+          "dur_p95": 0.0,
+          "error_runs": 1
+        },
+        "resume": {
+          "n": 1,
+          "dur_p50": 0.0,
+          "dur_p95": 0.0,
+          "error_runs": 1
+        },
+        "digest": {
+          "n": 1,
+          "dur_p50": 0.0,
+          "dur_p95": 0.0,
+          "error_runs": 1
+        },
+        "todos": {
+          "n": 1,
+          "dur_p50": 0.0,
+          "dur_p95": 0.0,
+          "error_runs": 0
+        },
+        "research": {
+          "n": 1,
+          "dur_p50": 0.0,
+          "dur_p95": 0.0,
+          "error_runs": 1
+        },
+        "website": {
+          "n": 1,
+          "dur_p50": 0.0,
+          "dur_p95": 0.0,
+          "error_runs": 1
+        },
+        "deliver": {
+          "n": 1,
+          "dur_p50": 0.0,
+          "dur_p95": 0.0,
+          "error_runs": 1
+        },
+        "curate": {
+          "n": 1,
+          "dur_p50": 0.0,
+          "dur_p95": 0.0,
+          "error_runs": 0
+        }
+      },
+      "profile_ops": {
+        "applied": 0,
+        "rejected": 0
+      },
+      "digest": {
+        "red": 0,
+        "suppressed": 0
+      },
+      "observations_per_run": {
+        "p50": 0.0,
+        "zero_runs": 1
+      },
+      "website_pushed": {
+        "ok": 0,
+        "n": 1
+      },
+      "email_sent": {
+        "ok": 0,
+        "n": 1
+      },
+      "chat": {
+        "turns_30d": 0,
+        "latency_s": {
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "turns_with_actions": 0,
+        "turns_with_repair": 0,
+        "repair_rounds_total": 0,
+        "turns_failures_left": 0,
+        "turns_over_60s": 0,
+        "turns_over_120s": 0
+      },
+      "tasks": {
+        "total": 0,
+        "done": 0,
+        "aborted": 0,
+        "error": 0,
+        "steps_p50": null
+      },
+      "llm_usage_traced": {
+        "runs_traced": 1,
+        "llm_calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cache_read_tokens": 0,
+        "calls_per_run": 0.0,
+        "prompt_tok_per_run": 0,
+        "completion_tok_per_run": 0
+      }
+    }
+  }
+}
