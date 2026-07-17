@@ -321,3 +321,40 @@ process.exit(0);
   writeFileSync(envPath, "");
   console.log("self-echo guard: PASS");
 }
+
+// ── failure-text selection + reply_to passthrough (late-reply routing) ──
+{
+  const { failureText, STILL_WORKING } = await import("./index.js");
+  if (failureText({ name: "TimeoutError" }) !== STILL_WORKING)
+    throw new Error("timeout must read as still-working");
+  if (failureText({ name: "AbortError" }) !== STILL_WORKING)
+    throw new Error("abort must read as still-working");
+  if (failureText({ name: "TypeError", message: "fetch failed" }) !== SAFE)
+    throw new Error("connection failure must read as unavailable");
+  if (failureText(undefined) !== SAFE) throw new Error("unknown error → SAFE");
+
+  // reply_to rides in the /chat body so the daemon can late-deliver there
+  const envPath = join(work, "no-such.env");
+  writeFileSync(envPath, "DEPLOYMENT_MODE=multi_tenant\nSERVE_TOKEN=bridgetok\n");
+  const reqs = [];
+  const dae = createServer((req, res) => {
+    let raw = ""; req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      reqs.push(JSON.parse(raw));
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ reply: "ok" }));
+    });
+  });
+  await new Promise((resolve) => dae.listen(0, "127.0.0.1", resolve));
+  process.env.PERSONAL_AGENT_PORT = String(dae.address().port);
+  await dispatchHandler(
+    { body: "hello", channel: "openclaw-weixin" },
+    { channelId: "openclaw-weixin", accountId: "wxR", sessionKey: "agent:main:main",
+      conversationId: "peer-42@im.wechat" });
+  if (reqs[0]?.reply_to !== "peer-42@im.wechat")
+    throw new Error("reply_to missing from chat body: " + JSON.stringify(reqs[0]));
+  dae.close();
+  process.env.PERSONAL_AGENT_PORT = "1";
+  writeFileSync(envPath, "");
+  console.log("failure text + reply_to routing: PASS");
+}

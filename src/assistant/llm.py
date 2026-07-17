@@ -107,7 +107,7 @@ class LLM:
                 {"type": "text", "text": prompt}]
         if model is None and role and role in self._mixture_roles \
                 and len(self.mixture.get("members", [])) >= 2:
-            return self._mixture(content, system, max_tokens)
+            return self._mixture(content, system, max_tokens, role=role)
         client, model_id = self._resolve(role, model)
         return self._call(client, model_id, content, system, max_tokens)
 
@@ -155,19 +155,29 @@ class LLM:
                 max_tokens)
         return "".join(b.text for b in resp.content if b.type == "text")
 
-    def _mixture(self, content, system: str | None, max_tokens: int) -> str:
+    def _mixture(self, content, system: str | None, max_tokens: int,
+                 role: str | None = None) -> str:
         """Mixture-of-Agents: every member model proposes an answer in parallel,
         then the aggregator synthesizes them into one (Wang et al. 2024). With
         `layers` > 1 each further round of proposers refines against the last
         round's answers before the final aggregation. A member that errors is
-        dropped as long as one proposal survives."""
+        dropped as long as one proposal survives.
+
+        **Chat latency bound**: for the interactive `chat` role, a proposer
+        slower than `moa_chat_proposer_timeout_s` is abandoned once at least one
+        proposal is in — a degraded provider must not stall a chat turn for
+        minutes (2026-07-17 noon incident: an 8-minute turn outlived the bridge
+        wait). Offline roles (pipeline/research/task/evolve) keep waiting for
+        every proposer — there, quality beats latency."""
         import contextvars
         import logging
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
         members = self.mixture["members"]
         agg = self.mixture.get("aggregator") or members[0]
         layers = max(1, int(self.mixture.get("layers", 1)))
+        timeout_s = (self.settings.moa_chat_proposer_timeout_s
+                     if role == "chat" else 0)
 
         def propose(member, layer_input):
             try:
@@ -186,10 +196,33 @@ class LLM:
             # tracer — so proposer llm spans would vanish). One copy per member,
             # captured here in the calling thread. (tracing.py, DESIGN §3.)
             ctxs = [contextvars.copy_context() for _ in members]
-            with ThreadPoolExecutor(max_workers=min(8, len(members))) as ex:
-                responses = [r for r in ex.map(
-                    lambda cm: cm[0].run(propose, cm[1], layer_input),
-                    zip(ctxs, members)) if r]
+            if timeout_s > 0:
+                # Bounded wait: collect what finished inside the window; if
+                # nothing did, wait for the FIRST completion (the provider SDK's
+                # own timeouts bound that) — never proceed with zero proposals.
+                # Abandoned threads finish in the background (can't be killed);
+                # shutdown(wait=False) just stops us from blocking on them.
+                ex = ThreadPoolExecutor(max_workers=min(8, len(members)))
+                futs = [ex.submit(ctx.run, propose, m, layer_input)
+                        for ctx, m in zip(ctxs, members)]
+                done, pending = wait(futs, timeout=timeout_s)
+                results = [f.result() for f in done]
+                while not any(results) and pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    results += [f.result() for f in done]
+                for f in pending:
+                    f.cancel()
+                ex.shutdown(wait=False)
+                if pending:
+                    logging.getLogger("assistant").warning(
+                        "mixture: abandoned %d proposer(s) still running after "
+                        "%ds (chat latency bound)", len(pending), timeout_s)
+                responses = [r for r in results if r]
+            else:
+                with ThreadPoolExecutor(max_workers=min(8, len(members))) as ex:
+                    responses = [r for r in ex.map(
+                        lambda cm: cm[0].run(propose, cm[1], layer_input),
+                        zip(ctxs, members)) if r]
             if not responses:
                 raise RuntimeError("all mixture proposers failed")
 

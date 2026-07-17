@@ -38,8 +38,9 @@ def enqueue_daily_runs(settings: Settings, day: str | None = None) -> list[str]:
     for uid in reg.active():
         if queue.enqueue(uid, "run", {}, dedupe_key=f"{uid}:run:{day}") is not None:
             enqueued.append(uid)
-    log.info("scheduler: enqueued daily run for %d/%d active users on %s",
-             len(enqueued), len(reg.active()), day)
+    if enqueued:  # ticked every poll cycle — only fresh enqueues are news
+        log.info("scheduler: enqueued daily run for %d/%d active users on %s",
+                 len(enqueued), len(reg.active()), day)
     return enqueued
 
 
@@ -71,5 +72,6 @@ def enqueue_weekly_jobs(settings: Settings, week: str | None = None) -> list[str
     if queue.enqueue(GLOBAL_UID, "self_improve", {"days": 7},
                      dedupe_key=f"global:self_improve:{week}") is not None:
         enqueued.append("global:self_improve")
-    log.info("scheduler: weekly fan-out %s → %d jobs", week, len(enqueued))
+    if enqueued:  # ticked every poll cycle — only fresh enqueues are news
+        log.info("scheduler: weekly fan-out %s → %d jobs", week, len(enqueued))
     return enqueued

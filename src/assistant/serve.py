@@ -273,7 +273,28 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                                            image_paths=images or None)
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
                     store.append(skey, noted.strip(), reply)
-                    return self._send(200, {"reply": reply})
+                    try:
+                        return self._send(200, {"reply": reply})
+                    except BrokenPipeError:
+                        # The bridge gave up waiting (its timeout) and already
+                        # told the user "still computing" — a finished answer
+                        # must never be dropped (2026-07-17 noon incident: an
+                        # 8-min image turn outlived the 300s bridge wait and the
+                        # reply was lost). Deliver it late into the ORIGINATING
+                        # conversation (the bridge passes account_id + reply_to
+                        # in multi_tenant — works for every tenant, no announce
+                        # config); single_user falls back to the owner announce.
+                        # Best-effort, never raises.
+                        from .notify import send_to_conversation, send_wechat
+
+                        late = "（补发刚才那条的回复）\n" + reply
+                        acct = str(body.get("account_id") or "")
+                        convo = str(body.get("reply_to") or "")
+                        note = (send_to_conversation(settings, acct, convo, late)
+                                if acct and convo else send_wechat(settings, late))
+                        log.warning("serve: /chat reply outlived the bridge "
+                                    "wait — late delivery: %s", note)
+                        return None
 
                 if self.path == "/run":
                     params = {"resume": True} if body.get("resume") else {}
@@ -293,7 +314,10 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                 return self._send(404, {"error": f"no route {self.path}"})
             except Exception as exc:  # any handler bug → JSON 500, not a hang
                 log.exception("serve: %s failed", self.path)
-                return self._send(500, {"error": str(exc)})
+                try:
+                    return self._send(500, {"error": str(exc)})
+                except BrokenPipeError:  # caller already gone (bridge timeout)
+                    return None
 
     server = ThreadingHTTPServer(("127.0.0.1", boot.serve_port if port is None else port),
                                  Handler)

@@ -331,3 +331,50 @@ def test_malformed_mixture_config_degrades(monkeypatch):
     assert [m["model"] for m in s2.llm_mixture["members"]] == ["a", "b"]
     # a non-object JSON (e.g. a list) also degrades rather than mis-typing
     assert _settings(llm_roles="[1,2,3]").llm_roles == {}
+
+
+def test_mixture_chat_abandons_slow_proposer(monkeypatch):
+    """Chat latency bound: a proposer slower than moa_chat_proposer_timeout_s is
+    abandoned once a proposal is in — a degraded provider can't stall the turn
+    for minutes. Offline roles still wait for everyone."""
+    import time
+
+    class Resp:
+        def __init__(self, text):
+            self.content = [type("B", (), {"type": "text", "text": text})()]
+            self.stop_reason = "end_turn"; self.usage = None
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    model = kw["model"]
+                    if model == "slowpoke":
+                        time.sleep(5)               # far past the 1s bound
+                        return Resp("late answer")
+                    if model == "aggregator":
+                        return Resp("SYNTH:" + kw["messages"][0]["content"][-200:])
+                    return Resp(f"answer-from-{model}")
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    settings = _settings(llm_mixture={
+        "members": [{"model": "fastie"}, {"model": "slowpoke"}],
+        "aggregator": {"model": "aggregator"},
+        "roles": ["chat", "pipeline"]})
+    settings = settings.model_copy(update={"moa_chat_proposer_timeout_s": 1})
+    llm = LLM(settings)
+
+    t0 = time.monotonic()
+    out = llm.complete("quick question", role="chat")
+    took = time.monotonic() - t0
+    assert took < 4                                  # did NOT wait for slowpoke
+    assert "answer-from-fastie" in out               # aggregated the survivor
+    assert "late answer" not in out
+
+    # offline role: same mixture waits for every proposer (no bound applied)
+    t0 = time.monotonic()
+    out = llm.complete("batch job", role="pipeline")
+    assert time.monotonic() - t0 >= 5                # waited for slowpoke
+    assert "late answer" in out or "answer-from-fastie" in out

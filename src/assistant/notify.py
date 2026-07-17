@@ -25,11 +25,15 @@ from .config import Settings
 log = logging.getLogger("assistant")
 
 
-def send_wechat(settings: Settings, text: str) -> str:
-    """Send ``text`` to the owner's WeChat. Returns "sent" / "disabled" /
+def send_to_conversation(settings: Settings, account_id: str, target: str,
+                         text: str) -> str:
+    """Send ``text`` into one specific WeChat conversation on one gateway
+    account (A.9 outbound routing — used for late replies that outlived the
+    bridge wait, so the answer lands in the conversation it was asked in, for
+    ANY tenant, no per-user announce config needed). Returns "sent" /
     "failed: …" — never raises."""
-    if not (settings.announce_account and settings.announce_to):
-        return "disabled (set ANNOUNCE_ACCOUNT and ANNOUNCE_TO)"
+    if not (account_id and target):
+        return "failed: missing account/target"
     # the openclaw shim resolves `node` from PATH and needs Node >=22 — put
     # its own directory (e.g. /opt/node24/bin) first so any calling env works
     env = {**os.environ,
@@ -38,8 +42,8 @@ def send_wechat(settings: Settings, text: str) -> str:
         proc = subprocess.run(
             [settings.openclaw_bin, "message", "send",
              "--channel", settings.announce_channel,
-             "--account", settings.announce_account,
-             "--target", settings.announce_to,
+             "--account", str(account_id),
+             "--target", str(target),
              "-m", text[:1000]],
             capture_output=True, text=True, timeout=90, env=env)
     except Exception as exc:
@@ -48,6 +52,15 @@ def send_wechat(settings: Settings, text: str) -> str:
         return "sent"
     detail = (proc.stderr.strip() or proc.stdout.strip())[:200]
     return f"failed: rc={proc.returncode} {detail}"
+
+
+def send_wechat(settings: Settings, text: str) -> str:
+    """Send ``text`` to the owner's WeChat announce target. Returns "sent" /
+    "disabled" / "failed: …" — never raises."""
+    if not (settings.announce_account and settings.announce_to):
+        return "disabled (set ANNOUNCE_ACCOUNT and ANNOUNCE_TO)"
+    return send_to_conversation(settings, settings.announce_account,
+                                settings.announce_to, text)
 
 
 # ── one-shot reminders ───────────────────────────────────────────────

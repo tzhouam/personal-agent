@@ -41,6 +41,18 @@ const ACTION_TIMEOUT_MS = 20_000;
 // Safe fail-closed reply for a weixin turn we couldn't route/answer — never
 // leaks internals, never falls through to OpenClaw's own model (§A.3).
 export const SAFE = "系统暂时不可用，请稍后再试 🙏";
+// Distinct notice when the daemon is HEALTHY but the answer outlived our wait:
+// the daemon pushes the finished reply late via the announce channel, so tell
+// the user it's coming instead of implying an outage (2026-07-17 noon incident).
+export const STILL_WORKING = "⏳ 这条消息处理得比较久，算完后我会把结果补发给你 🙏";
+
+/** The right fail text for an error from the daemon call: a timeout means the
+ * daemon is still computing (late reply will follow) — anything else reads as
+ * unavailable. */
+export function failureText(err) {
+  const name = String(err?.name ?? "");
+  return (name === "TimeoutError" || name === "AbortError") ? STILL_WORKING : SAFE;
+}
 const PID_FILE = `${homedir()}/.personal-agent/chat_listener.pid`;
 // Container clock is UTC; pin the owner's zone so "today" in chat replies and
 // digest dates match his morning (needs the system tzdata package).
@@ -122,8 +134,9 @@ export function chanBody(chan) {
   const out = { session: c.session };
   if (c.channel) out.channel = c.channel;
   if (c.account_id) out.account_id = c.account_id;
-  return out;
-}
+  if (c.reply_to) out.reply_to = c.reply_to;   // originating conversation — the
+  return out;                                  // daemon late-delivers there if
+}                                              // we time out first (A.9)
 
 // Media caps applied BEFORE base64 (§A.4): don't ship a huge or non-image blob
 // through the daemon. Bytes (not paths) are sent in multi_tenant so the daemon
@@ -166,8 +179,10 @@ async function ask(text, chan, imagePaths = []) {
     return { ok: false, error: "daemon returned an empty reply" };
   } catch (err) {
     // multi_tenant: NO CLI fallback (§A.5) — a default-user CLI run would answer
-    // as the wrong tenant. Report the outage; the caller fails closed.
-    if (mt) return { ok: false, error: String(err?.message ?? err).slice(0, 200) };
+    // as the wrong tenant. Report the failure with the right user-facing text
+    // (timeout = still computing, late reply follows; else unavailable).
+    if (mt) return { ok: false, error: String(err?.message ?? err).slice(0, 200),
+                     failText: failureText(err) };
     return askExec(text, imagePaths); // single_user: degraded but never dark
   }
 }
@@ -487,7 +502,8 @@ export default {
       const images = takeInboundMedia([`${accountId}::${sessionKey}`,
                                        `${accountId}::${ctx?.conversationId}`]);
       const chan = { channel: "weixin", account_id: accountId,
-                     session: `oc:${accountId}:${convo}`, multiTenant: true };
+                     session: `oc:${accountId}:${convo}`,
+                     reply_to: ctx?.conversationId, multiTenant: true };
       if (!body && !images.length) {
         rememberReply(accountId, SAFE);
         return { handled: true, text: SAFE };
@@ -496,12 +512,16 @@ export default {
         const parsed = body.startsWith("/") ? parseSlash(body) : null;
         const result = parsed ? { ok: true, text: await handleSlash(parsed, chan) }
                               : await ask(body, chan, images);
-        const text = (result?.ok && result.text) ? result.text : SAFE;
+        // failure text: timeout → "still computing, reply follows" (the daemon
+        // late-delivers into this conversation); anything else → unavailable
+        const text = (result?.ok && result.text) ? result.text
+                                                 : (result?.failText ?? SAFE);
         rememberReply(accountId, text);          // arm the echo guard for THIS reply
         return { handled: true, text };
-      } catch {
-        rememberReply(accountId, SAFE);          // a SAFE reply echoes too
-        return { handled: true, text: SAFE };    // daemon down / bad response → safe
+      } catch (err) {
+        const text = failureText(err);
+        rememberReply(accountId, text);          // a notice reply echoes too
+        return { handled: true, text };          // fail closed, never fall through
       }
     });
 

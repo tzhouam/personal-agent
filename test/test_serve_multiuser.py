@@ -382,3 +382,53 @@ def test_tick_tenants_weekly_gate(tmp_path, monkeypatch):
     assert ("self_improve", GLOBAL_UID) in kinds
     assert ("evolve", "alice1") in kinds
     assert ("run_phase", "alice1") in kinds
+
+
+def test_late_reply_delivered_to_originating_conversation(tmp_path, monkeypatch):
+    """A reply that outlives the bridge wait (client gone → BrokenPipe) must be
+    late-delivered into the conversation it was asked in — never dropped
+    (2026-07-17 noon incident)."""
+    import time as _time
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    reg = UserRegistry(data_dir)
+    reg.add_user("alice1")
+    reg.bind_channel("alice1", "weixin", "wx-A")
+    reg.set_bridge_token(BRIDGE)
+
+    class SlowLLM:
+        def complete_json(self, prompt, system=None, **kw):
+            _time.sleep(0.8)                       # outlives the client timeout
+            return {"reply": "the slow answer", "actions": []}
+
+    sent = []
+    monkeypatch.setattr("assistant.notify.send_to_conversation",
+                        lambda s, acct, target, text: (sent.append(
+                            (acct, target, text)) or "sent"))
+    srv = make_server(settings_factory=lambda: Settings(_env_file=None),
+                      llm_factory=lambda s: SlowLLM(), port=0)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        with pytest.raises(httpx.TimeoutException):
+            httpx.post(f"{base}/chat",
+                       json={"account_id": "wx-A", "session": "oc:wx-A:peer9",
+                             "reply_to": "peer9@im.wechat", "text": "慢问题"},
+                       headers=_auth(), timeout=0.2)   # bridge-style early abort
+        deadline = _time.time() + 5
+        while _time.time() < deadline and not sent:
+            _time.sleep(0.05)
+    finally:
+        srv.shutdown()
+    assert sent, "late reply was dropped"
+    acct, target, text = sent[0]
+    assert acct == "wx-A" and target == "peer9@im.wechat"
+    assert "the slow answer" in text and "补发" in text
+    # and the turn is in the user's history despite the broken socket
+    store = SessionStore(data_dir / "users" / "alice1")
+    hist = store.history("alice1:oc:wx-A:peer9")
+    assert [t["assistant"] for t in hist] == ["the slow answer"]

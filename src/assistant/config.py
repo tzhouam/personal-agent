@@ -172,6 +172,9 @@ class Settings(BaseSettings):
     serve_token: str = ""
     job_workers: int = 2            # in-process worker threads draining the durable
                                     # job queue in multi_tenant (§6)
+    moa_chat_proposer_timeout_s: int = 60   # chat-role MoA: abandon a proposer
+                                            # slower than this once one proposal
+                                            # is in (0 = wait for all)
     daily_run_hour: int = 7         # multi_tenant: from this local hour the poll
                                     # loop fans out the daily run per active user
                                     # (idempotent per day, §12)
