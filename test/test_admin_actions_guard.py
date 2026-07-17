@@ -67,10 +67,12 @@ def test_task_runner_system_prompt_is_mode_aware(settings, tmp_path, monkeypatch
             self.systems.append(system)
             return {"finish": "done", "thought": "x"}
 
+    # systems[0] is the tier-assessment call; the runner loop's system prompt
+    # (the one carrying the action list) is the last call's
     llm = CaptureLLM()
     run_task("check something", _mt(tmp_path, monkeypatch), llm=llm, notify=False)
-    assert llm.systems and '"reboot"' not in llm.systems[0]   # tenant task: not advertised
+    assert llm.systems and '"reboot"' not in llm.systems[-1]  # tenant task: not advertised
 
     llm2 = CaptureLLM()
     run_task("check something", settings, llm=llm2, notify=False)
-    assert llm2.systems and '"reboot"' in llm2.systems[0]     # single_user: unchanged
+    assert llm2.systems and '"reboot"' in llm2.systems[-1]    # single_user: unchanged

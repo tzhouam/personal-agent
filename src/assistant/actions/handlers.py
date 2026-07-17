@@ -631,6 +631,54 @@ def _execute_task(settings: Settings, p: dict) -> str:
             "step and message you the result on WeChat")
 
 
+def _approve_task(settings: Settings, p: dict) -> str:
+    """Release an awaiting background task (paused on a risky step or a risky
+    plan): under the per-user write lock, transition `awaiting_approval →
+    queued` — a second approval sees queued/running and spawns nothing — then
+    launch execution (durable queue job in `multi_tenant`, detached CLI in
+    `single_user`). The id is validated before any path is built (task ids are
+    file names)."""
+    import json
+    from datetime import datetime
+
+    from ..locks import data_write_lock
+    from ..task_runner import TASK_ID_RE
+
+    task_id = str(p.get("id", "")).strip()
+    if not TASK_ID_RE.match(task_id):
+        return (f"no task {task_id!r} — ids look like task-YYYYMMDD-HHMMSS-xxxxxx "
+                "(see the approval message)")
+    path = settings.data_dir / "tasks" / f"{task_id}.json"
+    with data_write_lock(settings.data_dir):
+        if not path.exists():
+            return f"no task {task_id!r}"
+        try:
+            record = json.loads(path.read_text())
+        except ValueError:
+            return f"task {task_id} record is unreadable"
+        status = record.get("status")
+        if status in ("queued", "running"):
+            return f"task {task_id} is already {status}"
+        if status != "awaiting_approval":
+            return f"task {task_id} is {status or 'unknown'} — nothing to approve"
+        record["status"] = "queued"
+        record["approved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2))
+        tmp.replace(path)
+    if settings.deployment_mode == "multi_tenant":
+        _enqueue(settings, "task", {"approved_task_id": task_id},
+                 dedupe_key=f"{settings.uid}:task_approve:{task_id}")
+        return f"task {task_id} approved — executing now, report arrives on WeChat"
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (settings.data_dir / "task_run.log").open("a")
+    subprocess.Popen([sys.executable, "-m", "assistant.cli", "task",
+                      "--approved-id", task_id],
+                     stdout=log_file, stderr=subprocess.STDOUT,
+                     start_new_session=True)
+    return f"task {task_id} approved — executing now, report arrives on WeChat"
+
+
 # ── self-evolution (learned behavior) ────────────────────────────────
 
 def _learn_preference(settings: Settings, p: dict) -> str:

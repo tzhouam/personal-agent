@@ -18,8 +18,14 @@ class ScriptedLLM:
         return self.moves.pop(0)
 
 
+# every run_task now starts with one tier-assessment call (adaptive depth);
+# scripts prepend its response
+_SIMPLE = {"tier": "simple", "flags": {}}
+
+
 def test_run_task_happy_path(settings):
     llm = ScriptedLLM([
+        _SIMPLE,
         {"thought": "track the follow-up", "action":
             {"type": "add_todo", "title": "对比A100报价"}},
         {"thought": "done", "finish": "已创建跟进事项，报价对比明天给你。"},
@@ -31,7 +37,7 @@ def test_run_task_happy_path(settings):
     assert [t["title"] for t in TodoStore(settings.profile_dir).open_items()] \
         == ["对比A100报价"]
     # step outcomes were visible to the next turn
-    assert "added todo t1" in llm.prompts[1]
+    assert "added todo t1" in llm.prompts[2]
     # persisted artifact
     artifact = json.loads((settings.data_dir / "tasks"
                            / f"{record['id']}.json").read_text())
@@ -40,6 +46,7 @@ def test_run_task_happy_path(settings):
 
 def test_run_task_adapts_after_failure(settings):
     llm = ScriptedLLM([
+        _SIMPLE,
         {"thought": "log it", "action":
             {"type": "log_transaction", "kind": "spend", "amount": 45}},  # invalid kind
         {"thought": "fix the kind", "action":
@@ -50,12 +57,13 @@ def test_run_task_adapts_after_failure(settings):
     assert record["status"] == "done"
     assert "rejected" in record["steps"][0]["outcome"]
     assert record["steps"][1]["outcome"].startswith("logged f1")
-    assert "rejected" in llm.prompts[1]  # saw the failure before adapting
+    assert "rejected" in llm.prompts[2]  # saw the failure before adapting
 
 
 def test_run_task_budgets_and_exclusions(settings):
     # excluded action + junk moves → 3 consecutive failures → aborted
     llm = ScriptedLLM([
+        _SIMPLE,
         {"thought": "recurse!", "action": {"type": "execute_task", "request": "x"}},
         {"thought": "?", "action": {"type": "nonexistent_action"}},
         {"thought": "??", "action": None},
@@ -65,9 +73,9 @@ def test_run_task_budgets_and_exclusions(settings):
     assert record["status"] == "aborted"
     assert "not available inside a task" in record["steps"][0]["outcome"]
     assert len(record["steps"]) == 3
-    # turn budget: model never finishes
-    llm = ScriptedLLM([{"thought": "todo", "action":
-                        {"type": "add_todo", "title": f"t{i}"}} for i in range(5)])
+    # turn budget: model never finishes (simple tier caps at 3 turns)
+    llm = ScriptedLLM([_SIMPLE] + [{"thought": "todo", "action":
+                       {"type": "add_todo", "title": f"t{i}"}} for i in range(5)])
     record = run_task("loop forever", settings, llm=llm, max_turns=4, notify=False)
     assert record["status"] == "aborted" and "budget" in record["report"]
 
@@ -100,6 +108,7 @@ def test_run_task_cancel_check_aborts_between_steps(settings):
     from assistant.worker import Cancelled
 
     llm = ScriptedLLM([
+        _SIMPLE,
         {"thought": "step 1", "action": {"type": "add_todo", "title": "第一步"}},
         {"thought": "step 2", "action": {"type": "add_todo", "title": "第二步"}},
     ])
@@ -112,7 +121,7 @@ def test_run_task_cancel_check_aborts_between_steps(settings):
 
     with pytest.raises(Cancelled):
         run_task("多步任务", settings, llm=llm, notify=False, cancel_check=check)
-    # exactly one turn ran: step 1 executed, step 2's LLM call never happened
-    assert len(llm.prompts) == 1
+    # exactly one turn ran (assessment + step 1); step 2's LLM call never happened
+    assert len(llm.prompts) == 2
     assert [t["title"] for t in TodoStore(settings.profile_dir).open_items()] \
         == ["第一步"]

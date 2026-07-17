@@ -68,7 +68,8 @@ def _dispatch_run_phase(settings, args, token):
 def _dispatch_task(settings, args, token):
     from .task_runner import run_task
     token.check()
-    run_task(str(args.get("request", "")), settings, cancel_check=token.check)
+    run_task(str(args.get("request", "")), settings, cancel_check=token.check,
+             approved_task_id=args.get("approved_task_id"))
 
 
 def _dispatch_evolve(settings, args, token):

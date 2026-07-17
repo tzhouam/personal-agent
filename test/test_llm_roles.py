@@ -1,8 +1,18 @@
 """Per-role model routing: role → (client, model), provider caching, fallback."""
 
+import pytest
+
 import assistant.llm as llm_mod
 from assistant.config import Settings
 from assistant.llm import LLM
+
+
+@pytest.fixture(autouse=True)
+def _scratch_data_dir(tmp_path, monkeypatch):
+    """Every Settings built in this module points at a scratch data dir — the
+    MoA metrics sink writes to events.db, and tests must never touch the live
+    ~/.personal-agent (owner rule)."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
 
 
 def _settings(**kw):
@@ -613,3 +623,108 @@ def test_probe_lease_and_stale_gen_units():
     # a REAL probe success closes it
     llm_mod._breaker_record(scopes, gens3, claimed3, "ok", 2, cooldown)
     assert llm_mod._breaker_check(scopes, cooldown)[0] == "closed"
+
+
+# ── MoA observability: stage-tagged spans + the durable moa metrics row ──────
+
+class _MoaResp:
+    def __init__(self, text):
+        self.content = [type("B", (), {"type": "text", "text": text})()]
+        self.stop_reason = "end_turn"; self.usage = None
+
+
+def _moa_rows(settings):
+    from assistant.events_store import EventsStore
+
+    events = EventsStore(settings.events_db)
+    rows = [r for r in events.metrics_window(1) if r["step"] == "moa"]
+    events.close()
+    return {r["name"]: r["value"] for r in rows[-6:]}
+
+
+def test_mixture_observability_spans_and_durable_metrics(monkeypatch, tmp_path):
+    from assistant import tracing
+
+    llm_mod._reset_breaker()
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    if kw["model"] == "aggregator":
+                        return _MoaResp("SYNTHESIZED")
+                    return _MoaResp(f"answer-from-{kw['model']}")
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    settings = _settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
+    token = tracing._default.set(None)
+    try:
+        tracing.init("moa-test", tmp_path / "trace.jsonl")
+        assert LLM(settings).complete("go", role="pipeline") == "SYNTHESIZED"
+    finally:
+        tracing._default.reset(token)
+
+    spans = tracing.load_spans(tmp_path / "trace.jsonl")
+    stages = [s["attr"].get("mixture_stage") for s in spans if s["name"] == "llm"]
+    assert stages.count("proposer") == 2 and stages.count("aggregator") == 1
+    mix = next(s for s in spans if s["name"] == "mixture")
+    assert mix["attr"]["members_total"] == 2
+    assert mix["attr"]["proposals_ok"] == 2
+    assert mix["attr"]["aggregator_ok"] == 1
+    assert mix["attr"]["fallback_used"] == 0
+    # the durable numeric row lands even without any tracer (chat turns)
+    moa = _moa_rows(settings)
+    assert moa["proposals_ok"] == 2 and moa["aggregator_ok"] == 1
+
+
+def test_mixture_metrics_count_dead_proposer(monkeypatch):
+    llm_mod._reset_breaker()
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    if kw["model"] == "deadbeat":
+                        raise RuntimeError("boom")
+                    if kw["model"] == "aggregator":
+                        return _MoaResp("SYNTH")
+                    return _MoaResp("survivor answer")
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    settings = _settings(llm_mixture={
+        "members": [{"model": "deadbeat"}, {"model": "ok-model"}],
+        "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
+    assert LLM(settings).complete("go", role="pipeline") == "SYNTH"
+    moa = _moa_rows(settings)
+    assert moa["members_total"] == 2 and moa["proposals_ok"] == 1
+    assert moa["aggregator_ok"] == 1
+
+
+def test_mixture_metrics_record_fallback(monkeypatch):
+    llm_mod._reset_breaker()
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    if kw["model"] == "aggregator":
+                        return _MoaResp("fallback answer")
+                    raise RuntimeError("all proposers down")
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    settings = _settings(llm_mixture={
+        "members": [{"model": "p1"}, {"model": "p2"}],
+        "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
+    assert LLM(settings).complete("go", role="pipeline") == "fallback answer"
+    moa = _moa_rows(settings)
+    assert moa["proposals_ok"] == 0 and moa["fallback_used"] == 1
+    assert moa["aggregator_ok"] == 0
+    llm_mod._reset_breaker()

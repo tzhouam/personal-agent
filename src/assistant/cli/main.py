@@ -136,7 +136,11 @@ def main() -> None:
                                   "recent chats and task runs")
 
     task_p = sub.add_parser("task", help="agentically execute a multi-step task now")
-    task_p.add_argument("request", help="the task, quoted")
+    task_p.add_argument("request", nargs="?", default="",
+                        help="the task, quoted (omit with --approved-id)")
+    task_p.add_argument("--approved-id", default="", metavar="TASK_ID",
+                        help="resume an approved awaiting task by id instead of "
+                             "starting a new one")
     task_p.add_argument("--no-notify", action="store_true",
                         help="print the report only; skip the WeChat push")
 
@@ -236,10 +240,14 @@ def main() -> None:
     elif args.command == "task":
         from ..task_runner import run_task
 
-        record = run_task(args.request, settings, notify=not args.no_notify)
-        print(f"[{record['status']}] {record['id']} — {len(record['steps'])} step(s)")
-        print(record["report"])
-        sys.exit(0 if record["status"] == "done" else 1)
+        if not args.request and not args.approved_id:
+            print("task needs a request (or --approved-id to resume an approved task)")
+            sys.exit(2)
+        record = run_task(args.request, settings, notify=not args.no_notify,
+                          approved_task_id=args.approved_id or None)
+        print(f"[{record['status']}] {record['id']} — {len(record.get('steps', []))} step(s)")
+        print(record.get("report", ""))
+        sys.exit(0 if record["status"] in ("done", "awaiting_approval") else 1)
     elif args.command == "ask":
         from ..chat.agent import handle_message
 

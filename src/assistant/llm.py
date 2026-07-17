@@ -220,24 +220,28 @@ class LLM:
         max_tokens: int = 4000,
         images: list[str] | None = None,
         role: str | None = None,
+        mixture: bool = True,
     ) -> str:
         """Send one user ``prompt`` (optional ``system``) and return the
         concatenated text blocks. ``role`` selects the model+provider via the
         role map (e.g. "chat", "research", "task"); an explicit ``model``
         overrides it on the default provider; both default to ``default_model``.
         ``images`` are local file paths attached as image content blocks before
-        the text — only meaningful on a multimodal model. Each underlying API
-        call (``_call``) is traced, retried on transient errors, and logs a
-        warning — but does not raise — when the response is cut off at
-        ``max_tokens``. Retry lives on ``_call`` (not here) so a mixture's
-        proposers and aggregator each get their own retry rather than being
-        dropped on the first blip, and an aggregator retry doesn't re-run every
-        proposer."""
+        the text — only meaningful on a multimodal model. ``mixture=False``
+        forces single-model execution on the resolved route even when the role
+        is MoA-configured — the escape hatch for latency/cost-floor calls
+        (task-tier classification, simple/medium task turns) that must never
+        pay the ~2× MoA overhead. Each underlying API call (``_call``) is
+        traced, retried on transient errors, and logs a warning — but does not
+        raise — when the response is cut off at ``max_tokens``. Retry lives on
+        ``_call`` (not here) so a mixture's proposers and aggregator each get
+        their own retry rather than being dropped on the first blip, and an
+        aggregator retry doesn't re-run every proposer."""
         content: str | list = prompt
         if images:
             content = [_image_block(p) for p in images] + [
                 {"type": "text", "text": prompt}]
-        if model is None and role and role in self._mixture_roles \
+        if model is None and mixture and role and role in self._mixture_roles \
                 and len(self.mixture.get("members", [])) >= 2:
             return self._mixture(content, system, max_tokens, role=role)
         client, model_id = self._resolve(role, model)
@@ -250,11 +254,13 @@ class LLM:
         reraise=True,
     )
     def _call(self, client, model_id: str, content, system: str | None,
-              max_tokens: int) -> str:
+              max_tokens: int, span_attrs: dict | None = None) -> str:
         """One traced ``messages.create`` returning the concatenated text; the
-        shared core of the single-model and mixture paths. Retried on transient
-        errors here (rather than on ``complete``) so each mixture proposer and
-        the aggregator retry independently.
+        shared core of the single-model and mixture paths. ``span_attrs`` ride
+        on the ``llm`` span — the mixture path tags each call with its stage
+        (proposer/aggregator/fallback) so MoA overhead is measurable per call.
+        Retried on transient errors here (rather than on ``complete``) so each
+        mixture proposer and the aggregator retry independently.
 
         Appends the temporal anchor to the TAIL of the user content — the
         model's only reliable clock. Tail placement adds nothing before any
@@ -275,7 +281,8 @@ class LLM:
             kwargs["system"] = system
         from . import tracing
 
-        with tracing.span("llm", model=model_id, max_tokens=max_tokens) as _sp:
+        with tracing.span("llm", model=model_id, max_tokens=max_tokens,
+                          **(span_attrs or {})) as _sp:
             resp = client.messages.create(**kwargs)
             tracing.set_usage(_sp, getattr(resp, "usage", None),
                               stop_reason=getattr(resp, "stop_reason", "") or "")
@@ -289,11 +296,49 @@ class LLM:
 
     def _mixture(self, content, system: str | None, max_tokens: int,
                  role: str | None = None) -> str:
+        """Observability shell around `_mixture_run`: a parent `mixture` trace
+        span plus a durable numeric `moa` metrics row per call (events.db —
+        chat/task turns have no tracer, so spans alone would under-count the
+        interactive workload). Never lets recording failures into the call
+        path."""
+        from . import tracing
+
+        stats = {"members_total": len(self.mixture.get("members", [])),
+                 "proposals_ok": 0, "aggregator_ok": 0, "fallback_used": 0,
+                 "abandoned": 0}
+        start = _time.monotonic()
+        with tracing.span("mixture", role=role or "") as sp:
+            try:
+                return self._mixture_run(content, system, max_tokens, role, stats)
+            finally:
+                sp.set(**stats)
+                self._record_moa_metrics(stats, _time.monotonic() - start)
+
+    def _record_moa_metrics(self, stats: dict, duration_s: float) -> None:
+        """Best-effort durable MoA sink (doc/PIPELINE_METRICS.md §0 cost/step):
+        one numeric row per mixture call, day-keyed like `chat_turn` rows."""
+        try:
+            from datetime import date
+
+            from .events_store import EventsStore
+
+            events = EventsStore(self.settings.events_db)
+            events.record_metrics(f"moa-{date.today().isoformat()}", "moa",
+                                  {**stats, "duration_s": round(duration_s, 2)})
+            events.close()
+        except Exception:
+            import logging
+
+            logging.getLogger("assistant").debug("moa metrics failed", exc_info=True)
+
+    def _mixture_run(self, content, system: str | None, max_tokens: int,
+                     role: str | None, stats: dict) -> str:
         """Mixture-of-Agents: every member model proposes an answer in parallel,
         then the aggregator synthesizes them into one (Wang et al. 2024). With
         `layers` > 1 each further round of proposers refines against the last
         round's answers before the final aggregation. A member that errors is
-        dropped as long as one proposal survives.
+        dropped as long as one proposal survives. `stats` (mutated in place)
+        feeds the `mixture` span and the `moa` metrics row.
 
         **Chat latency bound**: for the interactive `chat` role, a proposer
         slower than `moa_chat_proposer_timeout_s` is abandoned once at least one
@@ -322,9 +367,14 @@ class LLM:
         def propose(member, scopes, gens, claimed, layer_input):
             try:
                 client = self._client(member.get("base_url"), member.get("api_key"))
-                out = self._call(client, member["model"], layer_input, system, max_tokens)
+                out = self._call(client, member["model"], layer_input, system,
+                                 max_tokens, span_attrs={
+                                     "mixture_stage": "proposer",
+                                     "mixture_role": role or ""})
                 _breaker_record(scopes, gens, claimed,
                                 "ok" if out.strip() else None, threshold, cooldown)
+                if out.strip():
+                    stats["proposals_ok"] += 1
                 return out if out.strip() else None   # empty = dropped, uncounted
             except Exception as exc:
                 cls = _classify_failure(exc)
@@ -354,7 +404,7 @@ class LLM:
                 if responses:
                     break                 # keep the prior layer's proposals
                 return self._mixture_fallback(content, system, max_tokens, role,
-                                              agg, call_failed, log_)
+                                              agg, call_failed, log_, stats)
             # Propagate the current context into each worker (a raw pool thread
             # starts with a fresh context, which would drop the ContextVar-scoped
             # tracer — so proposer llm spans would vanish). One copy per member,
@@ -379,6 +429,7 @@ class LLM:
                     f.cancel()
                 ex.shutdown(wait=False)
                 if pending:
+                    stats["abandoned"] += len(pending)
                     log_.warning("mixture: abandoned %d proposer(s) still running "
                                  "after %ds (chat latency bound)", len(pending), timeout_s)
                 fresh = [r for r in results if r]
@@ -394,7 +445,7 @@ class LLM:
                 break                     # later-layer failure keeps prior proposals
             else:
                 return self._mixture_fallback(content, system, max_tokens, role,
-                                              agg, call_failed, log_)
+                                              agg, call_failed, log_, stats)
 
         # The aggregator is otherwise a single point of failure: if it dies
         # after every proposer succeeded, fall back to the first surviving
@@ -410,7 +461,9 @@ class LLM:
         agg_client = self._client(agg.get("base_url"), agg.get("api_key"))
         try:
             synthesis = self._call(agg_client, agg["model"],
-                                   _augment(content, responses), system, max_tokens)
+                                   _augment(content, responses), system, max_tokens,
+                                   span_attrs={"mixture_stage": "aggregator",
+                                               "mixture_role": role or ""})
             _breaker_record(agg_scopes, agg_gens, agg_claimed,
                             "ok" if synthesis.strip() else None, threshold, cooldown)
         except Exception as exc:
@@ -428,10 +481,11 @@ class LLM:
                 "mixture aggregator %s returned empty output — returning a "
                 "proposer answer", agg.get("model"))
             return responses[0]
+        stats["aggregator_ok"] = 1
         return synthesis
 
     def _mixture_fallback(self, content, system, max_tokens, role, agg,
-                          call_failed: set, log_) -> str:
+                          call_failed: set, log_, stats: dict | None = None) -> str:
         """Every proposer failed or was cooling — answer with ONE healthy model
         instead of failing the turn ("use other models"). Candidates in order:
         the aggregator, the role's configured route, the global default — each
@@ -440,6 +494,8 @@ class LLM:
         route already tried in this chain, or its breaker is open with no
         probe lease. Blank output = failed fallback (continue, uncounted).
         Exhausted → the original RuntimeError (genuinely nothing is up)."""
+        if stats is not None:
+            stats["fallback_used"] = 1
         threshold = self.settings.moa_member_fail_threshold
         cooldown = self.settings.moa_member_cooldown_s
         role_spec = self.roles.get(role) if role else None
@@ -467,7 +523,9 @@ class LLM:
                          "(%s) directly", model, label)
             try:
                 out = self._call(self._client(base_url, api_key), model,
-                                 content, system, max_tokens)
+                                 content, system, max_tokens,
+                                 span_attrs={"mixture_stage": "fallback",
+                                             "mixture_role": role or ""})
             except Exception as exc:
                 cls = _classify_failure(exc)
                 _breaker_record(scopes, gens, claimed, cls, threshold, cooldown)

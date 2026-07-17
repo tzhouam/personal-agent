@@ -11,6 +11,7 @@ from .base import Action, validate
 from .handlers import (
     _add_health_need,
     _add_todo,
+    _approve_task,
     _cancel_reminder,
     _cancel_routine,
     _create_routine,
@@ -130,6 +131,9 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "run_phase", "phase": "research"}   # research|website|todos'
                        '|resume|curate|consolidate, or "all" for the full daily run',
         slash="run",
+        # website publishes to the public site; the other phases are internal
+        # (resume's own push already sits behind `approve-resume`)
+        risky=lambda p: str(p.get("phase", "")).strip().lower() == "website",
     ),
     Action(
         name="reboot",
@@ -140,6 +144,7 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "reboot"}   # owner says 重启/restart/重新启动 — '
                        'reload the agent (comes back in a few seconds)',
         slash="reboot",
+        risky=True,   # a task must never bounce the daemon on its own
     ),
     Action(
         name="web_search",
@@ -273,6 +278,17 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "execute_task", "request": "<the task in one sentence>"}'
                        '   # for DOABLE novel tasks: research X and summarize, find and '
                        'compare, gather info then remind — the agent does it and reports',
+        slash="task",
+    ),
+    Action(
+        name="approve_task",
+        description="approve an awaiting background task (paused on a risky "
+                    "step or a risky plan) so it executes",
+        handler=_approve_task,
+        params={"id": {"required": True, "desc": "task id, e.g. task-20260717-153000-a1b2c3"}},
+        llm=True,
+        prompt_example='{"type": "approve_task", "id": "task-..."}   # owner says '
+                       '批准任务 <id> / approve task <id> — release an awaiting task',
         slash="task",
     ),
     Action(
@@ -469,6 +485,21 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
 # Actions whose outcome is retrieved data to answer FROM (the chat loop runs a
 # compose pass feeding the result back), not a mutation to confirm with a "✔".
 RETRIEVAL_ACTIONS = frozenset({"query_health", "query_transactions"})
+
+
+def is_risky(name: str, params: dict) -> bool:
+    """Whether executing `name` with `params` has outward/irreversible effects
+    an autonomous task must not perform unapproved (the `Action.risky`
+    metadata — the safety boundary the task runner gates on)."""
+    action = ACTIONS.get(name)
+    if action is None:
+        return False
+    if callable(action.risky):
+        try:
+            return bool(action.risky(params or {}))
+        except Exception:
+            return True   # a broken predicate must fail safe, not open
+    return bool(action.risky)
 
 # Shared/admin actions affect the WHOLE deployment, so a tenant must never invoke
 # them: `reboot` restarts the daemon and disrupts every user (§10). In

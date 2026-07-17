@@ -121,6 +121,7 @@ def test_moa_proposers_stay_traced(monkeypatch, tmp_path):
     path = tmp_path / "trace.jsonl"
     tr.init("run-moa", path)
     s = Settings(_env_file=None, anthropic_api_key="k", anthropic_model="d",
+                 data_dir=tmp_path / "data",   # moa metrics sink must hit scratch
                  llm_mixture={"members": [{"model": "m1"}, {"model": "m2"}],
                               "aggregator": {"model": "agg"}, "roles": ["pipeline"]})
     assert llm_mod.LLM(s).complete("x", role="pipeline") == "AGG"
