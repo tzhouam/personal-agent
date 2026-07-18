@@ -52,3 +52,12 @@ dir holds all test writes.
   `data_dir=tmp_path/...` kwarg or an autouse `monkeypatch.setenv("DATA_DIR",
   str(tmp_path/"data"))` fixture; after adding a new settings-driven write
   path, rerun the suite and check the live dir gained nothing.
+- **`Settings.for_user(uid)` re-reads the repo `.env`** — it does `cls()`
+  internally, so its `data_dir` resolves to the REAL deployment root, NOT any
+  `base_settings.data_dir` you pass around. Code that provisions/writes for a
+  user must derive paths from the passed `base_settings` (e.g. `base.data_dir /
+  "users" / uid / "profile"`), never from `Settings.for_user(uid).profile_dir`,
+  or a scratch test writes into the live `~/.personal-agent/users/`
+  (2026-07-18: `onboarding.provision_user` seeded a stray `users/<hex>/` into
+  the live dir this way). Verify: after any user-provisioning test, `ls
+  ~/.personal-agent/users/` shows only the real uids.

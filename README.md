@@ -158,6 +158,7 @@ setup and the timezone caveat.
 | `assistant task "…" [--no-notify]` | Agentically execute a multi-step task now (step trace under `~/.personal-agent/tasks/`) |
 | `assistant serve` | Local HTTP daemon (chat/actions API for the WeChat bridge; in multi-user mode also the per-user job worker pool) |
 | `assistant admin add-user\|remove-user\|list\|bind-channel\|set-bridge-token\|migrate-single-user\|reboot` | Operator tools for the multi-user mode (see below) — not a tenant surface |
+| `assistant admin invite [--ttl-days N]` · `admin invites` | Issue a one-time invite code so a new user self-onboards on first WeChat contact (sets their name, creates their profile + `config.env`) — see [WeChat onboarding](doc/WECHAT_OPENCLAW.md#onboarding-a-new-user-invite-flow) |
 | `assistant send-test-email` | Verify email delivery |
 | `assistant resume-init\|resume-status\|approve-resume` | Résumé sync + approval gate |
 

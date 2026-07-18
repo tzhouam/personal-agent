@@ -39,7 +39,7 @@ from urllib.parse import parse_qs, urlsplit
 from .actions import run_action
 from .chat.agent import handle_message
 from .config import DEFAULT_UID, Settings
-from .identity import Unauthorized, resolve_uid
+from .identity import Unauthorized, onboarding_candidate, resolve_uid
 from .llm import LLM
 from .registry import UserRegistry
 
@@ -259,6 +259,26 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             try:
                 _uid, settings, store, prefix = self._resolve(body)
             except Unauthorized as exc:
+                # multi_tenant /chat only: an unknown-but-bridge-authed weixin
+                # account may self-onboard (invite code → name → provision a
+                # tenant) instead of a 401. Every other route/condition stays
+                # fail-closed (identity.onboarding_candidate is None unless the
+                # bridge token verifies and the accountId maps to no user).
+                if self.path == "/chat":
+                    base = settings_factory()
+                    acct = onboarding_candidate(self._bearer(), body, base)
+                    if acct is not None:
+                        from .onboarding import handle
+
+                        try:
+                            reply = handle(acct, str(body.get("text", "")), base)
+                            return self._send(200, {"reply": reply})
+                        except BrokenPipeError:
+                            return None
+                        except Exception:
+                            log.exception("onboarding failed for %s", acct)
+                            return self._send(200, {"reply":
+                                "系统暂时不可用，请稍后再试 🙏"})
                 return self._send(401, {"error": str(exc)})
 
             try:

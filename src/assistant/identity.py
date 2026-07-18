@@ -53,3 +53,26 @@ def context_for(bearer_token: str | None, body: dict | None,
     """`resolve_uid` + `Settings.for_user` → a ready `UserContext`."""
     uid = resolve_uid(bearer_token, body, base_settings, registry)
     return UserContext(uid, Settings.for_user(uid))
+
+
+def onboarding_candidate(bearer_token: str | None, body: dict | None,
+                         base_settings: Settings,
+                         registry: UserRegistry | None = None) -> str | None:
+    """The WeChat `account_id` this request could ONBOARD, or None.
+
+    True only when: multi_tenant, self-onboarding is enabled, the **bridge token
+    verifies** (so only the trusted gateway can trigger onboarding), a weixin
+    `account_id` is present, and it maps to **no** active user. Anything else —
+    a bad token, another channel, an already-bound account — returns None so the
+    caller keeps failing closed (401). Used only by the `/chat` route."""
+    if base_settings.deployment_mode != "multi_tenant" or not base_settings.self_onboarding:
+        return None
+    reg = registry or UserRegistry(base_settings.data_dir)
+    if not (bearer_token and reg.verify_bridge_token(bearer_token)):
+        return None
+    if str((body or {}).get("channel") or "weixin") != "weixin":
+        return None
+    account_id = str((body or {}).get("account_id") or "").strip()
+    if not account_id or reg.by_channel("weixin", account_id):
+        return None
+    return account_id

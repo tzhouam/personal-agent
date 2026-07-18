@@ -244,6 +244,35 @@ checklist — in order, all mandatory:**
    `assistant serve`. Background jobs now run on the durable per-user queue;
    `reboot` becomes admin-only (`assistant admin reboot`).
 
+### Onboarding a new user (invite flow)
+
+Step 4 can be automated: instead of running `add-user`/`bind-channel` by hand,
+issue a one-time invite and let the new user self-onboard on first contact.
+
+```bash
+assistant admin invite            # prints a single-use code + the runbook
+assistant admin invites           # list open invites
+```
+
+Then:
+
+1. Run `openclaw channels login --channel openclaw-weixin` and forward its **QR**
+   to the invitee along with the **code**.
+2. They scan the QR (their WeChat joins the gateway), message the bot, send the
+   **code**, then pick a **display name**.
+3. Onboarding auto-generates an opaque uid, binds the accountId, creates
+   `users/<uid>/` with a seeded profile and an **empty** `config.env` skeleton
+   (no credentials copied from anyone) — you never touch `accounts.json`,
+   `add-user`, or `bind-channel`. Add their personal creds to
+   `users/<uid>/config.env` later to enable GitHub/email/website features.
+
+The gate is the **invite code + the QR scan** (both operator-issued); an unknown
+account with no valid code is bounded to a few tries then goes quiet. Kill-switch:
+`SELF_ONBOARDING=false` restores the fail-closed (reject-unknown) behavior. This
+still depends on the **A.8** multi-account property — confirm a *distinct* new
+account appears and the existing account's credentials are not overwritten before
+relying on it.
+
 ---
 
 ## Restart runbook

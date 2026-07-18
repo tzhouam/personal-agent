@@ -59,6 +59,41 @@ def set_bridge_token(settings: Settings, token: str) -> str:
     return "bridge token set (hash stored; keep the plaintext in the bridge secret store)"
 
 
+def create_invite(settings: Settings, ttl_days: int = 7) -> str:
+    """Issue a one-time invite code and print the operator runbook: the code
+    (shown once), the OpenClaw login command whose QR the invitee scans, the
+    A.8 multi-account caveat, and the invitee's steps. Does **not** touch the
+    gateway — non-destructive to the existing account(s)."""
+    _require_multi_tenant(settings)
+    from .onboarding import InviteStore
+
+    code = InviteStore(settings.shared_dir).create(ttl_days)
+    login = "openclaw channels login --channel openclaw-weixin"
+    return (
+        f"invite code (valid {ttl_days}d, single-use — shown once):\n\n    {code}\n\n"
+        "Send the invitee BOTH the QR and this code. Steps:\n"
+        f"  1. Run `{login}` and forward its QR to the invitee.\n"
+        "  2. They scan it with WeChat (their account joins the gateway).\n"
+        "  3. They message the bot, send this code, then pick a display name.\n"
+        "     Onboarding auto-creates their tenant and binds the accountId — you\n"
+        "     do NOT run add-user/bind-channel by hand.\n\n"
+        "⚠ Multi-account is the unverified A.8 gate: after they scan, confirm a\n"
+        "  NEW, distinct account appears (channel `accounts.json`) and the\n"
+        "  existing account's credentials were NOT overwritten before relying on it.")
+
+
+def list_invites(settings: Settings) -> str:
+    """List open, unexpired invites (status + timestamps; no codes/hashes)."""
+    _require_multi_tenant(settings)
+    from .onboarding import InviteStore
+
+    rows = InviteStore(settings.shared_dir).active()
+    if not rows:
+        return "(no open invites)"
+    return "\n".join(f"open · created {r['created']} · expires {r['expires']}"
+                     for r in rows)
+
+
 def list_users(settings: Settings) -> str:
     """Human-readable roster: uid, status, and bound channels."""
     _require_multi_tenant(settings)

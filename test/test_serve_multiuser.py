@@ -72,10 +72,17 @@ def test_forged_account_id_without_token_rejected(mt_server):
     # knows a real accountId, but has no bridge token → refused, no fallback user
     r = httpx.post(f"{base}/chat", json={"account_id": "wx-A", "text": "hi"})
     assert r.status_code == 401
-    # valid token but unknown account → still refused (no default uid)
+    # valid token but unknown account: /chat now offers self-onboarding (200,
+    # asks for an invite code — no invite exists here, so it never resolves to a
+    # user or leaks any tenant's data), while state-changing routes stay 401
+    # (no default uid). See test_onboarding for the full flow.
     r = httpx.post(f"{base}/chat", json={"account_id": "ghost", "text": "hi"},
                    headers=_auth())
-    assert r.status_code == 401
+    assert r.status_code == 200 and "邀请码" in r.json()["reply"]
+    assert httpx.post(f"{base}/actions/list_todos", json={"account_id": "ghost"},
+                      headers=_auth()).status_code == 401
+    assert httpx.post(f"{base}/run", json={"account_id": "ghost"},
+                      headers=_auth()).status_code == 401
 
 
 def test_two_accounts_get_isolated_sessions(mt_server):

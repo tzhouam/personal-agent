@@ -257,6 +257,10 @@ class Settings(BaseSettings):
     # there is NO default fallback in that mode (§6.1).
     deployment_mode: str = "single_user"   # single_user | multi_tenant
     uid: str = DEFAULT_UID                  # the user this Settings is scoped to
+    # multi_tenant: let an unknown WeChat account self-onboard on first /chat
+    # contact with a valid invite code (onboarding.py). Off → unknown accounts
+    # stay fail-closed (today's behavior). single_user ignores this.
+    self_onboarding: bool = True
 
     @classmethod
     def for_user(cls, uid: str | None = None) -> "Settings":

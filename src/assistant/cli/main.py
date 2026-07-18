@@ -38,6 +38,10 @@ def _dispatch_admin(settings: Settings, args) -> int:
                                     export_to=Path(args.export) if args.export else None))
         elif args.admin_cmd == "list":
             print(admin.list_users(settings))
+        elif args.admin_cmd == "invite":
+            print(admin.create_invite(settings, ttl_days=args.ttl_days))
+        elif args.admin_cmd == "invites":
+            print(admin.list_invites(settings))
         elif args.admin_cmd == "bind-channel":
             print(admin.bind_channel(settings, args.uid, args.channel, args.external_id))
         elif args.admin_cmd == "set-bridge-token":
@@ -164,6 +168,10 @@ def main() -> None:
     ru.add_argument("--export", metavar="PREFIX",
                     help="export the user's data to PREFIX.tar.gz before deleting")
     admin_sub.add_parser("list", help="list users, status, and bound channels")
+    inv = admin_sub.add_parser("invite", help="issue a one-time invite code + "
+                                              "onboarding runbook for a new user")
+    inv.add_argument("--ttl-days", type=int, default=7, help="code validity (default 7)")
+    admin_sub.add_parser("invites", help="list open, unexpired invites")
     bc = admin_sub.add_parser("bind-channel", help="bind a channel id to a user")
     bc.add_argument("uid")
     bc.add_argument("channel", choices=["weixin", "email"])
