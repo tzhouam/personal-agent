@@ -15,6 +15,7 @@ condition doesn't hold — "check at 07:30" means one check, not polling).
 """
 
 import calendar
+import re
 import logging
 from datetime import date, datetime
 from pathlib import Path
@@ -116,20 +117,30 @@ class RoutineStore:
 
     @locked_transaction
     def add(self, task: str, time: str, days: str = "daily",
-            condition: str = "") -> dict | None:
+            condition: str = "", workflow: str = "") -> dict | None:
         """Validate and store a new routine, returning the record — or None if
-        ``time`` isn't HH:MM or ``days`` doesn't parse (so the caller can reject
-        bad input). ``task`` and ``condition`` are length-capped free text."""
+        ``time`` isn't HH:MM, ``days`` doesn't parse, or ``workflow`` isn't a
+        wf-id (so the caller can reject bad input). ``task`` and ``condition``
+        are length-capped free text. A ``workflow`` binding makes ``fire_due``
+        dispatch that saved workflow deterministically instead of interpreting
+        the task text; the text still describes it so rolled-back code
+        degrades to interpretation."""
         try:
             datetime.strptime(str(time).strip(), "%H:%M")
         except ValueError:
             return None
         if not valid_days(days):
             return None
+        workflow = str(workflow or "").strip()
+        if workflow and not re.match(r"^wf\d+$", workflow):
+            return None
         data = self._load()
         routine = {"id": f"rt{data['next_id']}", "task": str(task)[:400],
                    "time": str(time).strip(), "days": str(days or "daily").lower(),
                    "condition": str(condition or "")[:300], "last_checked": None}
+        if workflow:
+            routine["workflow"] = workflow
+            routine["task"] = (str(task).strip() or f"run workflow {workflow}")[:400]
         data["next_id"] += 1
         data["routines"].append(routine)
         self._save(data)
@@ -230,6 +241,22 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
         if not holds:
             log.info("routine %s: condition not met (%s)", routine["id"], why)
             outcomes.append({"id": routine["id"], "fired": False, "note": why})
+            continue
+        if routine.get("workflow"):
+            # workflow-bound routine: deterministic dispatch through the saved
+            # workflow's pre-planned task record — no chat-model interpretation
+            from .actions import run_action
+
+            try:
+                note = run_action("run_workflow", {"id": routine["workflow"]},
+                                  settings)
+            except Exception as exc:
+                log.exception("routine %s workflow dispatch failed", routine["id"])
+                note = f"workflow dispatch failed: {exc}"
+            status = send_wechat(settings, f"🔁 [{routine['id']}] {note}"[:800])
+            log.info("routine %s workflow %s: %s", routine["id"],
+                     routine["workflow"], status)
+            outcomes.append({"id": routine["id"], "fired": True, "note": note})
             continue
         # frame the task as immediate execution — without this the chat agent
         # pattern-matches recurring tasks to plan_task and replies with a PLAN

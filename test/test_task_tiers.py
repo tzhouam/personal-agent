@@ -143,9 +143,11 @@ def test_approve_then_resume_runs_pending_action_once(settings, sent, risky_acti
                         lambda *a, **k: spawns.append(a))
     out = _approve_task(settings, {"id": task_id})
     assert "approved" in out and len(spawns) == 1
-    # double-approval is idempotent: no second spawn
-    assert "already queued" in _approve_task(settings, {"id": task_id})
-    assert len(spawns) == 1
+    # a second approval re-dispatches (orphan rescue) — the locked
+    # queued→running transition in _load_approved makes the loser a no-op,
+    # so a double-RUN still can't happen (covered below by the resume test)
+    assert "approved" in _approve_task(settings, {"id": task_id})
+    assert len(spawns) == 2
 
     resume_llm = ScriptedLLM([{"thought": "done", "finish": "published and done"}])
     record = run_task("", settings, llm=resume_llm, approved_task_id=task_id,

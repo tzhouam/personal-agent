@@ -141,6 +141,9 @@ def main() -> None:
     task_p.add_argument("--approved-id", default="", metavar="TASK_ID",
                         help="resume an approved awaiting task by id instead of "
                              "starting a new one")
+    task_p.add_argument("--force-resume", action="store_true",
+                        help="with --approved-id: also resume a record stuck in "
+                             "'running' (only when its previous runner is dead)")
     task_p.add_argument("--no-notify", action="store_true",
                         help="print the report only; skip the WeChat push")
 
@@ -244,7 +247,8 @@ def main() -> None:
             print("task needs a request (or --approved-id to resume an approved task)")
             sys.exit(2)
         record = run_task(args.request, settings, notify=not args.no_notify,
-                          approved_task_id=args.approved_id or None)
+                          approved_task_id=args.approved_id or None,
+                          force_resume=args.force_resume)
         print(f"[{record['status']}] {record['id']} — {len(record.get('steps', []))} step(s)")
         print(record.get("report", ""))
         sys.exit(0 if record["status"] in ("done", "awaiting_approval") else 1)

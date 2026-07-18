@@ -92,22 +92,33 @@ class JobQueue:
 
     # ── enqueue ──────────────────────────────────────────────────────
     def enqueue(self, uid: str, kind: str, args: dict | None = None,
-                dedupe_key: str | None = None) -> int | None:
-        """Add a `queued` job for `uid`. If `dedupe_key` matches ANY existing
-        job — including a completed/failed/cancelled one — do nothing and return
-        None. Keys are date/week-scoped (`uid:run:<day>`), so this means "at
-        most once per period": a finished daily run must NOT be re-enqueued by
-        the next poll tick (that was a live runaway — the pipeline looped all
-        day once the first run completed), and a failed/cancelled one stays down
-        for its period (retries happen at the attempt level, not by re-enqueue;
-        a manual re-trigger passes no dedupe key). Returns the new job id
-        otherwise."""
+                dedupe_key: str | None = None,
+                dedupe_scope: str = "all") -> int | None:
+        """Add a `queued` job for `uid`. If `dedupe_key` matches an existing
+        job, do nothing and return None. Two scopes:
+
+        - ``"all"`` (default): matches ANY existing job — including a
+          completed/failed/cancelled one. Keys are date/week-scoped
+          (`uid:run:<day>`), so this means "at most once per period": a
+          finished daily run must NOT be re-enqueued by the next poll tick
+          (that was a live runaway — the pipeline looped all day once the
+          first run completed), and a failed/cancelled one stays down for its
+          period (retries happen at the attempt level, not by re-enqueue; a
+          manual re-trigger passes no dedupe key).
+        - ``"active"``: matches only `queued`/`running` jobs — "at most one
+          in flight": a task-record resume (`uid:task_resume:<task-id>`)
+          must be re-enqueueable after a dead/failed attempt, while an alive
+          one still dedupes, so at most one worker ever holds a record.
+
+        Returns the new job id otherwise."""
         payload = json.dumps(args or {}, ensure_ascii=False)
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             if dedupe_key:
-                dup = c.execute("SELECT id FROM jobs WHERE dedupe_key=?",
-                                (dedupe_key,)).fetchone()
+                query = "SELECT id FROM jobs WHERE dedupe_key=?"
+                if dedupe_scope == "active":
+                    query += " AND state IN ('queued','running')"
+                dup = c.execute(query, (dedupe_key,)).fetchone()
                 if dup:
                     return None
             now = _now()

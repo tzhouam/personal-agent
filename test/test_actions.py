@@ -14,7 +14,9 @@ def test_registry_covers_the_llm_action_set():
                            "log_meal", "log_exercise", "log_weight",
                            "set_health_profile", "add_health_need",
                            "done_health_need", "health_summary", "query_health",
-                           "execute_task", "approve_task", "learn_preference",
+                           "execute_task", "approve_task", "create_workflow",
+                           "run_workflow", "show_workflow", "update_workflow",
+                           "retire_workflow", "learn_preference",
                            "retire_preference", "self_evolve"}
     block = prompt_block()
     for name in llm_actions:

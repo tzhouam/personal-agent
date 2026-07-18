@@ -12,6 +12,11 @@ from .handlers import (
     _add_health_need,
     _add_todo,
     _approve_task,
+    _create_workflow,
+    _retire_workflow,
+    _run_workflow,
+    _show_workflow,
+    _update_workflow,
     _cancel_reminder,
     _cancel_routine,
     _create_routine,
@@ -188,7 +193,9 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         description="recurring work: at a time on chosen days, optionally gated on a "
                     "real-world condition, the agent runs a task and messages WeChat",
         handler=_create_routine,
-        params={"task": {"required": True, "desc": "what to do/say each time"},
+        params={"task": {"required": False,
+                         "desc": "what to do/say each time (optional when a "
+                                 "workflow is bound)"},
                 "time": {"required": True, "desc": "HH:MM"},
                 "days": {"required": False,
                          "desc": "daily|workdays|weekends|'mon,wed,fri'|"
@@ -196,10 +203,14 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                                  "(default daily)"},
                 "condition": {"required": False,
                               "desc": "free-text gate checked at fire time via web "
-                                      "search, e.g. 'there is a weather alert in Shenzhen'"}},
+                                      "search, e.g. 'there is a weather alert in Shenzhen'"},
+                "workflow": {"required": False,
+                             "desc": "saved workflow id (wf3) to run each time — "
+                                     "deterministic, preferred over describing it in task"}},
         llm=True,
         prompt_example='{"type": "create_routine", "task": "...", "time": "08:30", '
-                       '"days": "workdays", "condition": "<optional real-world gate>"}'
+                       '"days": "workdays", "condition": "<optional real-world gate>", '
+                       '"workflow": "<optional wf-id to run each time>"}'
                        '   # days also: "monthly:1" (每月1号), "yearly:03-15" (每年3月15日)',
         slash="routine",
     ),
@@ -290,6 +301,64 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "approve_task", "id": "task-..."}   # owner says '
                        '批准任务 <id> / approve task <id> — release an awaiting task',
         slash="task",
+    ),
+    Action(
+        name="create_workflow",
+        description="save a reusable named workflow: an owner-approved "
+                    "procedure as 1-6 concrete text steps",
+        handler=_create_workflow,
+        params={"name": {"required": False, "desc": "short unique name"},
+                "description": {"required": True, "desc": "what the workflow achieves"},
+                "steps": {"required": True,
+                          "desc": "list of 1-6 short concrete step strings"},
+                "verify": {"required": False,
+                           "desc": "how to check the outcome before reporting"}},
+        llm=True,
+        prompt_example='{"type": "create_workflow", "name": "周报", "description": '
+                       '"...", "steps": ["step 1", "step 2"], "verify": "..."}   '
+                       '# owner wants to SAVE a procedure for reuse (存成工作流/'
+                       '以后照这个流程) — write the steps yourself from the conversation',
+    ),
+    Action(
+        name="run_workflow",
+        description="execute a saved workflow now (its steps become the task "
+                    "plan; outward steps still need approval)",
+        handler=_run_workflow,
+        params={"id": {"required": True, "desc": "workflow id, e.g. wf3"}},
+        llm=True,
+        prompt_example='{"type": "run_workflow", "id": "wf3"}   # owner asks to '
+                       'run a saved workflow (ids are in the context list)',
+    ),
+    Action(
+        name="show_workflow",
+        description="show a workflow's full steps, verify check, and run stats",
+        handler=_show_workflow,
+        params={"id": {"required": True, "desc": "workflow id, e.g. wf3"}},
+        llm=True,
+        prompt_example='{"type": "show_workflow", "id": "wf3"}',
+    ),
+    Action(
+        name="update_workflow",
+        description="edit a saved workflow's name/description/steps/verify",
+        handler=_update_workflow,
+        params={"id": {"required": True, "desc": "workflow id, e.g. wf3"},
+                "name": {"required": False, "desc": "new name"},
+                "description": {"required": False, "desc": "new description"},
+                "steps": {"required": False, "desc": "full replacement step list"},
+                "verify": {"required": False, "desc": "new verify check"}},
+        llm=True,
+        prompt_example='{"type": "update_workflow", "id": "wf3", "steps": ["..."]}'
+                       '   # owner corrects a saved workflow',
+    ),
+    Action(
+        name="retire_workflow",
+        description="retire a workflow (kept in history; bound routines are "
+                    "cancelled)",
+        handler=_retire_workflow,
+        params={"id": {"required": True, "desc": "workflow id, e.g. wf3"}},
+        llm=True,
+        prompt_example='{"type": "retire_workflow", "id": "wf3"}   # 不要这个'
+                       '工作流了',
     ),
     Action(
         name="show_profile",

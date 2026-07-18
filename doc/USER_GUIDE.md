@@ -371,6 +371,27 @@ of acting, messages you the plan and the pending step, and only continues
 after you reply **批准任务 \<task-id\>** (or "approve task \<id\>"). Nothing
 outward happens on the agent's own authority.
 
+### Workflows — saving procedures for reuse
+
+When a multi-step procedure is worth keeping, say so — *"把这个存成工作流"*,
+*"以后周报都照这个流程"* — and the agent saves it as a named workflow: a
+short list of concrete text steps plus an optional verify check (it writes
+the steps itself from your conversation; you can correct them any time:
+*"wf3 第二步改成先查邮件"*). Then:
+
+- **Run it on demand** — *"跑一下周报流程"* → the workflow's steps become the
+  task plan, executed step by step with progress tracked per milestone.
+- **Schedule it** — *"每周一早上跑 wf3"* → a routine bound to the workflow
+  fires it deterministically (no re-interpretation each time).
+- **Inspect / retire** — ask to see a workflow's steps and run history, or
+  retire one you no longer want (kept in git history, never deleted;
+  retiring also cancels any routine bound to it).
+
+Safety is unchanged: a workflow run is a normal background task, so any
+outward step (publishing the website, restarting the agent) pauses and asks
+for **批准任务 \<task-id\>** first — every time, once per step. Simple text
+workflows only for now: no branching or parameters.
+
 ### Teaching it (self-evolution)
 
 Say it once — *"以后记账默认用港币"*, *"回我消息永远用中文"*, *"别再在晚上

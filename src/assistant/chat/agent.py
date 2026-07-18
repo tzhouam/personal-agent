@@ -99,6 +99,13 @@ rule (and keep applying it immediately); "忘掉/取消那条规则" → retire_
 from one-off reminders (set_reminder) and world facts. When the owner asks you to reflect on
 recent conversations and improve, emit self_evolve.
 
+Workflows: when the owner wants to SAVE a repeatable procedure ("存成工作流", "以后照这个
+流程", "make this a workflow"), emit create_workflow — write the 1-6 concrete steps yourself
+from the conversation; don't ask them to dictate steps. When they ask to run a saved one
+("跑一下周报流程"), emit run_workflow with its id from the "## Saved workflows" list. For a
+recurring schedule, emit create_routine with the workflow id bound. A workflow's outward
+steps still pause for the owner's approval when it runs.
+
 Present analyses so they scan in seconds: a one-line headline first (totals/net), then short
 labeled sections with an emoji each, percentages next to amounts, and one blank line between
 sections. For every dominant cost area, drill into its sub-areas using the computed
@@ -179,6 +186,21 @@ def build_context(settings: Settings) -> str:
             parts.append(f"## {title}\n" + run_action(action, {}, settings))
         except Exception:  # context is best-effort; a bad store must not kill chat
             log.exception("context: %s failed", action)
+
+    try:  # saved workflows: the ids run_workflow needs (only when any exist)
+        from ..workflow_store import WorkflowStore
+
+        workflows = WorkflowStore(settings.profile_dir).active()
+        if workflows:
+            parts.append("## Saved workflows (run_workflow executes one; "
+                         "show_workflow shows full steps)\n" + "\n".join(
+                             f"[{w['id']}] {w['name']} — {w['description'][:80]} "
+                             f"({len(w['steps'])} steps"
+                             + (f", ran {w['run_count']}×" if w.get("run_count") else "")
+                             + ")"
+                             for w in workflows))
+    except Exception:
+        log.exception("context: workflows failed")
 
     try:  # finance: this month's computed totals + latest records, so money
         # questions are answered from real ledger numbers, never invented

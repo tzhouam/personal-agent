@@ -255,17 +255,21 @@ def _cancel_reminder(settings: Settings, p: dict) -> str:
 
 def _create_routine(settings: Settings, p: dict) -> str:
     """Create a recurring routine: `task` at `time` on `days`, optionally gated
-    on a free-text `condition` checked at fire time. Returns the routine id +
-    schedule, or a format hint when time/days are invalid."""
+    on a free-text `condition` checked at fire time, optionally bound to a
+    saved `workflow` (fired deterministically, no text interpretation).
+    Returns the routine id + schedule, or a format hint on invalid input."""
     from ..routines import RoutineStore
 
+    if not str(p.get("task", "")).strip() and not str(p.get("workflow", "")).strip():
+        return "create_routine needs a task (or a workflow id to bind)"
     routine = RoutineStore(settings.data_dir).add(
         task=str(p.get("task", "")), time=str(p.get("time", "")),
-        days=str(p.get("days") or "daily"), condition=str(p.get("condition") or ""))
+        days=str(p.get("days") or "daily"), condition=str(p.get("condition") or ""),
+        workflow=str(p.get("workflow") or ""))
     if routine is None:
-        return ("couldn't create routine — time must be HH:MM and days one of "
+        return ("couldn't create routine — time must be HH:MM, days one of "
                 "daily/workdays/weekends, 'mon,wed,fri', 'monthly:<1-31>', "
-                "or 'yearly:<MM-DD>'")
+                "or 'yearly:<MM-DD>', and workflow (if given) a wf-id like wf3")
     when = f"{routine['days']} at {routine['time']}"
     gate = f", only when: {routine['condition']}" if routine["condition"] else ""
     return f"routine {routine['id']} created — {when}{gate}: {routine['task']}"
@@ -631,13 +635,41 @@ def _execute_task(settings: Settings, p: dict) -> str:
             "step and message you the result on WeChat")
 
 
+def _dispatch_task_record(settings: Settings, task_id: str) -> bool:
+    """Launch execution of a `queued` task record — the ONE dispatch path for
+    approvals, workflow starts, and orphan rescues. `multi_tenant`: enqueue a
+    resume job with an **active-scoped** dedupe key, so an alive job dedupes
+    (at most one worker per record) while a dead/failed one can be
+    re-dispatched. `single_user`: detached CLI resume; a racing double-spawn
+    is resolved by `_load_approved`'s locked queued→running transition (the
+    loser exits as a no-op). Returns whether a new dispatch happened."""
+    if settings.deployment_mode == "multi_tenant":
+        from ..jobs import JobQueue
+
+        job = JobQueue(settings.shared_dir).enqueue(
+            settings.uid, "task", {"approved_task_id": task_id},
+            dedupe_key=f"{settings.uid}:task_resume:{task_id}",
+            dedupe_scope="active")
+        return job is not None
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (settings.data_dir / "task_run.log").open("a")
+    subprocess.Popen([sys.executable, "-m", "assistant.cli", "task",
+                      "--approved-id", task_id],
+                     stdout=log_file, stderr=subprocess.STDOUT,
+                     start_new_session=True)
+    return True
+
+
 def _approve_task(settings: Settings, p: dict) -> str:
     """Release an awaiting background task (paused on a risky step or a risky
     plan): under the per-user write lock, transition `awaiting_approval →
-    queued` — a second approval sees queued/running and spawns nothing — then
-    launch execution (durable queue job in `multi_tenant`, detached CLI in
-    `single_user`). The id is validated before any path is built (task ids are
-    file names)."""
+    queued` with a one-shot `pre_approved` grant (it authorizes exactly the
+    stored pending action — a later risky step pauses again), then dispatch.
+    Also rescues stuck records: a `queued` orphan (crash between persist and
+    dispatch) is re-dispatched idempotently; a `running` record re-dispatches
+    only when its queue job is dead (active-scoped dedupe decides) —
+    single_user names the manual escape instead. Ids are validated before any
+    path is built (task ids are file names)."""
     import json
     from datetime import datetime
 
@@ -657,26 +689,179 @@ def _approve_task(settings: Settings, p: dict) -> str:
         except ValueError:
             return f"task {task_id} record is unreadable"
         status = record.get("status")
-        if status in ("queued", "running"):
-            return f"task {task_id} is already {status}"
-        if status != "awaiting_approval":
+        if status == "awaiting_approval":
+            record["status"] = "queued"
+            record["pre_approved"] = True   # one-shot: consumed at resume,
+            record["approved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2))
+            tmp.replace(path)
+        elif status == "queued":
+            pass                            # orphan rescue: re-dispatch below
+        elif status == "running":
+            if settings.deployment_mode == "multi_tenant":
+                if _dispatch_task_record(settings, task_id):
+                    return (f"task {task_id} looked stuck — re-dispatched, "
+                            "report arrives on WeChat")
+                return f"task {task_id} is already running"
+            return (f"task {task_id} is already running — if it crashed, run "
+                    f"`assistant task --approved-id {task_id} --force-resume`")
+        else:
             return f"task {task_id} is {status or 'unknown'} — nothing to approve"
-        record["status"] = "queued"
-        record["approved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    _dispatch_task_record(settings, task_id)
+    return f"task {task_id} approved — executing now, report arrives on WeChat"
+
+
+# ── workflows (owner-authored reusable procedures) ───────────────────
+
+_WF_ID_RE = None  # compiled lazily
+
+
+def _wf_id(p: dict) -> str | None:
+    """Validated workflow id from params, or None (ids are store keys)."""
+    global _WF_ID_RE
+    if _WF_ID_RE is None:
+        import re
+
+        _WF_ID_RE = re.compile(r"^wf\d+$")
+    wid = str(p.get("id", "")).strip()
+    return wid if _WF_ID_RE.match(wid) else None
+
+
+def _create_workflow(settings: Settings, p: dict) -> str:
+    """Save a reusable workflow. `steps` must be supplied by the model (it has
+    the conversation context; drafting here would run an LLM call inside the
+    chat executor's write lock) — a missing/invalid `steps` outcome routes
+    through the repair round so the model supplies them on retry."""
+    from ..workflow_store import (WorkflowStore, WorkflowStoreError,
+                                  render_workflow, valid_steps)
+
+    if valid_steps(p.get("steps")) is None:
+        return ("create_workflow rejected — needs steps: a list of 1-6 short "
+                "concrete step strings (write them from the conversation)")
+    try:
+        status, wf = WorkflowStore(settings.profile_dir).create(
+            p.get("name") or str(p.get("description", ""))[:40],
+            p.get("description", ""), p.get("steps"), verify=p.get("verify", ""))
+    except WorkflowStoreError as exc:
+        return f"workflow store unavailable: {exc}"
+    if status == "invalid":
+        return ("create_workflow rejected — needs name, description, and 1-6 "
+                "non-empty steps")
+    if status == "duplicate":
+        return (f"an active workflow already has that name: \n"
+                + render_workflow(wf) + "\n(update_workflow edits it)")
+    if status == "full":
+        return "workflow limit reached (20 active) — retire one first"
+    return ("workflow saved:\n" + render_workflow(wf)
+            + f"\nRun it anytime (\"运行 {wf['name']}\" → run_workflow {wf['id']}); "
+              f"schedule it with a routine bound to {wf['id']}")
+
+
+def _run_workflow(settings: Settings, p: dict) -> str:
+    """Execute a saved workflow: mint a pre-planned task record (status
+    `queued`, plan = the workflow's steps/verify) under the write lock, then
+    dispatch through the resume path — so a queue retry RESUMES from persisted
+    steps instead of restarting, and every risky step still pauses for
+    approval."""
+    import json
+    import uuid
+    from datetime import datetime
+
+    from ..locks import data_write_lock
+    from ..workflow_store import WorkflowStore, WorkflowStoreError
+
+    wid = _wf_id(p)
+    if wid is None:
+        return "run_workflow needs the workflow id, e.g. wf3 (see the saved list)"
+    try:
+        wf = WorkflowStore(settings.profile_dir).get(wid)
+    except WorkflowStoreError as exc:
+        return f"workflow store unavailable: {exc}"
+    if wf is None:
+        return f"no active workflow {wid!r}"
+    task_id = datetime.now().strftime("task-%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    record = {"id": task_id,
+              "request": f"[workflow {wf['id']}: {wf['name']}] {wf['description']}",
+              "started": datetime.now().strftime("%Y-%m-%d %H:%M"),
+              "status": "queued", "workflow_id": wf["id"],
+              "plan": {"steps": list(wf["steps"]), "verify": wf.get("verify", ""),
+                       "risks": "",
+                       "milestones": [{"step": s, "done": False}
+                                      for s in wf["steps"]]},
+              "steps": [], "report": ""}
+    with data_write_lock(settings.data_dir):
+        tasks_dir = settings.data_dir / "tasks"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        path = tasks_dir / f"{task_id}.json"
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2))
         tmp.replace(path)
-    if settings.deployment_mode == "multi_tenant":
-        _enqueue(settings, "task", {"approved_task_id": task_id},
-                 dedupe_key=f"{settings.uid}:task_approve:{task_id}")
-        return f"task {task_id} approved — executing now, report arrives on WeChat"
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    log_file = (settings.data_dir / "task_run.log").open("a")
-    subprocess.Popen([sys.executable, "-m", "assistant.cli", "task",
-                      "--approved-id", task_id],
-                     stdout=log_file, stderr=subprocess.STDOUT,
-                     start_new_session=True)
-    return f"task {task_id} approved — executing now, report arrives on WeChat"
+    _dispatch_task_record(settings, task_id)
+    return (f"workflow {wf['id']} \"{wf['name']}\" started ({task_id}) — "
+            "I'll follow its steps and report on WeChat; outward steps will "
+            "ask for your approval first")
+
+
+def _show_workflow(settings: Settings, p: dict) -> str:
+    """Full steps/verify/stats of one workflow (retired ones stay inspectable)."""
+    from ..workflow_store import WorkflowStore, WorkflowStoreError, render_workflow
+
+    wid = _wf_id(p)
+    if wid is None:
+        return "show_workflow needs the workflow id, e.g. wf3"
+    try:
+        wf = WorkflowStore(settings.profile_dir).get_any(wid)
+    except WorkflowStoreError as exc:
+        return f"workflow store unavailable: {exc}"
+    return render_workflow(wf) if wf else f"no workflow {wid!r}"
+
+
+def _update_workflow(settings: Settings, p: dict) -> str:
+    """Edit an active workflow's name/description/steps/verify."""
+    from ..workflow_store import WorkflowStore, WorkflowStoreError, render_workflow
+
+    wid = _wf_id(p)
+    if wid is None:
+        return "update_workflow needs the workflow id, e.g. wf3"
+    try:
+        status, wf = WorkflowStore(settings.profile_dir).update(
+            wid, name=p.get("name"), description=p.get("description"),
+            steps=p.get("steps"), verify=p.get("verify"))
+    except WorkflowStoreError as exc:
+        return f"workflow store unavailable: {exc}"
+    if status == "missing":
+        return f"no active workflow {wid!r}"
+    if status == "conflict":
+        return f"rename rejected — {wf['id']} already uses that name"
+    if status == "invalid":
+        return ("update rejected — name/description must be non-empty; steps, "
+                "when given, a list of 1-6 short strings")
+    return "workflow updated:\n" + render_workflow(wf)
+
+
+def _retire_workflow(settings: Settings, p: dict) -> str:
+    """Retire a workflow (never deleted) and cancel routines bound to it, so a
+    schedule can't keep firing a procedure the owner removed."""
+    from ..routines import RoutineStore
+    from ..workflow_store import WorkflowStore, WorkflowStoreError
+
+    wid = _wf_id(p)
+    if wid is None:
+        return "retire_workflow needs the workflow id, e.g. wf3"
+    try:
+        ok = WorkflowStore(settings.profile_dir).retire(wid)
+    except WorkflowStoreError as exc:
+        return f"workflow store unavailable: {exc}"
+    if not ok:
+        return f"no active workflow {wid!r}"
+    routines = RoutineStore(settings.data_dir)
+    cancelled = [r["id"] for r in routines.active() if r.get("workflow") == wid]
+    for rid in cancelled:
+        routines.cancel(rid)
+    note = f" (also cancelled bound routine(s): {', '.join(cancelled)})" if cancelled else ""
+    return (f"workflow {wid} retired{note} — its history stays in git; a task "
+            "already running finishes, pending ones are cancelled at start")
 
 
 # ── self-evolution (learned behavior) ────────────────────────────────

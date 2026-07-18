@@ -315,6 +315,28 @@ everything is git-audited, retire-only (never deleted), capped at 25 active
 (evolve-sourced rotate out first, owner rules never auto-evict), and
 near-duplicates are rejected.
 
+### Workflows
+
+`workflow_store.py` saves owner-authored procedures (`workflows.yaml` in the
+profile repo — versioned, never-delete, retire-only, best-effort git audit
+with the YAML as source of truth). A workflow v1 **is** a saved text plan
+(`name, description, steps ≤6, verify`) — exactly the format the task runner
+executes: `run_workflow` mints a pre-planned task record (status `queued`)
+and dispatches it through the resume path, so a queue retry *resumes* from
+persisted steps rather than restarting, milestones/tier budgets apply
+(clamped ≥ medium), and **every outward step still pauses for per-action
+owner approval** — approval is one-shot (`pre_approved` + `pending_action`
+are consumed at load; a second risky step pauses again). Run accounting is
+exactly-once (`mark_ran` is task-id-idempotent and ordered before the
+terminal persist); a retired workflow's pending tasks cancel at start.
+Routines can bind a workflow first-class (`workflow: wf3`) for deterministic
+scheduled dispatch — no chat-model text interpretation — and retiring the
+workflow cancels its bound routines. The five workflow actions are excluded
+from the task loop: workflow authoring/invocation is an owner surface. The
+store fails closed on a corrupt file (preserved for recovery, mutations
+refused). Explicit non-goals v1: branching/conditional logic, parameters,
+cross-tenant sharing.
+
 ### Write concurrency
 
 One user's YAML stores share one git repo and one daemon serves chat, the

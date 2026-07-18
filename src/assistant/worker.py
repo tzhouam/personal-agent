@@ -68,8 +68,12 @@ def _dispatch_run_phase(settings, args, token):
 def _dispatch_task(settings, args, token):
     from .task_runner import run_task
     token.check()
+    # force_resume: a queue retry legitimately resumes a record left `running`
+    # by a dead worker (the queue marks failure only after the worker raised,
+    # and the active-scoped dedupe key keeps at most one job per record)
     run_task(str(args.get("request", "")), settings, cancel_check=token.check,
-             approved_task_id=args.get("approved_task_id"))
+             approved_task_id=args.get("approved_task_id"),
+             force_resume=bool(args.get("approved_task_id")))
 
 
 def _dispatch_evolve(settings, args, token):

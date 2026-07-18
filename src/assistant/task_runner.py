@@ -48,7 +48,11 @@ from .config import Settings
 
 log = logging.getLogger("assistant")
 
-EXCLUDED_ACTIONS = ("execute_task", "plan_task", "trigger_run", "approve_task")
+EXCLUDED_ACTIONS = ("execute_task", "plan_task", "trigger_run", "approve_task",
+                    # the workflow surface is owner-only: a background task must
+                    # not author persistent behavior or fan out detached runs
+                    "create_workflow", "run_workflow", "show_workflow",
+                    "update_workflow", "retire_workflow")
 
 # Task ids are file names — validate before any path is built.
 TASK_ID_RE = re.compile(r"^task-\d{8}-\d{6}-[0-9a-f]{6}$")
@@ -197,11 +201,19 @@ def _pause_for_approval(record: dict, settings: Settings, notify: bool,
     return record
 
 
-def _load_approved(settings: Settings, task_id: str) -> dict | None:
-    """Locked `queued → running` transition for an approved task. Accepts
-    `queued` (fresh approval) and `running` (crash-recovery replay of a queue
-    job); refuses terminal or still-awaiting records — a replayed job must
-    never re-run a finished task or jump an approval."""
+def _load_approved(settings: Settings, task_id: str,
+                   allow_running: bool = False) -> dict | None:
+    """Locked `queued → running` transition for a dispatched task record.
+
+    Accepts `queued` (fresh approval / workflow start / rescue). `running` is
+    accepted ONLY with `allow_running=True` — the queue-worker retry path,
+    where the previous holder is dead by construction (the queue marks
+    failure after the worker raised) — plus the owner's manual
+    `--force-resume` escape. The CLI/approve paths never resume a `running`
+    record, so at most one live runner ever holds a record (the queue's
+    active-scoped dedupe key guards the enqueue side). Terminal and
+    still-awaiting records are always refused: a replayed job must never
+    re-run a finished task or jump an approval."""
     from .locks import data_write_lock
 
     if not TASK_ID_RE.match(str(task_id or "")):
@@ -214,7 +226,8 @@ def _load_approved(settings: Settings, task_id: str) -> dict | None:
             record = json.loads(path.read_text())
         except ValueError:
             return None
-        if record.get("status") not in ("queued", "running"):
+        allowed = ("queued", "running") if allow_running else ("queued",)
+        if record.get("status") not in allowed:
             return None
         record["status"] = "running"
         _persist(settings, record)
@@ -223,32 +236,65 @@ def _load_approved(settings: Settings, task_id: str) -> dict | None:
 
 def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
              notify: bool = True, cancel_check=None,
-             approved_task_id: str | None = None) -> dict:
+             approved_task_id: str | None = None,
+             force_resume: bool = False) -> dict:
     """Execute `request` agentically; returns the task record `{id, request,
     tier, status, steps, report, …}` (status: done | aborted | error |
-    awaiting_approval). `notify` pushes the report/approval ask to WeChat — on
-    by default because tasks run detached; the CLI passes False in the
-    foreground. `cancel_check` (§6): optional zero-arg callable invoked at the
-    top of every turn; raising from it (the job worker passes
-    `CancelToken.check`) aborts between steps. `approved_task_id` re-enters a
-    previously paused task: it resumes from the persisted steps with the
-    stored plan/tier and `pre_approved=True` (the pending risky action runs
-    first)."""
+    awaiting_approval | cancelled). `notify` pushes the report/approval ask to
+    WeChat — on by default because tasks run detached; the CLI passes False in
+    the foreground. `cancel_check` (§6): optional zero-arg callable invoked at
+    the top of every turn; raising from it (the job worker passes
+    `CancelToken.check`) aborts between steps.
+
+    `approved_task_id` re-enters a dispatched record (owner approval, a
+    workflow start, or a queue retry — `force_resume=True` additionally
+    accepts a `running` record, the worker/owner-escape path). Approval is
+    **at-most-once, per action**: the record's `pre_approved` +
+    `pending_action` are consumed (popped and persisted) at load; the pending
+    action then executes exactly once without re-gating, and every LATER
+    risky action pauses afresh. A crash between consumption and execution
+    loses the authorization — the model re-emits the action and the task
+    re-pauses for approval (safe direction: never double-executed)."""
     from .actions import execute, is_risky, looks_failed, prompt_block
     from .chat.agent import build_context
     from .llm import LLM
     from . import tracing
 
     llm = llm or LLM(settings)
-    pre_approved = False
+    pending = None
+    resumed = False
     if approved_task_id:
-        record = _load_approved(settings, approved_task_id)
+        record = _load_approved(settings, approved_task_id,
+                                allow_running=force_resume)
         if record is None:
             return {"id": str(approved_task_id), "status": "error",
                     "report": "task not found, not approved, or already finished",
                     "steps": []}
-        pre_approved = True
+        resumed = True
         record.setdefault("steps", [])
+        # consume the one-shot approval NOW (persisted): at most one action
+        # runs unguarded, and a replay can never find a live authorization
+        approved_one = bool(record.pop("pre_approved", False))
+        pending = record.pop("pending_action", None)
+        if pending is not None and not approved_one:
+            log.warning("task %s: pending action without approval — discarded "
+                        "(it will re-gate if the model re-emits it)", record["id"])
+            pending = None
+        _persist(settings, record)
+        # a task belonging to a retired/unavailable workflow must not run
+        if record.get("workflow_id"):
+            from .workflow_store import WorkflowStore, WorkflowStoreError
+
+            try:
+                wf = WorkflowStore(settings.profile_dir).get(record["workflow_id"])
+            except WorkflowStoreError:
+                wf = None
+            if wf is None:
+                record["status"] = "cancelled"
+                record["report"] = (f"workflow {record['workflow_id']} is retired "
+                                    "or unavailable — task cancelled")
+                _persist(settings, record)
+                return record
     else:
         task_id = (datetime.now().strftime("task-%Y%m%d-%H%M%S-")
                    + uuid.uuid4().hex[:6])
@@ -263,7 +309,11 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
 
     if "assessment" not in record:
         record["assessment"] = _assess(record["request"], settings, llm)
-    tier = record["tier"] = record["assessment"]["tier"]
+    tier = record["assessment"]["tier"]
+    if record.get("workflow_id") and tier == "simple":
+        tier = "medium"              # a saved workflow is multi-step by definition
+    record["assessment"]["tier"] = tier   # persist the CLAMPED tier — a resume
+    record["tier"] = tier                 # must never re-derive a laxer one
     single_model = tier in ("simple", "medium")
     loop_kwargs = {"mixture": False} if single_model else {}
     turns = min(max_turns, _TURN_BUDGET.get(tier, 12))
@@ -282,9 +332,10 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
 
     if tier != "simple" and not record.get("plan"):
         record["plan"] = _draft_plan(record["request"], context, llm, tier)
-    if not pre_approved and tier == "complex" and record["assessment"].get("risky"):
-        # fast-path pause: a plan with publishing intent never starts unapproved
-        # (the per-action gate below still guards every tier)
+    if not resumed and tier == "complex" and record["assessment"].get("risky"):
+        # fast-path pause on FRESH tasks only: a plan with publishing intent
+        # never starts unapproved. On resume, approval authorized *starting* —
+        # the per-action gate below still pauses every risky action afresh.
         result = _pause_for_approval(record, settings, notify,
                                      reason="计划包含对外发布类步骤，需要你确认")
         _record_task_metrics(settings, record, time.monotonic() - start)
@@ -292,17 +343,16 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
     _persist(settings, record)
 
     consecutive_failures = 0
-    pending = record.pop("pending_action", None) if pre_approved else None
-    if pre_approved:
+    if pending is not None:
         turns += 1   # the approved pending action gets its own turn even when
                      # the pause landed on the last budgeted step
 
     while len(record["steps"]) < turns:
         if cancel_check is not None:   # §6: per-turn cancellation checkpoint —
             cancel_check()             # outside the LLM try so the raise propagates
-        if pending is not None:        # the approved risky action runs first
+        if pending is not None:        # the ONE approved action — runs unguarded,
             move = {"thought": "(owner approved the pending action)",
-                    "action": pending}
+                    "action": pending, "_approved": True}   # then gating resumes
             pending = None
         else:
             transcript = "\n".join(
@@ -322,12 +372,30 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
             if not isinstance(move, dict):
                 record["status"], record["report"] = "error", "unparseable step from the model"
                 break
-        milestone = move.get("milestone_done")
-        if record.get("plan") and isinstance(milestone, int) \
-                and 1 <= milestone <= len(record["plan"]["milestones"]):
-            record["plan"]["milestones"][milestone - 1]["done"] = True
+        milestones = (record.get("plan") or {}).get("milestones", [])
+
+        def _tick(number) -> None:
+            """Mark plan milestone `number` done (1-based, bounds-checked)."""
+            if isinstance(number, int) and 1 <= number <= len(milestones):
+                milestones[number - 1]["done"] = True
+
         if move.get("finish") is not None:
+            _tick(move.get("milestone_done"))
+            undone = [str(i + 1) for i, m in enumerate(milestones)
+                      if not m.get("done")]
+            if undone and not record.get("finish_nudged"):
+                # truthful completion: one nudge before accepting a finish
+                # that skipped plan milestones
+                record["finish_nudged"] = True
+                record["steps"].append({
+                    "thought": str(move.get("thought", ""))[:300], "action": None,
+                    "outcome": (f"(finish rejected once — plan milestones "
+                                f"{', '.join(undone)} not marked done; complete "
+                                "them or explain in the report, then finish)")})
+                _persist(settings, record)
+                continue
             record["status"] = "done"
+            record["completion"] = "partial" if undone else "full"
             record["report"] = str(move.get("finish") or "").strip() or "(empty report)"
             record["steps"].append({"thought": str(move.get("thought", ""))[:300],
                                     "action": None, "outcome": "(finished)"})
@@ -341,9 +409,10 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
         elif action.get("type") in EXCLUDED_ACTIONS:
             step["outcome"] = f"action {action['type']!r} is not available inside a task"
             consecutive_failures += 1
-        elif is_risky(action["type"], action) and not pre_approved:
+        elif is_risky(action["type"], action) and not move.get("_approved"):
             # THE approval boundary: an outward/irreversible action pauses the
-            # task at every tier — nothing executes until the owner approves.
+            # task at every tier — only the single just-approved pending action
+            # bypasses it, so a task with two risky steps pauses twice.
             record["steps"].append({**step, "outcome": "(paused — owner approval required)"})
             result = _pause_for_approval(
                 record, settings, notify,
@@ -354,8 +423,10 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
         else:
             outcomes = execute([action], settings)
             step["outcome"] = outcomes[0] if outcomes else "(no outcome)"
-            consecutive_failures = (consecutive_failures + 1
-                                    if looks_failed(step["outcome"]) else 0)
+            failed = looks_failed(step["outcome"])
+            consecutive_failures = consecutive_failures + 1 if failed else 0
+            if not failed:   # a milestone only counts on a successful outcome
+                _tick(move.get("milestone_done"))
         record["steps"].append(step)
         _persist(settings, record)
         if consecutive_failures >= 3:
@@ -369,6 +440,19 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
         record["status"] = "aborted"
         record["report"] = f"Stopped at the {turns}-step budget without finishing."
 
+    if record.get("workflow_id") and record.get("status") == "done":
+        # BEFORE the terminal persist: a crash between the two replays the
+        # finish, and mark_ran's task-id idempotency makes the counter
+        # exactly-once (a crash in the other order would undercount forever)
+        try:
+            from .workflow_store import WorkflowStore
+
+            WorkflowStore(settings.profile_dir).mark_ran(
+                record["workflow_id"],
+                "partial" if record.get("completion") == "partial" else "done",
+                record["id"])
+        except Exception:
+            log.exception("workflow mark_ran failed")
     _persist(settings, record)
     _record_task_metrics(settings, record, time.monotonic() - start)
     if notify:
@@ -394,6 +478,7 @@ def _record_task_metrics(settings: Settings, record: dict, duration_s: float) ->
             "duration_s": round(duration_s, 2),
             "steps": len(record.get("steps") or []),
             "tier": TIERS.index(record.get("tier", "medium")),
+            "workflow": int(bool(record.get("workflow_id"))),
             "done": int(record.get("status") == "done"),
             "aborted": int(record.get("status") == "aborted"),
             "awaiting": int(record.get("status") == "awaiting_approval"),
