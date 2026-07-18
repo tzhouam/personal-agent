@@ -5,15 +5,20 @@ Use only this repository's tasks, architecture, and metrics. Inspect its docs,
 `src/assistant/`, self-improvement scripts, skills, and tests. Establish the
 baseline and identify concrete friction before editing.
 
-Mandatory plan review during this goal: every plan you create while working on
-this goal — research, design, implementation, testing, or evaluation — must be
-reviewed through the existing hook by a GPT-5.6 Cursor Agent before execution.
-Write the plan, trigger the review hook, incorporate actionable feedback, and
-execute only after acceptance. Never skip review because a plan seems small.
-If the reviewer is unavailable, stop and report the blocker instead of
-executing unreviewed. This is a development-process rule; do not add GPT-5.6
-review as a runtime feature of the assistant unless analysis separately
-justifies it.
+Mandatory plan review during this goal (amended 2026-07-18, owner directive:
+NO outside tools — no cursor-agent or any third-party CLI anywhere in the
+process): every plan you create while working on this goal — research,
+design, implementation, testing, or evaluation — must be reviewed BEFORE
+execution through the local reviewer, `scripts/review_plan.py`, which runs
+the critique on the owner's own configured endpoints (the `LLM_REVIEW` slot
+in `.env`; falls back to the LLM_MIXTURE aggregator, then ANTHROPIC_MODEL).
+Write the plan, run the reviewer, incorporate actionable feedback, and
+execute only after acceptance (exit 0 = approved; exit 1 =
+approve-with-changes: incorporate the must-fixes, then proceed; exit 2 =
+revise and re-review). Never skip review because a plan seems small. If the
+reviewer is unavailable (exit 3), stop and report the blocker instead of
+executing unreviewed. This is a development-process rule; plan review is not
+a runtime feature of the assistant.
 
 Priorities:
 

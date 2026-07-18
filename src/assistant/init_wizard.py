@@ -211,7 +211,7 @@ def probe_profile(s: Settings):
 # cheap-tier aliases accepted by _CHEAP_ROLES.
 _KNOWN_ROLES = {"chat", "pipeline", "research", "task", "evolve",
                 "cheap", "bulk", "score"}
-_ROUTING_KEYS = ("LLM_ROLES", "LLM_MIXTURE")
+_ROUTING_KEYS = ("LLM_ROLES", "LLM_MIXTURE", "LLM_REVIEW")
 
 
 def _effective_raw(name: str, env_files: tuple | None = None) -> tuple[str, str]:
@@ -273,6 +273,14 @@ def _summarize_mixture(parsed: dict) -> tuple[list[str], str]:
                    f"→ agg {agg_model}; roles {', '.join(map(str, roles))}")
 
 
+def _summarize_review(parsed: dict) -> tuple[list[str], str]:
+    """Safe one-line summary of a parsed LLM_REVIEW spec (the plan-review
+    model slot; model id only)."""
+    model = parsed.get("model")
+    warns = [] if model else ['LLM_REVIEW has no "model"']
+    return warns, f"review→{model or '?'}"
+
+
 def probe_model_routing(s: Settings, env_files: tuple | None = None):
     """Diagnose `LLM_ROLES` / `LLM_MIXTURE` — the two optional JSON knobs that
     `config.py` deliberately degrades to `{}` on malformed input so a broken
@@ -284,7 +292,8 @@ def probe_model_routing(s: Settings, env_files: tuple | None = None):
 
     parts, warns, failed = [], [], False
     for name, summarize in ((_ROUTING_KEYS[0], _summarize_roles),
-                            (_ROUTING_KEYS[1], _summarize_mixture)):
+                            (_ROUTING_KEYS[1], _summarize_mixture),
+                            (_ROUTING_KEYS[2], _summarize_review)):
         raw, source = _effective_raw(name, env_files)
         if not raw:
             continue

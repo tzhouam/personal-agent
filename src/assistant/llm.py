@@ -172,7 +172,12 @@ class LLM:
         self.settings = settings
         self.default_model = settings.anthropic_model
         self.cheap_model = settings.cheap_model
-        self.roles: dict = settings.llm_roles or {}
+        self.roles: dict = dict(settings.llm_roles or {})
+        # LLM_REVIEW seeds the "review" role (an explicit LLM_ROLES entry
+        # wins): the strongest-reasoning slot for plan/design review — always
+        # single-model, never in the MoA role set
+        if (settings.llm_review or {}).get("model"):
+            self.roles.setdefault("review", settings.llm_review)
         self.mixture: dict = settings.llm_mixture or {}
         # roles that run Mixture-of-Agents when >=2 members are configured;
         # defaults to the offline, quality-sensitive roles (interactive chat is

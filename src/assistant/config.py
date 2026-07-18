@@ -71,8 +71,15 @@ class Settings(BaseSettings):
     # e.g. {"members": [{"model": "mimo-v2.5"}, {"model": "mimo-v2.5-pro"}],
     #       "aggregator": {"model": "mimo-v2.5-pro"}, "roles": ["pipeline"]}
     llm_mixture: Annotated[dict, NoDecode] = {}
+    # Review model (LLM_REVIEW) — the "strongest available reasoning" slot:
+    # one spec {"model": ..., "base_url"?, "api_key"?} (the same shape as a
+    # single LLM_ROLES entry). Used by the local plan reviewer
+    # (scripts/review_plan.py) and resolvable as the "review" role; never part
+    # of the MoA role set. Unset → the reviewer falls back to the mixture
+    # aggregator, then the default model.
+    llm_review: Annotated[dict, NoDecode] = {}
 
-    @field_validator("llm_roles", "llm_mixture", mode="before")
+    @field_validator("llm_roles", "llm_mixture", "llm_review", mode="before")
     @classmethod
     def _parse_json_dict(cls, value):
         """Tolerantly parse LLM_ROLES / LLM_MIXTURE from env JSON.
