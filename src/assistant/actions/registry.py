@@ -388,13 +388,16 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         name="log_exercise",
         description="record an exercise session in the health log",
         handler=_log_exercise,
-        params={"activity": {"required": True, "desc": "e.g. running/swim/gym"},
-                "duration_min": {"required": True, "desc": "minutes"},
+        params={"activity": {"required": True, "desc": "e.g. running/swim/gym; "
+                             "put sets/reps in note for strength work"},
+                "duration_min": {"required": False, "desc": "minutes if timed — "
+                                 "OMIT for set/rep work rather than inventing one"},
                 "date": {"required": False, "desc": "YYYY-MM-DD, default today"},
                 "time": {"required": False, "desc": "HH:MM when known"},
-                "note": {"required": False, "desc": "distance/intensity etc."}},
+                "note": {"required": False, "desc": "sets/reps, distance, intensity"}},
         llm=True,
-        prompt_example='{"type": "log_exercise", "activity": "跑步", "duration_min": 30}',
+        prompt_example='{"type": "log_exercise", "activity": "跑步", "duration_min": 30}   '
+                       '# duration_min optional — omit for set/rep work, put sets in note',
         slash="health",
     ),
     Action(

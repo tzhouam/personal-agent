@@ -452,7 +452,7 @@ def _health_record_line(record: dict) -> str:
     from ..finance_store import timestamp_of
 
     detail = record.get("description") or record.get("activity") or ""
-    if record["kind"] == "exercise":
+    if record["kind"] == "exercise" and record.get("duration_min") is not None:
         detail += f" {record['duration_min']}min"
     if record["kind"] == "weight":
         detail = f"{record['weight_kg']} kg"
@@ -552,7 +552,7 @@ def _log_exercise(settings: Settings, p: dict) -> str:
         activity=p.get("activity", ""), duration_min=p.get("duration_min"),
         note=p.get("note", ""))
     if status == "invalid":
-        return "exercise rejected — needs activity and duration_min (1-1440)"
+        return "exercise rejected — needs an activity (duration_min optional, 1-1440)"
     if status == "duplicate":
         return f"NOT logged — {record['id']} already covers that session time"
     return _health_record_line(record)

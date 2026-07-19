@@ -120,10 +120,17 @@ class HealthStore:
                     body[key] = value
         elif kind == "exercise":
             body["activity"] = str(fields.get("activity") or "").strip()[:80]
-            duration = _number(fields.get("duration_min"), 1, 1440)
-            if not body["activity"] or duration is None:
+            if not body["activity"]:
                 return "invalid", None
-            body["duration_min"] = duration
+            # duration is OPTIONAL: set/rep strength work (pushups × sets,
+            # squats × sets) has no meaningful minute count, so requiring one
+            # forced the model to invent a time (owner correction 2026-07-15:
+            # don't 自行估算时长). Store it only when a valid value is given;
+            # drop an out-of-range value like a bad macro estimate rather than
+            # rejecting the whole record.
+            duration = _number(fields.get("duration_min"), 1, 1440)
+            if duration is not None:
+                body["duration_min"] = duration
         else:  # weight
             kg = _number(fields.get("weight_kg"), 20, 400)
             if kg is None:
@@ -253,9 +260,9 @@ class HealthStore:
                  if len(weight_window) >= 2 else None)
         exercise = [r for r in window if r["kind"] == "exercise"]
         by_activity: dict[str, float] = {}
-        for r in exercise:
+        for r in exercise:  # durationless (set/rep) sessions contribute 0 min
             by_activity[r["activity"]] = round(
-                by_activity.get(r["activity"], 0) + r["duration_min"], 1)
+                by_activity.get(r["activity"], 0) + (r.get("duration_min") or 0), 1)
         meals = [r for r in window if r["kind"] == "meal"]
         kcal_days: dict[str, float] = {}
         protein_days: dict[str, float] = {}
@@ -277,7 +284,8 @@ class HealthStore:
                                              "date": latest["date"]},
                 "weight_delta": delta,
                 "exercise_sessions": len(exercise),
-                "exercise_minutes": round(sum(r["duration_min"] for r in exercise), 1),
+                "exercise_minutes": round(
+                    sum(r.get("duration_min") or 0 for r in exercise), 1),
                 "exercise_by_activity": dict(sorted(by_activity.items(),
                                                     key=lambda kv: -kv[1])),
                 "meals_logged": len(meals),
