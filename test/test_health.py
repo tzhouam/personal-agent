@@ -36,7 +36,8 @@ def test_records_validation_and_kinds(settings):
                      protein_g=25)[0] == "created"
     assert store.add("meal", description="")[0] == "invalid"
     assert store.add("exercise", activity="跑步", duration_min=30)[0] == "created"
-    assert store.add("exercise", activity="跑步")[0] == "invalid"
+    assert store.add("exercise", activity="跑步")[0] == "created"  # duration optional
+    assert store.add("exercise", activity="")[0] == "invalid"  # activity still required
     assert store.add("weight", weight_kg=70.5)[0] == "created"
     assert store.add("weight", weight_kg=5)[0] == "invalid"
     assert store.add("sleep", hours=8)[0] == "invalid"
@@ -117,6 +118,25 @@ def test_actions_roundtrip(settings):
     assert run_action("done_health_need", {"id": "n4"}, settings) == "need n4 marked covered"
     summary = run_action("health_summary", {}, settings)
     assert "70.5 kg" in summary and "跑步 30" in summary
+
+
+def test_exercise_without_duration_logs_faithfully(settings):
+    # Set/rep strength work has no meaningful minute count — logging it must
+    # NOT require (and so must not provoke inventing) a duration.
+    store = HealthStore(settings.profile_dir)
+    status, record = store.add("exercise", activity="俯卧撑两组+深蹲两组",
+                               note="each 2 sets")
+    assert status == "created"
+    assert "duration_min" not in record  # never fabricated
+    # the outcome line omits the minute suffix rather than printing a made-up one
+    out = run_action("log_exercise",
+                     {"activity": "卷腹", "note": "3 sets"}, settings)
+    assert "exercise · 卷腹" in out and "min" not in out
+    # a timed session next to a set/rep one still aggregates cleanly
+    store.add("exercise", activity="跑步", duration_min=20)
+    s = store.summary(7)
+    assert s["exercise_sessions"] == 3 and s["exercise_minutes"] == 20
+    render_summary(s)  # durationless sessions must not break rendering
 
 
 def test_chat_context_and_health_logging(settings):
