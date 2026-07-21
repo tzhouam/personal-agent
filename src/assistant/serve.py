@@ -593,10 +593,12 @@ def run_serve(settings: Settings) -> int:
     # keeps the legacy detached-Popen path, so no pool is needed there.
     pool = None
     if settings.deployment_mode == "multi_tenant":
-        from .jobs import JobQueue
-        from .worker import WorkerPool
+        from .platform.jobs import JobQueue
+        from .platform.worker import WorkerPool
+        from .agent.dispatch import build_dispatch
 
         pool = WorkerPool(JobQueue(settings.shared_dir),
+                          dispatch=build_dispatch(),
                           max_workers=settings.job_workers).start()
         log.info("serve: job worker pool started (%d workers)", settings.job_workers)
 
