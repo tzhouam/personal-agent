@@ -49,17 +49,19 @@ def test_records_validation_and_kinds(settings):
 
 def test_record_dedup_on_stated_time(settings):
     store = HealthStore(settings.profile_dir)
-    assert store.add("meal", description="牛肉面", time="12:30")[0] == "created"
+    first = store.add("meal", description="牛肉面", time="12:30")
+    assert first[0] == "created"
+    hid = first[1]["id"]
     status, existing = store.add("meal", description="香浓牛肉面一碗",
                                  time="12:30")  # same dish, reworded
-    assert status == "duplicate" and existing["id"] == "h1"
+    assert status == "duplicate" and existing["id"] == hid
     assert store.add("meal", description="牛肉面", time="19:00")[0] == "created"
     # weight: timeless same-day same-kg re-send dedups
     assert store.add("weight", weight_kg=70.5)[0] == "created"
     assert store.add("weight", weight_kg=70.5)[0] == "duplicate"
     assert store.add("weight", weight_kg=70.9)[0] == "created"
     # void frees the slot
-    store.void("h1")
+    store.void(hid)
     assert store.add("meal", description="牛肉面", time="12:30")[0] == "created"
 
 
@@ -102,7 +104,8 @@ def test_needs_lifecycle(settings):
 def test_actions_roundtrip(settings):
     out = run_action("log_meal", {"description": "牛肉面", "calories_kcal": 550,
                                   "protein_g": 25, "time": "12:30"}, settings)
-    assert out.startswith("logged h1: meal · 牛肉面 · calories 550.0 protein 25.0")
+    mid = HealthStore(settings.profile_dir).records()[-1]["id"]
+    assert out.startswith(f"logged {mid}: meal · 牛肉面 · calories 550.0 protein 25.0")
     assert "12:30" in out
     out = run_action("log_exercise", {"activity": "跑步", "duration_min": 30}, settings)
     assert "exercise · 跑步 30" in out
@@ -114,8 +117,10 @@ def test_actions_roundtrip(settings):
     out = run_action("set_health_profile", {"height_cm": 178, "sex": "male"}, settings)
     assert "height_cm=178.0" in out and "sex=male" in out
     out = run_action("add_health_need", {"item": "维生素D"}, settings)
-    assert out == "tracking need n4: 维生素D"
-    assert run_action("done_health_need", {"id": "n4"}, settings) == "need n4 marked covered"
+    # records use date-encoded ids now, so they no longer consume the need
+    # counter — the first need is n1
+    assert out == "tracking need n1: 维生素D"
+    assert run_action("done_health_need", {"id": "n1"}, settings) == "need n1 marked covered"
     summary = run_action("health_summary", {}, settings)
     assert "70.5 kg" in summary and "跑步 30" in summary
 
@@ -145,7 +150,8 @@ def test_chat_context_and_health_logging(settings):
         {"type": "log_exercise", "activity": "跑步", "duration_min": 30}]})
     reply = handle_message("今晚跑了30分钟", settings, llm)
     assert "## Health" in llm.prompts[0] and "height_cm 178" in llm.prompts[0]
-    assert "logged h1: exercise · 跑步 30" in reply
+    hid = HealthStore(settings.profile_dir).records()[-1]["id"]
+    assert f"logged {hid}: exercise · 跑步 30" in reply
     # no health data at all → no health section
     other = type(settings)(_env_file=None, data_dir=settings.data_dir / "other")
     assert "## Health" not in build_context(other)
@@ -169,8 +175,8 @@ def test_food_photo_flow_native_multimodal(settings, tmp_path):
                                   "time": "12:30"}]})
     reply = handle_message("这顿饭帮我记一下", settings, llm, image_paths=[str(pic)])
     assert seen["images"] == [str(pic)]
-    assert "logged h1: meal · 牛肉面" in reply
     rec = HealthStore(settings.profile_dir).records()[0]
+    assert f"logged {rec['id']}: meal · 牛肉面" in reply
     assert rec["calories_kcal"] == 550.0 and rec["time_source"] == "stated"
 
 
@@ -181,8 +187,8 @@ def test_crosslinks_join_the_stores(settings):
     finance = FinanceStore(settings.profile_dir)
     health = HealthStore(settings.profile_dir)
     # same event in both stores: lunch at 12:30, 45 CNY
-    finance.add("expense", 45, category="food", note="面点王", time="12:30")
-    health.add("meal", description="牛肉面", time="12:30", calories_kcal=550)
+    _, fexp = finance.add("expense", 45, category="food", note="面点王", time="12:30")
+    _, hmeal = health.add("meal", description="牛肉面", time="12:30", calories_kcal=550)
     # food spend on a day with no meal logged
     finance.add("expense", 88, category="food", note="晚饭", when=_day(-1))
     # health-category spend + an open need
@@ -192,7 +198,7 @@ def test_crosslinks_join_the_stores(settings):
     links = build_crosslinks(settings)
     assert "2 food purchases (133.0 CNY) vs 1 meals logged" in links
     assert _day(-1) in links                      # spend-without-meal day flagged
-    assert "h1 牛肉面 ↔ f1 45.0 CNY" in links      # date+time matched pair
+    assert f"{hmeal['id']} 牛肉面 ↔ {fexp['id']} 45.0 CNY" in links  # date+time matched pair
     assert "health spending this month: 120.0 CNY" in links
     assert "open nutrient needs: 维生素D" in links
     # auto-time records never fabricate pairs
@@ -204,11 +210,11 @@ def test_crosslinks_join_the_stores(settings):
 def test_crosslinks_in_chat_context(settings):
     from assistant.agent.finance_store import FinanceStore
 
-    FinanceStore(settings.profile_dir).add("expense", 45, category="food",
-                                           note="午饭", time="12:30")
+    _, fexp = FinanceStore(settings.profile_dir).add(
+        "expense", 45, category="food", note="午饭", time="12:30")
     HealthStore(settings.profile_dir).add("meal", description="牛肉面", time="12:30")
     ctx = build_context(settings)
-    assert "## Cross-links" in ctx and "牛肉面 ↔ f1" in ctx
+    assert "## Cross-links" in ctx and f"牛肉面 ↔ {fexp['id']}" in ctx
     # empty stores → no section
     other = type(settings)(_env_file=None, data_dir=settings.data_dir / "other")
     assert "## Cross-links" not in build_context(other)
@@ -219,11 +225,12 @@ def test_meal_dedup_allows_second_dish_same_sitting(settings):
     store = HealthStore(settings.profile_dir)
     assert store.add("meal", description="晚餐: 椒盐虾配脆炸罗勒叶",
                      time="20:00")[0] == "created"
+    first_id = store.records()[0]["id"]
     assert store.add("meal", description="甜品: 冰糖燕窝",
                      time="20:00")[0] == "created"        # different dish → ok
     status, existing = store.add("meal", description="椒盐虾配脆炸罗勒叶",
                                  time="20:00")            # same dish reworded
-    assert status == "duplicate" and existing["id"] == "h1"
+    assert status == "duplicate" and existing["id"] == first_id
 
 
 def test_summary_per_day_and_context_lists_meals(settings):
@@ -248,15 +255,16 @@ def test_summary_per_day_and_context_lists_meals(settings):
 
 def test_health_query_by_day_kind_and_text(settings):
     store = HealthStore(settings.profile_dir)
-    store.add("meal", when="2026-07-13", time="08:00", description="早餐 燕窝粥",
-              calories_kcal=200, protein_g=8)
-    store.add("meal", when="2026-07-13", time="12:30", description="午餐 牛肉面",
-              calories_kcal=600, protein_g=30)
+    m1 = store.add("meal", when="2026-07-13", time="08:00", description="早餐 燕窝粥",
+                   calories_kcal=200, protein_g=8)[1]["id"]
+    m2 = store.add("meal", when="2026-07-13", time="12:30", description="午餐 牛肉面",
+                   calories_kcal=600, protein_g=30)[1]["id"]
     store.add("meal", when="2026-07-10", time="19:00", description="晚餐 沙拉",
               calories_kcal=300, protein_g=15)
-    store.add("exercise", when="2026-07-13", time="18:00", activity="跑步", duration_min=30)
+    e1 = store.add("exercise", when="2026-07-13", time="18:00",
+                   activity="跑步", duration_min=30)[1]["id"]
     # single day (all kinds)
-    assert {r["id"] for r in store.query(start="2026-07-13", end="2026-07-13")} == {"h1", "h2", "h4"}
+    assert {r["id"] for r in store.query(start="2026-07-13", end="2026-07-13")} == {m1, m2, e1}
     # by kind
     assert [r["description"] for r in
             store.query(start="2026-07-13", end="2026-07-13", kind="meal")] == ["早餐 燕窝粥", "午餐 牛肉面"]
@@ -312,3 +320,49 @@ def test_prompt_and_examples_instruct_date_resolution(settings):
     assert '"date"' in ACTIONS["log_transaction"].prompt_example
     sp = system_prompt(settings)
     assert "昨天" in sp and "temporal anchor" in sp         # told to resolve relative days
+
+
+# ── per-day file migration (preserve hN/nN, shared next_id on reverse) ──────
+
+def _legacy_health(pdir):
+    import yaml
+    pdir.mkdir(parents=True, exist_ok=True)
+    legacy = {"profile": {"sex": "male", "height_cm": 178.0}, "next_id": 4,
+              "needs": [{"id": "n3", "item": "维生素D", "since": "2026-07-10"}],
+              "records": [
+                  {"id": "h1", "kind": "meal", "date": "2026-07-19", "time": "12:30",
+                   "time_source": "stated", "description": "牛肉面", "note": "", "source": "chat"},
+                  {"id": "h2", "kind": "weight", "date": "2026-07-20", "time": "08:00",
+                   "time_source": "stated", "weight_kg": 70.5, "note": "", "source": "chat"}]}
+    (pdir / "health.yaml").write_text(yaml.safe_dump(legacy, allow_unicode=True))
+
+
+def test_health_migration_preserves_ids_profile_needs(settings):
+    p = settings.profile_dir
+    _legacy_health(p)
+    store = HealthStore(p)
+    assert {r["id"] for r in store.records()} == {"h1", "h2"}     # legacy record ids
+    assert store.profile() == {"sex": "male", "height_cm": 178.0}
+    assert [n["id"] for n in store.open_needs()] == ["n3"]        # legacy need id
+    assert (p / "health" / "profile.yaml").exists()
+    assert (p / "health" / ".migrated").exists()
+    # new record → date-encoded id; new need → n4 (continues next_need_id=4)
+    assert store.add("meal", description="沙拉", when="2026-07-19")[1]["id"] == "h-20260719-1"
+    assert store.add_need("蛋白质")["id"] == "n4"
+    assert store.void("h1")                                       # legacy id still resolvable
+
+
+def test_health_reverse_migration_reconstructs_shared_next_id(settings):
+    import yaml
+    p = settings.profile_dir
+    _legacy_health(p)
+    store = HealthStore(p)
+    store.add("meal", description="沙拉", when="2026-07-19")       # date-encoded record
+    store.add_need("蛋白质")                                      # n4
+    store.to_single_file()
+    single = yaml.safe_load((p / "health.yaml").read_text())
+    assert not (p / "health").exists()
+    # shared next_id sits above max(hN, nN): h1,h2 → 2; n3,n4 → 4 ⇒ 5
+    assert single["next_id"] == 5
+    assert single["profile"] == {"sex": "male", "height_cm": 178.0}
+    assert len(single["records"]) == 3 and len(single["needs"]) == 2

@@ -118,8 +118,9 @@ def test_action_review_retries_failures(settings):
     assert "transaction rejected" in llm.prompts[1]      # saw the failure
     assert "Actions you just emitted" in llm.prompts[1]
     assert reply.startswith("修正后已记录")               # revised reply kept
-    assert "(retry) logged f1: expense 45.0" in reply
     from assistant.agent.finance_store import FinanceStore
+    rid = FinanceStore(settings.profile_dir).records()[0]["id"]
+    assert f"(retry) logged {rid}: expense 45.0" in reply
     assert FinanceStore(settings.profile_dir).records()[0]["amount"] == 45.0
 
 
@@ -139,12 +140,13 @@ def test_action_review_skips_success_and_duplicates(settings):
     assert llm.calls == 1
     # duplicate rejection → no retry round
     from assistant.agent.finance_store import FinanceStore
-    FinanceStore(settings.profile_dir).add("expense", 68, note="面点王", time="12:30")
+    _, dup = FinanceStore(settings.profile_dir).add(
+        "expense", 68, note="面点王", time="12:30")
     llm = CountingLLM({"reply": "ok", "actions": [
         {"type": "log_transaction", "kind": "expense", "amount": 68,
          "note": "面点王", "time": "12:30"}]})
     reply = handle_message("记一下", settings, llm)
-    assert llm.calls == 1 and "duplicate of f1" in reply
+    assert llm.calls == 1 and f"duplicate of {dup['id']}" in reply
 
 
 def test_action_review_gives_up_when_unfixable(settings):

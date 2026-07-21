@@ -294,7 +294,7 @@ def build_context(settings: Settings) -> str:
         from assistant.agent.health_store import render_summary as render_health
 
         store = HealthStore(settings.profile_dir)
-        if store.records() or store.load()["profile"] or store.open_needs():
+        if store.records() or store.profile() or store.open_needs():
             block = ["## Health (computed — cite these numbers)",
                      render_health(store.summary())]
             recent = store.records(days=3)[-16:]  # individual meals/exercise, so

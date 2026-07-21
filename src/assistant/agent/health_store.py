@@ -15,50 +15,165 @@ analysis numbers (BMI, weight trend, exercise totals, daily calorie/protein
 averages) are computed here in code so health advice cites real figures.
 """
 
+import re
+import shutil
 import subprocess
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yaml
 
-from assistant.platform.locks import locked_transaction
+from assistant.platform.locks import _path_lock, locked_transaction
 
 RECORD_KINDS = ("meal", "exercise", "weight")
 
+# date-encoded record id: h-YYYYMMDD-N (new); legacy record ids are bare hN;
+# need ids are nN (allocated from the meta file's next_need_id).
+_DAY_ID_RE = re.compile(r"^h-(\d{8})-(\d+)$")
+
 
 class HealthStore:
-    """`health.yaml`: `{profile, next_id, needs, records}`. Every mutation
-    rewrites the file and commits it when the profile dir is a git repo."""
+    """Health log sharded into **per-day files** `health/YYYY-MM-DD.yaml`
+    (`{records: [...]}`) keyed by each record's event date, with the static body
+    profile + nutrient needs in a non-daily `health/profile.yaml`
+    (`{profile, needs, next_need_id}`). Legacy `hN` record ids and `nN` need ids
+    are preserved; new records get self-describing `h-YYYYMMDD-N` ids. A one-time
+    `_ensure_migrated()` splits the old single `health.yaml`."""
 
-    FILENAME = "health.yaml"
+    DIRNAME = "health"
+    LEGACY = "health.yaml"
 
     def __init__(self, repo_dir: Path):
-        """Bind to `health.yaml` inside `repo_dir` (the profile git repo)."""
-        self.repo_dir = repo_dir
-        self.path = repo_dir / self.FILENAME
-        self._lock_file = repo_dir.parent / "write.lock"
+        """Bind to the `health/` day-file dir inside `repo_dir` (profile repo)."""
+        self.repo_dir = Path(repo_dir)
+        self.dir = self.repo_dir / self.DIRNAME
+        self.legacy_path = self.repo_dir / self.LEGACY
+        self.meta_path = self.dir / "profile.yaml"
+        self.marker_path = self.dir / ".migrated"
+        self._lock_file = self.repo_dir.parent / "write.lock"
 
-    def load(self) -> dict:
-        """Parsed store, or an empty scaffold when missing/empty."""
-        if not self.path.exists():
-            return {"profile": {}, "next_id": 1, "needs": [], "records": []}
-        data = yaml.safe_load(self.path.read_text()) or {}
-        for key, default in (("profile", {}), ("next_id", 1),
-                             ("needs", []), ("records", [])):
+    # ── per-day file plumbing ────────────────────────────────────────
+    def _day_path(self, day: str) -> Path:
+        return self.dir / f"{day}.yaml"
+
+    def _load_day(self, day: str) -> dict:
+        p = self._day_path(day)
+        if not p.exists():
+            return {"records": []}
+        return yaml.safe_load(p.read_text()) or {"records": []}
+
+    def _load_meta(self) -> dict:
+        if not self.meta_path.exists():
+            return {"profile": {}, "needs": [], "next_need_id": 1}
+        data = yaml.safe_load(self.meta_path.read_text()) or {}
+        for key, default in (("profile", {}), ("needs", []), ("next_need_id", 1)):
             data.setdefault(key, default)
         return data
 
-    def _save(self, data: dict, message: str) -> None:
-        """Write back and git-commit (best-effort) so history is auditable."""
-        self.repo_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
-        tmp.replace(self.path)  # atomic — readers never see a torn file
+    def _git(self, *args: str) -> None:
         if (self.repo_dir / ".git").exists():
-            subprocess.run(["git", "add", self.FILENAME], cwd=self.repo_dir,
-                           capture_output=True)
-            subprocess.run(["git", "commit", "-q", "-m", message], cwd=self.repo_dir,
-                           capture_output=True)
+            subprocess.run(["git", *args], cwd=self.repo_dir, capture_output=True)
+
+    def _write_yaml(self, path: Path, data: dict) -> Path:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp.replace(path)  # atomic — readers never see a torn file
+        return path
+
+    def _save_day(self, day: str, data: dict, message: str) -> None:
+        p = self._write_yaml(self._day_path(day), data)
+        self._git("add", str(p.relative_to(self.repo_dir)))
+        self._git("commit", "-q", "-m", message)
+
+    def _save_meta(self, data: dict, message: str) -> None:
+        p = self._write_yaml(self.meta_path, data)
+        self._git("add", str(p.relative_to(self.repo_dir)))
+        self._git("commit", "-q", "-m", message)
+
+    def _ensure_migrated(self) -> None:
+        """Split the legacy single `health.yaml` into day-files + `profile.yaml`,
+        once. Marker-gated, crash-safe (deterministic rebuild), marker-after-
+        validated-output. The legacy shared `next_id` becomes `next_need_id` (new
+        needs continue the sequence; records switch to date-encoded ids)."""
+        if self.marker_path.exists():
+            return
+        with _path_lock(self._lock_file):
+            if self.marker_path.exists():
+                return
+            self.dir.mkdir(parents=True, exist_ok=True)
+            if not self.legacy_path.exists():
+                self.marker_path.write_text("no-legacy\n")
+                return
+            legacy = yaml.safe_load(self.legacy_path.read_text()) or {}
+            records = legacy.get("records", [])
+            by_day: dict[str, list] = {}
+            for r in records:
+                by_day.setdefault(str(r["date"]), []).append(r)
+            written = 0
+            for day, recs in by_day.items():
+                self._write_yaml(self._day_path(day), {"records": recs})
+                written += len(recs)
+            self._write_yaml(self.meta_path, {
+                "profile": legacy.get("profile", {}), "needs": legacy.get("needs", []),
+                "next_need_id": legacy.get("next_id", 1)})
+            if written != len(records):
+                raise RuntimeError(
+                    f"health migration lost records: {written} != {len(records)}")
+            self._git("add", self.DIRNAME)
+            self._git("commit", "-q", "-m", "health: migrate log to per-day files")
+            self.marker_path.write_text("migrated\n")
+
+    def _find(self, record_id: str) -> tuple[str | None, dict]:
+        """`(day, day_data)` holding `record_id`, or `(None, {})`. Date-encoded
+        ids parse their day; legacy `hN` ids scan day-files."""
+        m = _DAY_ID_RE.match(str(record_id))
+        if m:
+            c = m.group(1)
+            day = f"{c[:4]}-{c[4:6]}-{c[6:8]}"
+            data = self._load_day(day)
+            if any(r.get("id") == record_id for r in data["records"]):
+                return day, data
+            return None, {}
+        if self.dir.exists():
+            for p in sorted(self.dir.glob("*.yaml")):
+                if p.name == "profile.yaml":
+                    continue
+                data = yaml.safe_load(p.read_text()) or {"records": []}
+                if any(r.get("id") == record_id for r in data.get("records", [])):
+                    return p.stem, data
+        return None, {}
+
+    def profile(self) -> dict:
+        """The static body profile dict (sex/birth_year/height_cm)."""
+        self._ensure_migrated()
+        return dict(self._load_meta()["profile"])
+
+    def to_single_file(self) -> int:
+        """Reverse migration (rollback): merge day-files + `profile.yaml` back
+        into a single `health.yaml`. Reconstructs the shared `next_id` above the
+        max legacy `hN` AND `nN` suffix so old-code `add()`/`add_need()` can't
+        collide. Returns the record count. Caller quiesces writers + holds lock."""
+        recs = []
+        if self.dir.exists():
+            for p in sorted(self.dir.glob("*.yaml")):
+                if p.name == "profile.yaml":
+                    continue
+                recs.extend((yaml.safe_load(p.read_text()) or {}).get("records", []))
+        recs.sort(key=lambda r: (str(r["date"]), str(r["id"])))
+        meta = self._load_meta()
+        suffixes = [int(m.group(1)) for r in recs
+                    if (m := re.match(r"^h(\d+)$", str(r.get("id", ""))))]
+        suffixes += [int(m.group(1)) for n in meta["needs"]
+                     if (m := re.match(r"^n(\d+)$", str(n.get("id", ""))))]
+        next_id = max(suffixes, default=0) + 1
+        self._write_yaml(self.legacy_path, {
+            "profile": meta["profile"], "next_id": next_id,
+            "needs": meta["needs"], "records": recs})
+        shutil.rmtree(self.dir, ignore_errors=True)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "health: revert to single-file log")
+        return len(recs)
 
     # ── static profile ───────────────────────────────────────────────
     @locked_transaction
@@ -66,7 +181,8 @@ class HealthStore:
         """Update the static body profile (sex, birth_year, height_cm) with
         the validated subset of `fields`; unknown/invalid ones are ignored.
         Returns the stored profile."""
-        data = self.load()
+        self._ensure_migrated()
+        data = self._load_meta()
         profile = data["profile"]
         sex = str(fields.get("sex") or "").strip().lower()
         if sex in ("male", "female", "m", "f", "男", "女"):
@@ -80,7 +196,7 @@ class HealthStore:
                     profile[key] = int(value) if key == "birth_year" else round(value, 1)
             except (TypeError, ValueError):
                 pass
-        self._save(data, "health: profile update")
+        self._save_meta(data, "health: profile update")
         return profile
 
     # ── records ──────────────────────────────────────────────────────
@@ -94,6 +210,7 @@ class HealthStore:
         idea); weight additionally matches on the same kg for timeless
         re-sends. Numeric fields are validated per kind; a meal keeps its
         free-text `description` plus optional calories/macros estimates."""
+        self._ensure_migrated()
         kind = str(kind).strip().lower()
         if kind not in RECORD_KINDS:
             return "invalid", None
@@ -138,8 +255,8 @@ class HealthStore:
             body["weight_kg"] = kg
         note = str(fields.get("note") or "")[:200]
 
-        data = self.load()
-        for r in data["records"]:
+        day_data = self._load_day(when)   # dedup within this day only
+        for r in day_data["records"]:
             if r.get("voided") or r["kind"] != kind or str(r["date"]) != when:
                 continue
             if stated and _stated_time(r) == stated:
@@ -155,36 +272,46 @@ class HealthStore:
                     and r.get("weight_kg") == body["weight_kg"]:
                 return "duplicate", r
         now = datetime.now()
-        record = {"id": f"h{data['next_id']}", "kind": kind, "date": when,
+        record = {"id": f"h-{when.replace('-', '')}-{_next_n(day_data['records'], when)}",
+                  "kind": kind, "date": when,
                   "time": stated or now.strftime("%H:%M"),
                   "time_source": "stated" if stated else "auto",
                   "logged_at": now.strftime("%Y-%m-%d %H:%M"),
                   **body, "note": note, "source": str(source or "chat")[:20]}
-        data["next_id"] += 1
-        data["records"].append(record)
+        day_data["records"].append(record)
         label = body.get("description") or body.get("activity") or body.get("weight_kg")
-        self._save(data, f"health: {kind} {label} ({record['id']})")
+        self._save_day(when, day_data, f"health: {kind} {label} ({record['id']})")
         return "created", record
 
     @locked_transaction
     def void(self, record_id: str) -> bool:
         """Mark a record voided (never delete). True if one was voided."""
-        data = self.load()
+        self._ensure_migrated()
+        day, data = self._find(record_id)
+        if day is None:
+            return False
         for r in data["records"]:
             if r["id"] == record_id and not r.get("voided"):
                 r["voided"] = True
-                self._save(data, f"health: void {record_id}")
+                self._save_day(day, data, f"health: void {record_id}")
                 return True
         return False
 
     def records(self, days: int | None = None,
                 kind: str | None = None) -> list[dict]:
         """Non-voided records, oldest first; `days` limits to a trailing
-        window and `kind` to one record type."""
+        window (system-local today) and `kind` to one record type. Reads only
+        the day-files whose filename date is in-window."""
+        self._ensure_migrated()
         cutoff = (date.today() - timedelta(days=days)).isoformat() if days else ""
-        out = [r for r in self.load()["records"]
-               if not r.get("voided") and str(r["date"]) >= cutoff
-               and (kind is None or r["kind"] == kind)]
+        out: list[dict] = []
+        if self.dir.exists():
+            for p in self.dir.glob("*.yaml"):
+                if p.name == "profile.yaml" or p.stem < cutoff:
+                    continue
+                data = yaml.safe_load(p.read_text()) or {}
+                out.extend(r for r in data.get("records", [])
+                           if not r.get("voided") and (kind is None or r["kind"] == kind))
         return sorted(out, key=lambda r: (str(r["date"]), r["id"]))
 
     def query(self, start: str = "", end: str = "", kind: str | None = None,
@@ -211,34 +338,37 @@ class HealthStore:
     def add_need(self, item: str, why: str = "") -> dict | None:
         """Track a nutrient/ingredient the owner wants covered; None when the
         item is empty or already open."""
+        self._ensure_migrated()
         item = str(item or "").strip()[:80]
         if not item:
             return None
-        data = self.load()
+        data = self._load_meta()
         if any(n["item"].lower() == item.lower() and not n.get("done")
                for n in data["needs"]):
             return None
-        need = {"id": f"n{data['next_id']}", "item": item,
+        need = {"id": f"n{data['next_need_id']}", "item": item,
                 "why": str(why or "")[:160], "since": date.today().isoformat()}
-        data["next_id"] += 1
+        data["next_need_id"] += 1
         data["needs"].append(need)
-        self._save(data, f"health: need {item} ({need['id']})")
+        self._save_meta(data, f"health: need {item} ({need['id']})")
         return need
 
     @locked_transaction
     def done_need(self, need_id: str) -> bool:
         """Mark need `need_id` covered. True if one was open."""
-        data = self.load()
+        self._ensure_migrated()
+        data = self._load_meta()
         for n in data["needs"]:
             if n["id"] == need_id and not n.get("done"):
                 n["done"] = True
-                self._save(data, f"health: need done {need_id}")
+                self._save_meta(data, f"health: need done {need_id}")
                 return True
         return False
 
     def open_needs(self) -> list[dict]:
         """Needs not yet marked covered."""
-        return [n for n in self.load()["needs"] if not n.get("done")]
+        self._ensure_migrated()
+        return [n for n in self._load_meta()["needs"] if not n.get("done")]
 
     # ── analysis (deterministic) ─────────────────────────────────────
     def summary(self, days: int = 7) -> dict:
@@ -246,7 +376,7 @@ class HealthStore:
         (+age/BMI derived), latest weight and delta across the window,
         exercise totals by activity, meal counts and daily calorie/protein
         averages over the days that have data, and open needs."""
-        profile = dict(self.load()["profile"])
+        profile = self.profile()
         if profile.get("birth_year"):
             profile["age"] = date.today().year - int(profile["birth_year"])
         weights = self.records(kind="weight")
@@ -333,6 +463,15 @@ def render_summary(summary: dict) -> str:
             f"[{n['id']}] {n['item']}" + (f" ({n['why']})" if n.get("why") else "")
             for n in summary["needs"]))
     return "\n".join(lines)
+
+
+def _next_n(records: list[dict], day: str) -> int:
+    """Next numeric sequence for a day-file's date-encoded ids (`h-YYYYMMDD-N`);
+    legacy `hN` ids in the file don't match and don't count."""
+    compact = day.replace("-", "")
+    nums = [int(m.group(2)) for r in records
+            if (m := _DAY_ID_RE.match(str(r.get("id", "")))) and m.group(1) == compact]
+    return max(nums, default=0) + 1
 
 
 def _similar_text(a: str, b: str) -> bool:

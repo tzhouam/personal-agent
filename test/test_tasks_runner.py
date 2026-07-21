@@ -56,7 +56,7 @@ def test_run_task_adapts_after_failure(settings):
     record = run_task("记一笔45", settings, llm=llm, notify=False)
     assert record["status"] == "done"
     assert "rejected" in record["steps"][0]["outcome"]
-    assert record["steps"][1]["outcome"].startswith("logged f1")
+    assert record["steps"][1]["outcome"].startswith("logged f-")
     assert "rejected" in llm.prompts[2]  # saw the failure before adapting
 
 

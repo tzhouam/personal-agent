@@ -394,3 +394,52 @@ def cmd_consolidate(settings: Settings, args) -> int:
         for op in result["applied"]:
             print(f"  would apply: {op.get('op')} {op.get('name') or op.get('into', '')}")
     return 0
+
+
+def cmd_migrate_records(settings: Settings, args) -> int:
+    """Reverse the per-day record sharding back to single `finance.yaml` /
+    `health.yaml` (the data-preserving rollback). Refuses while a serve daemon
+    holds the pid lock (writers must be quiesced); iterates every registered
+    tenant in multi_tenant. Forward sharding is automatic on first access, so
+    only `--to-single-file` is a manual operation."""
+    import sys
+
+    from assistant.platform.locks import repo_write_lock
+
+    if not getattr(args, "to_single_file", False):
+        print("migrate-records: pass --to-single-file (the reverse migration); "
+              "forward per-day sharding happens automatically", file=sys.stderr)
+        return 1
+
+    from assistant.platform.serve import _pid_alive   # quiesce: no concurrent writers
+    pid_file = settings.data_dir / "chat_listener.pid"
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        pid = None
+    if _pid_alive(pid):
+        print(f"migrate-records: serve daemon running (pid {pid}) — stop it first "
+              "(assistant reboot / kill) so there are no concurrent writers",
+              file=sys.stderr)
+        return 1
+
+    def _revert(s: Settings) -> None:
+        from assistant.agent.finance_store import FinanceStore
+        from assistant.agent.health_store import HealthStore
+        with repo_write_lock(s.profile_dir):
+            fin = FinanceStore(s.profile_dir).to_single_file()
+            hea = HealthStore(s.profile_dir).to_single_file()
+        print(f"reverted {getattr(s, 'uid', 'default')}: {fin} finance + {hea} health records")
+
+    if settings.deployment_mode == "multi_tenant":
+        from assistant.platform.registry import UserRegistry
+        # ALL registered users (active AND disabled) — a disabled migrated user
+        # would otherwise strand sharded data and break on re-enable
+        for u in UserRegistry(settings.data_dir).users():
+            try:
+                _revert(Settings.for_user(u["uid"]))
+            except Exception as exc:
+                print(f"migrate-records: {u['uid']} failed: {exc}", file=sys.stderr)
+    else:
+        _revert(settings)
+    return 0

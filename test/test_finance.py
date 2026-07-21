@@ -1,4 +1,7 @@
-"""Finance ledger: store math, action handlers, chat context, receipt flow."""
+"""Finance ledger: store math, action handlers, chat context, receipt flow.
+
+Records are sharded into per-day files with self-describing `f-YYYYMMDD-N` ids,
+so tests use the id the store returns rather than assuming a global `fN`."""
 
 from assistant.agent.actions import run_action
 from assistant.agent.chat.agent import build_context, handle_message
@@ -15,9 +18,16 @@ class FakeLLM:
         return self.result
 
 
+def _only_id(settings) -> str:
+    """The single active record's id (for actions that don't return it)."""
+    recs = FinanceStore(settings.profile_dir).records()
+    return recs[-1]["id"]
+
+
 def test_store_add_validates(settings):
     store = FinanceStore(settings.profile_dir)
-    assert store.add("expense", 45.5, category="Food", note="午饭")[1]["id"] == "f1"
+    rid = store.add("expense", 45.5, category="Food", note="午饭")[1]["id"]
+    assert rid.startswith("f-") and rid.endswith("-1")          # date-encoded id
     assert store.add("income", "12000", category="salary")[1]["amount"] == 12000.0
     assert store.add("expense", -5) == ("invalid", None)
     assert store.add("expense", "abc") == ("invalid", None)
@@ -26,17 +36,17 @@ def test_store_add_validates(settings):
     assert store.add("expense", 10, time="25:99") == ("invalid", None)
     assert store.add("expense", 10, when="2026-06-30")[1]["date"] == "2026-06-30"
     # normalization
-    rec = next(r for r in store.records() if r["id"] == "f1")
+    rec = next(r for r in store.records() if r["id"] == rid)
     assert rec["category"] == "food" and rec["currency"] == "CNY"
 
 
 def test_store_void_and_filters(settings):
     store = FinanceStore(settings.profile_dir)
-    store.add("expense", 100, when="2026-06-01")
-    store.add("expense", 50, when="2026-07-01")
-    assert store.void("f1") and not store.void("f1")
+    a = store.add("expense", 100, when="2026-06-01")[1]["id"]
+    b = store.add("expense", 50, when="2026-07-01")[1]["id"]
+    assert store.void(a) and not store.void(a)
     assert not store.void("f99")
-    assert [r["id"] for r in store.records()] == ["f2"]
+    assert [r["id"] for r in store.records()] == [b]
     assert store.records("2026-06") == []
     assert store.months() == ["2026-07"]
 
@@ -65,24 +75,27 @@ def test_actions_roundtrip(settings):
     out = run_action("log_transaction",
                      {"kind": "expense", "amount": 45, "category": "food",
                       "note": "lunch"}, settings)
-    assert out.startswith("logged f1: expense 45.0 CNY · food · lunch")
+    rid = _only_id(settings)
+    assert out.startswith(f"logged {rid}: expense 45.0 CNY · food · lunch")
     assert "rejected" in run_action("log_transaction", {"kind": "expense",
                                                         "amount": 0}, settings)
-    assert "[f1]" in run_action("list_transactions", {}, settings)
+    assert f"[{rid}]" in run_action("list_transactions", {}, settings)
     assert "income 0" in run_action("finance_summary", {}, settings)
-    assert run_action("void_transaction", {"id": "f1"}, settings) == "transaction f1 voided"
+    assert run_action("void_transaction", {"id": rid}, settings) == f"transaction {rid} voided"
     assert "(no transactions recorded)" in run_action("list_transactions", {}, settings)
 
 
 def test_chat_context_and_llm_logging(settings):
-    FinanceStore(settings.profile_dir).add("expense", 88, category="food", note="dinner")
+    d = FinanceStore(settings.profile_dir).add(
+        "expense", 88, category="food", note="dinner")[1]["id"]
     llm = FakeLLM({"reply": "记好了", "actions": [
         {"type": "log_transaction", "kind": "expense", "amount": 45,
          "category": "transport", "note": "打车"}]})
     reply = handle_message("打车花了45", settings, llm)
     assert "## Finance ledger" in llm.prompts[0]
-    assert "[f1]" in llm.prompts[0] and "dinner" in llm.prompts[0]
-    assert "logged f2: expense 45.0 CNY · transport · 打车" in reply
+    assert f"[{d}]" in llm.prompts[0] and "dinner" in llm.prompts[0]
+    new = FinanceStore(settings.profile_dir).records()[-1]["id"]
+    assert f"logged {new}: expense 45.0 CNY · transport · 打车" in reply
     # empty ledger → no finance section (context stays lean)
     assert "## Finance ledger" not in build_context(
         type(settings)(_env_file=None, data_dir=settings.data_dir / "other"))
@@ -111,24 +124,27 @@ def test_receipt_screenshot_flow(settings, tmp_path, monkeypatch):
          "category": "food", "note": "面点王"}]})
     reply = handle_message("记一下这笔", settings, llm, image_paths=[str(pic)])
     assert "¥68.00" in llm.prompts[0]  # description reached the model
-    assert "logged f1: expense 68.0 CNY · food · 面点王" in reply
+    rid = _only_id(settings)
+    assert f"logged {rid}: expense 68.0 CNY · food · 面点王" in reply
     assert FinanceStore(settings.profile_dir).records()[0]["amount"] == 68.0
 
 
 def test_dedup_rejects_same_signature(settings):
     store = FinanceStore(settings.profile_dir)
-    assert store.add("expense", 68, note="面点王", time="12:30")[0] == "created"
+    first = store.add("expense", 68, note="面点王", time="12:30")
+    assert first[0] == "created"
+    fid = first[1]["id"]
     # identical signature → duplicate, nothing written
     status, existing = store.add("expense", 68, note=" 面点王 ", time="12:30",
                                  category="other")
-    assert status == "duplicate" and existing["id"] == "f1"
+    assert status == "duplicate" and existing["id"] == fid
     assert len(store.records()) == 1
     # different time, note, or amount → separate legitimate transactions
     assert store.add("expense", 68, note="面点王", time="19:05")[0] == "created"
     assert store.add("expense", 68, note="外卖")[0] == "created"
     assert store.add("expense", 68.5, note="面点王", time="12:30")[0] == "created"
     # voided records don't block re-logging
-    store.void("f1")
+    store.void(fid)
     assert store.add("expense", 68, note="面点王", time="12:30")[0] == "created"
 
 
@@ -139,9 +155,10 @@ def test_every_record_has_full_time_identity(settings):
     assert stated["time"] == "09:15" and stated["time_source"] == "stated"
     assert auto["time"] and auto["time_source"] == "auto"   # logging clock time
     assert len(auto["logged_at"]) == 16                     # YYYY-MM-DD HH:MM
+    from datetime import date as _date
+
     from assistant.agent.finance_store import timestamp_of
     from assistant.platform.timeutil import weekday_cn
-    from datetime import date as _date
     wk = weekday_cn(_date.fromisoformat(stated["date"]))
     assert timestamp_of(stated) == f"{stated['date']} ({wk}) 09:15"
 
@@ -150,9 +167,10 @@ def test_auto_time_does_not_weaken_dedup(settings):
     # the same forgotten-and-resent NL entry minutes apart must still be
     # caught: auto-filled clock times are excluded from the signature
     store = FinanceStore(settings.profile_dir)
-    assert store.add("expense", 45, note="午饭")[0] == "created"
+    first = store.add("expense", 45, note="午饭")
+    assert first[0] == "created"
     status, existing = store.add("expense", 45, note="午饭")
-    assert status == "duplicate" and existing["id"] == "f1"
+    assert status == "duplicate" and existing["id"] == first[1]["id"]
     # but a STATED time distinguishes a genuine second purchase
     assert store.add("expense", 45, note="午饭", time="19:00")[0] == "created"
 
@@ -160,9 +178,10 @@ def test_auto_time_does_not_weaken_dedup(settings):
 def test_log_transaction_reports_duplicate(settings):
     run_action("log_transaction", {"kind": "expense", "amount": 68,
                                    "note": "面点王", "time": "12:30"}, settings)
+    rid = _only_id(settings)
     out = run_action("log_transaction", {"kind": "expense", "amount": 68,
                                          "note": "面点王", "time": "12:30"}, settings)
-    assert out.startswith("NOT logged — duplicate of f1")
+    assert out.startswith(f"NOT logged — duplicate of {rid}")
     assert "12:30" in out
 
 
@@ -170,15 +189,16 @@ def test_recategorize(settings):
     run_action("log_transaction", {"kind": "expense", "amount": 456.96,
                                    "note": "物业管理服务中心",
                                    "category": "shopping"}, settings)
+    rid = _only_id(settings)
     out = run_action("recategorize_transaction",
-                     {"id": "f1", "category": "housing"}, settings)
-    assert out == "f1 recategorized: shopping → housing"
+                     {"id": rid, "category": "housing"}, settings)
+    assert out == f"{rid} recategorized: shopping → housing"
     assert FinanceStore(settings.profile_dir).records()[0]["category"] == "housing"
     assert "no active transaction" in run_action(
         "recategorize_transaction", {"id": "f9", "category": "housing"}, settings)
     # off-list categories are kept but flagged
     out = run_action("recategorize_transaction",
-                     {"id": "f1", "category": "misc"}, settings)
+                     {"id": rid, "category": "misc"}, settings)
     assert "not a standard category" in out
 
 
@@ -187,10 +207,11 @@ def test_bill_identity_dedups_across_note_wordings(settings):
     # double-log even when the merchant/note is worded differently —
     # (date, stated time, amount) IS the bill identity
     store = FinanceStore(settings.profile_dir)
-    assert store.add("expense", 68, note="面点王", time="12:30")[0] == "created"
+    first = store.add("expense", 68, note="面点王", time="12:30")
+    assert first[0] == "created"
     status, existing = store.add("expense", 68, note="深圳面点王餐饮有限公司",
                                  time="12:30", category="food")
-    assert status == "duplicate" and existing["id"] == "f1"
+    assert status == "duplicate" and existing["id"] == first[1]["id"]
     assert len(store.records()) == 1
     # different stated time → genuinely another purchase
     assert store.add("expense", 68, note="深圳面点王餐饮有限公司", time="18:40")[0] == "created"
@@ -200,12 +221,13 @@ def test_similar_warning_on_same_day_amount(settings):
     out1 = run_action("log_transaction",
                       {"kind": "expense", "amount": 45, "note": "午饭"}, settings)
     assert "⚠" not in out1
+    first = _only_id(settings)
     # same amount, same day, but a stated time → logged with a warning
     out2 = run_action("log_transaction",
                       {"kind": "expense", "amount": 45, "note": "星巴克",
                        "time": "16:00"}, settings)
-    assert out2.startswith("logged f2")
-    assert "same amount already recorded that day: f1" in out2
+    assert out2.startswith("logged f-")
+    assert f"same amount already recorded that day: {first}" in out2
 
 
 def test_category_detail_drilldown(settings):
@@ -250,10 +272,10 @@ def _today(offset):
 
 def test_finance_query_by_range_category_and_text(settings):
     store = FinanceStore(settings.profile_dir)
-    store.add("expense", 45, category="food", note="午饭 星巴克", when="2026-05-10")
-    store.add("expense", 300, category="housing", note="房租", when="2026-05-01")
+    a = store.add("expense", 45, category="food", note="午饭 星巴克", when="2026-05-10")[1]["id"]
+    b = store.add("expense", 300, category="housing", note="房租", when="2026-05-01")[1]["id"]
     store.add("expense", 20, category="food", note="外卖", when="2026-06-02")
-    assert {r["id"] for r in store.query(start="2026-05-01", end="2026-05-31")} == {"f1", "f2"}
+    assert {r["id"] for r in store.query(start="2026-05-01", end="2026-05-31")} == {a, b}
     assert [r["note"] for r in store.query(category="food")] == ["午饭 星巴克", "外卖"]
     assert [r["note"] for r in store.query(contains="星巴克")] == ["午饭 星巴克"]
 
@@ -266,3 +288,65 @@ def test_query_transactions_action_totals(settings):
     assert "income 1000" in out and "expense 45" in out and "net 955" in out
     assert "午饭" in out
     assert "no transactions" in run_action("query_transactions", {"month": None, "start": "2000-01-01", "end": "2000-01-02"}, settings)
+
+
+# ── per-day file migration (forward + crash-safety + reverse) ──────────────
+
+def _legacy_finance(pdir):
+    import yaml
+    pdir.mkdir(parents=True, exist_ok=True)
+    legacy = {"next_id": 3, "records": [
+        {"id": "f1", "date": "2026-07-19", "time": "12:30", "time_source": "stated",
+         "type": "expense", "amount": 45.0, "currency": "CNY", "category": "food",
+         "note": "午饭", "source": "chat"},
+        {"id": "f2", "date": "2026-07-20", "time": "09:00", "time_source": "stated",
+         "type": "income", "amount": 100.0, "currency": "CNY", "category": "salary",
+         "note": "", "source": "chat"}]}
+    (pdir / "finance.yaml").write_text(yaml.safe_dump(legacy, allow_unicode=True))
+
+
+def test_migration_preserves_ids_totals_and_mixed_add(settings):
+    p = settings.profile_dir
+    _legacy_finance(p)
+    store = FinanceStore(p)
+    recs = store.records()                                   # first read migrates
+    assert {r["id"] for r in recs} == {"f1", "f2"}           # legacy ids preserved
+    assert (p / "finance" / "2026-07-19.yaml").exists()
+    assert (p / "finance" / ".migrated").exists()
+    assert store.summary("2026-07")["expense"] == 45.0       # totals identical
+    # a NEW record gets a date-encoded id and coexists with legacy fN
+    new = store.add("expense", 10, when="2026-07-19")[1]["id"]
+    assert new == "f-20260719-1"
+    assert store.void("f1")                                  # legacy id resolvable (scan)
+    assert store.void(new)                                   # date-encoded id resolvable (parse)
+
+
+def test_migration_no_legacy_writes_marker(settings):
+    store = FinanceStore(settings.profile_dir)
+    assert store.add("expense", 5)[0] == "created"           # fresh install, no legacy
+    assert (settings.profile_dir / "finance" / ".migrated").exists()
+
+
+def test_migration_crash_after_output_rerun_accepts(settings):
+    p = settings.profile_dir
+    _legacy_finance(p)
+    FinanceStore(p).records()                                # migrate
+    (p / "finance" / ".migrated").unlink()                   # simulate crash before marker
+    store = FinanceStore(p)
+    recs = store.records()                                   # rerun rebuilds, no dupes
+    assert {r["id"] for r in recs} == {"f1", "f2"} and len(recs) == 2
+    assert (p / "finance" / ".migrated").exists()
+
+
+def test_reverse_migration_reconstructs_single_file(settings):
+    import yaml
+    p = settings.profile_dir
+    _legacy_finance(p)
+    store = FinanceStore(p)
+    store.add("expense", 10, when="2026-07-19")              # a date-encoded id too
+    n = store.to_single_file()
+    assert n == 3 and not (p / "finance").exists()           # day dir gone
+    single = yaml.safe_load((p / "finance.yaml").read_text())
+    assert len(single["records"]) == 3
+    # next_id sits above the max legacy fN suffix so old-code add() won't collide
+    assert single["next_id"] == 3

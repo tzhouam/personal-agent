@@ -8,7 +8,7 @@ import argparse
 import sys
 
 from assistant.platform.config import Settings
-from assistant.cli.commands import cmd_bootstrap, cmd_consolidate, cmd_enrich_profile, cmd_reading, cmd_resume_init, cmd_resume_status, cmd_run_phase, cmd_show, cmd_test_email, cmd_todo
+from assistant.cli.commands import cmd_bootstrap, cmd_consolidate, cmd_enrich_profile, cmd_migrate_records, cmd_reading, cmd_resume_init, cmd_resume_status, cmd_run_phase, cmd_show, cmd_test_email, cmd_todo
 
 
 def _dispatch_admin(settings: Settings, args) -> int:
@@ -118,6 +118,12 @@ def main() -> None:
                              help="run one standalone pipeline phase now")
     phase_p.add_argument("phase", choices=["research", "website", "todos", "resume",
                                            "curate", "consolidate"])
+
+    mig_p = sub.add_parser("migrate-records",
+                           help="reverse per-day record sharding back to single "
+                                "finance.yaml/health.yaml (rollback; stop serve first)")
+    mig_p.add_argument("--to-single-file", action="store_true",
+                       help="the reverse migration (required)")
 
     cons_p = sub.add_parser("consolidate",
                             help="weekly profile consolidation: merge fragments, "
@@ -232,6 +238,8 @@ def main() -> None:
         sys.exit(0 if result["status"] == "rebooted" else 1)
     elif args.command == "run-phase":
         sys.exit(cmd_run_phase(settings, args.phase))
+    elif args.command == "migrate-records":
+        sys.exit(cmd_migrate_records(settings, args))
     elif args.command == "consolidate":
         sys.exit(cmd_consolidate(settings, args))
     elif args.command == "evolve":
