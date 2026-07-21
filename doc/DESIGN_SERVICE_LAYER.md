@@ -68,7 +68,7 @@ uniquely good at: WeChat access, persistent cron, and process supervision.
 
 ## 3. The pieces
 
-### 3.1 L2 — Action Registry (`src/assistant/actions.py`, new)
+### 3.1 L2 — Action Registry (`src/assistant/agent/actions/`, new)
 
 One table replaces three hand-maintained copies:
 
@@ -184,7 +184,7 @@ fallback — i.e., exactly the pre-daemon behavior.
 
 ## 7. Implementation notes & cutover
 
-- Landed 2026-07-09: `src/assistant/actions.py`, `src/assistant/serve.py`,
+- Landed 2026-07-09: `src/assistant/agent/actions/`, `src/assistant/platform/serve.py`,
   registry-backed `chat/agent.py` + `cli.py`, `deliver/announce.py`,
   orchestrator announce step, rewritten `openclaw-plugin/index.js`
   (HTTP + slash + `serve-supervisor`) and `test.mjs`. Python suite 59 green,

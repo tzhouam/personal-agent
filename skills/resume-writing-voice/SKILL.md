@@ -25,7 +25,7 @@ A highlight/bullet needs rewriting when any of these hold:
 
 ## Fix
 
-The compact operative version lives in `src/assistant/writing.py`
+The compact operative version lives in `src/assistant/agent/writing.py`
 (`RESUME_VOICE_RULES`) and is appended to the consolidation and resume-editor
 system prompts. Full rulebook:
 

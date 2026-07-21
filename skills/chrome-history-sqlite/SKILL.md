@@ -17,7 +17,7 @@ run_count: 0
 
 ## Fix
 1. Copy the file to a temp path and query the copy
-   (`src/assistant/collectors/chrome.py:collect`).
+   (`src/assistant/agent/collectors/chrome.py:collect`).
 2. Convert: `datetime(1601,1,1,tzinfo=utc) + timedelta(microseconds=v)`;
    inverse for the WHERE cutoff (`_to_chrome_time`).
 3. Privacy tiers, applied at read time so raw data is never stored:

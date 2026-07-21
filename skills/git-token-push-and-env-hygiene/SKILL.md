@@ -17,7 +17,7 @@ if the workdir is ever copied or committed.
 ## Fix
 1. Pass auth per command, never stored:
    `git -c http.https://github.com/.extraheader="Authorization: Basic $(printf 'user:%s' "$TOKEN" | base64 -w0)" push ...`
-   (see `src/assistant/website.py:_auth_flag` for the programmatic version;
+   (see `src/assistant/agent/website/:_auth_flag` for the programmatic version;
    works for clone/fetch/push, private repos included).
 2. Create repos via API (`POST /user/repos {"private": true}`) and confirm
    `"private": true` in the response.

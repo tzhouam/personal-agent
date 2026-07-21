@@ -18,7 +18,7 @@ run_count: 0
 ## Fix
 1. Build queries as an AND of words, not a quoted phrase:
    `" AND ".join(f"all:{w}" for w in query.split())`
-   (`src/assistant/research/arxiv.py:fetch_recent`). Recall goes up ~20×; the
+   (`src/assistant/agent/research/arxiv.py:fetch_recent`). Recall goes up ~20×; the
    downstream LLM relevance scorer supplies the precision.
 2. Widen the window (7 days) and rely on the **seen-store** for freshness: a
    paper is surfaced only the first day it appears, so a wide window never

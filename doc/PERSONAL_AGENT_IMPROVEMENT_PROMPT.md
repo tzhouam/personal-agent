@@ -134,14 +134,14 @@ Before changing code, inspect:
 - `doc/DESIGN_SERVICE_LAYER.md`
 - `doc/DESIGN_MULTI_USER.md`
 - `doc/WECHAT_OPENCLAW.md`
-- `src/assistant/orchestrator.py`
-- `src/assistant/chat/`
-- `src/assistant/actions/`
-- `src/assistant/task_runner.py`
-- `src/assistant/llm.py`
-- `src/assistant/config.py`
-- `src/assistant/metrics.py`
-- `src/assistant/tracing.py`
+- `src/assistant/agent/orchestrator.py`
+- `src/assistant/agent/chat/`
+- `src/assistant/agent/actions/`
+- `src/assistant/agent/task_runner.py`
+- `src/assistant/platform/llm.py`
+- `src/assistant/platform/config.py`
+- `src/assistant/agent/metrics.py`
+- `src/assistant/platform/tracing.py`
 - `scripts/self-improve.sh`
 - `scripts/self_improve_prompt.md`
 - Existing tests and operational skills
@@ -374,9 +374,9 @@ Use the personal-agent metric design in:
 
 and the existing implementation in:
 
-- `src/assistant/metrics.py`
-- `src/assistant/tracing.py`
-- `src/assistant/events_store.py`
+- `src/assistant/agent/metrics.py`
+- `src/assistant/platform/tracing.py`
+- `src/assistant/agent/events_store.py`
 
 ### Cross-cutting metrics
 

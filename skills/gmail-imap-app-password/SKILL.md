@@ -16,7 +16,7 @@ password, that same credential authenticates `imaplib.IMAP4_SSL` too.
 
 ## Fix
 1. `IMAP4_SSL("imap.gmail.com", 993)` + `login(smtp_user, app_password)` +
-   `select("INBOX", readonly=True)` (`src/assistant/collectors/gmail.py`).
+   `select("INBOX", readonly=True)` (`src/assistant/agent/collectors/gmail.py`).
 2. IMAP `SINCE` is **date-granular** — it over-returns; re-filter by parsing the
    Date header against the real cutoff (`_headers_to_observation`).
 3. Privacy: fetch `BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE LIST-UNSUBSCRIBE)]`

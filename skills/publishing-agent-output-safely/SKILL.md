@@ -16,7 +16,7 @@ needs an explicit safety posture, chosen deliberately.
 
 ## Fix
 Postures used in this repo, strongest first — pick per surface:
-1. **Deterministic render, no LLM** (website, `src/assistant/website.py`):
+1. **Deterministic render, no LLM** (website, `src/assistant/agent/website/`):
    the page is a pure template over evidence-gated profile.yaml — nothing
    fabricated can appear, which is what made owner-approved direct pushes
    acceptable. Any LLM-written surface should NOT get direct-push.

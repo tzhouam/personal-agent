@@ -21,7 +21,7 @@ run_count: 1
 ## Fix
 1. Give JSON calls a generous budget: 1500+ for tiny outputs, 8000 for anything
    substantial, 16000 for op emission over large prompts
-   (`src/assistant/llm.py`, `tasks/profile_update.py`; 2026-07-09: enrich
+   (`src/assistant/platform/llm.py`, `tasks/profile_update.py`; 2026-07-09: enrich
    backfill batches truncated at 8000 — the first batch silently yielded 0 ops).
 2. Log truncation explicitly so the failure is diagnosable, not silent:
    `if resp.stop_reason == "max_tokens": log.warning(...)` (`llm.py:complete`).

@@ -17,7 +17,7 @@ run_count: 0
   (fine-grained PATs, private repos); the true count is `payload["size"]`.
 
 ## Fix
-(`src/assistant/tasks/todos.py`, `collectors/github.py`, `todo_store.py`)
+(`src/assistant/agent/tasks/todos.py`, `collectors/github.py`, `todo_store.py`)
 1. Dedup key = the item's **HTML URL** (stable per PR/issue), not notification
    id. `upsert` blocks only while an item with the same key is open — after
    close, a re-request legitimately creates a fresh todo.

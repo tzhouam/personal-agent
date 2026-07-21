@@ -17,7 +17,7 @@ run_count: 0
   single mixed-pool scoring call disadvantages one language/category.
 
 ## Fix
-(`src/assistant/research/pipeline.py`)
+(`src/assistant/agent/research/pipeline.py`)
 1. Score each pool separately (papers / en feeds / zh feeds) so categories
    don't compete in one ranking.
 2. Make the scorer **annotate** (`item["_score"]`) and sort — never filter

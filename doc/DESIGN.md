@@ -52,6 +52,8 @@ One daily run is a [LangGraph](https://langchain-ai.github.io/langgraph/)
 
 `agent/orchestrator.py` builds and runs it. Phase responsibilities:
 
+All under `agent/` (paths below are relative to `src/assistant/agent/`):
+
 | Phase | What it does | Key module(s) |
 |---|---|---|
 | **collect** | Run every registered collector (GitHub, Chrome, Gmail) → normalized `Observation`s; fetch GitHub notifications; pull website marks | `collectors/`, `marks.py` |
@@ -60,7 +62,7 @@ One daily run is a [LangGraph](https://langchain-ai.github.io/langgraph/)
 | **digest** | Triage GitHub notifications 🔴/🟡/⚪ against the profile; dedupe via seen-store | `tasks/github_digest.py` |
 | **todos** | Age out stale todos; auto-close finished ones; derive new from red notifications | `tasks/todos.py`, `todo_store.py`, `urgency.py` |
 | **research** | Gather arXiv + feeds, score for relevance, select, summarize; feed the reading list | `research/`, `tasks/` |
-| **website** | Render the profile + todos + reading + routines to HTML; push to Pages | `website.py` |
+| **website** | Render the profile + todos + reading + routines to HTML; push to Pages | `website/` |
 | **deliver** | Render and send the digest email; announce success to WeChat | `deliver/` |
 | **curate** | Decay dormant entries; prune old chat sessions + staged chat images | `tasks/curate.py` |
 
@@ -136,7 +138,7 @@ Invariants enforced by code, not prompt:
 - **Weekly** (`tasks/profile_consolidate.py`) is the editorial pass: it sees a
   whole section at once and may `merge_projects`, `move_evidence`, and
   `rewrite_entry` to promote clustered evidence into résumé-voice highlights
-  (following the [writing rules](../src/assistant/writing.py) and the owner's
+  (following the [writing rules](../src/assistant/agent/writing.py) and the owner's
   hand-written `experience` section as the style reference). It also runs an
   **LLM judge audit** — contradictions, stale claims, unsupported highlights —
   recorded as metrics and emailed, never auto-fixed.
@@ -395,7 +397,7 @@ nothing fabricated can reach a public page.
   time**; the published HTML holds ciphertext, decrypted in-browser with the
   owner's password (WebCrypto, PBKDF2). Owner-only action buttons are gated by a
   localStorage flag.
-- **Todos** use the [urgency metric](../src/assistant/urgency.py) (a
+- **Todos** use the [urgency metric](../src/assistant/agent/urgency.py) (a
   Taskwarrior-style polynomial over priority/due/blocking/age × staleness) for
   calendar eligibility, ordering, and expiry.
 - **Marks sync** (`marks.py`): Done/Unrelated clicks act locally and push to a
@@ -469,20 +471,29 @@ profile repo.
 
 ## 11. Extending it
 
-- **A new collector** — add a module under `collectors/`, implement
+All application code lives under two layers (see §12): `agent/` (this owner's
+personal agent) and `platform/` (the runtime that hosts it). **`agent/` may
+import `platform/`; `platform/` must never import `agent/`** — enforced by
+`test/test_boundary.py`. Extension points are almost all in `agent/`:
+
+- **A new collector** — add a module under `agent/collectors/`, implement
   `collect(since)`, decorate with `@register("name")`. Done.
-- **A new chat action** — add an `Action` to the registry in `actions.py`
-  (name, params, handler, LLM-exposed?, slash alias). It becomes available over
-  chat, slash commands, and HTTP automatically.
-- **A new pipeline phase** — add a node in `orchestrator.py`, insert it into the
-  `_PHASES` list, give it an artifact and a `metrics.EXTRACTORS` entry.
+- **A new chat action** — add an `Action` to the registry in
+  `agent/actions/registry.py` (name, params, handler, LLM-exposed?, slash
+  alias). It becomes available over chat, slash commands, and HTTP automatically.
+- **A new pipeline phase** — add a node in `agent/orchestrator.py`, insert it
+  into the `_PHASES` list, give it an artifact and a `metrics.EXTRACTORS` entry.
 - **A new research source** — add it to `config/sources.yaml` (RSS/Atom URL,
   language). Per-source health tracking and the score floor handle the rest.
 - **A new metric** — record it from the phase node; add it to `build_health`.
-- **A new personal sub-store** — follow `finance_store.py`/`health_store.py`:
-  a YAML file in the profile repo, never-delete records with the stated-or-
-  auto time identity, code-computed summaries, typed chat actions, and a
-  context block; wire its joins into `insights.py`.
+- **A new personal sub-store** — follow `agent/finance_store.py`/
+  `agent/health_store.py`: a YAML file in the profile repo, never-delete records
+  with the stated-or-auto time identity, code-computed summaries, typed chat
+  actions, and a context block; wire its joins into `agent/insights.py`.
+- **A new platform capability the agent needs** — declare a hook/contract in the
+  relevant `platform/` module and register the agent-side implementation in
+  `agent/wiring.py` (the pattern `serve`, `llm`, `admin`, `onboarding` all use),
+  so the platform stays agent-free.
 
 The codebase favors small, testable, pure functions and a large test suite
 (`test/`, run with `pytest`). When you resolve a recurring operational failure,
