@@ -1,5 +1,6 @@
 import pytest
 
+import assistant.agent.app  # noqa: F401 — registers default ServeServices for serve tests
 from assistant.config import Settings
 
 

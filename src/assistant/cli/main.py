@@ -228,9 +228,9 @@ def main() -> None:
 
         sys.exit(run_listener(settings, once=args.once))
     elif args.command == "serve":
-        from ..serve import run_serve
+        from ..agent.app import run as serve_run
 
-        sys.exit(run_serve(settings))
+        sys.exit(serve_run(settings))
     elif args.command == "reboot":
         from ..serve import reboot
 

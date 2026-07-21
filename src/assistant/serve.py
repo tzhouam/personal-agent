@@ -31,13 +31,13 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
-from .actions import run_action
-from .chat.agent import handle_turn
 from .config import DEFAULT_UID, Settings
 from .identity import Unauthorized, onboarding_candidate, resolve_uid
 from .llm import LLM
@@ -48,6 +48,47 @@ log = logging.getLogger("assistant")
 _MAX_BODY = 12 * 1024 * 1024  # base64 image attachments ride in /chat bodies
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024  # per-image cap (multi_tenant, §A.4) —
                                     # matches the bridge's encodeBase64Capped
+
+
+@dataclass
+class ServeServices:
+    """The agent behaviors the daemon needs, injected so this platform module
+    imports zero agent code (the platform/agent boundary — agent/ may import
+    platform/, never the reverse). The composition root (`agent.app`) builds one
+    from the chat/actions/routines subsystems and either passes it in or
+    registers it as the default via `set_default_services`.
+
+    Every callable is agent-owned; the platform only holds the contract."""
+
+    run_action: Callable       # (name, params, settings) -> str
+    handle_turn: Callable      # (text, settings, llm, *, history, image_paths) -> turn
+    build_channels: Callable   # (settings, *, log_wecom) -> list[channel]
+    email_channel: Callable    # (settings) -> channel  (per-user email poller)
+    fire_due: Callable         # (settings) -> None     (conditional routines)
+    acquire_pid_lock: Callable # (settings) -> bool     (shared inbox pid lock)
+    worker_dispatch: dict      # kind -> handler (platform.dispatch.Dispatch)
+
+
+_default_services: "Callable[[], ServeServices] | None" = None
+
+
+def set_default_services(factory: "Callable[[], ServeServices]") -> None:
+    """Register the agent-side factory used when a caller passes no `services`.
+    `agent.app` calls this at import; keeps serve.py free of any agent import."""
+    global _default_services
+    _default_services = factory
+
+
+def _resolve_services(services):
+    """Return `services`, or the registered default. Raises if neither exists —
+    a wiring error (import `assistant.agent.app` to register the default)."""
+    if services is not None:
+        return services
+    if _default_services is None:
+        raise RuntimeError(
+            "serve services not configured — import assistant.agent.app to "
+            "register them, or pass services= explicitly")
+    return _default_services()
 
 
 class SessionStore:
@@ -164,9 +205,13 @@ class SessionStore:
         return {"turns": removed_turns, "files": removed_files}
 
 
-def make_server(settings_factory=Settings, llm_factory=None, port: int | None = None):
+def make_server(settings_factory=Settings, llm_factory=None, port: int | None = None,
+                services=None):
     """Build (but don't start) the HTTP server. Factories are per-request —
-    that is the stale-credential fix — and injectable for tests."""
+    that is the stale-credential fix — and injectable for tests. `services`
+    (a `ServeServices`) supplies the agent behaviors; when omitted it comes from
+    the default the composition root registered."""
+    services = _resolve_services(services)
     boot = settings_factory()
     sessions = SessionStore(boot.data_dir, keep=boot.serve_session_turns,
                             context_hours=boot.chat_history_max_age_hours,
@@ -267,7 +312,8 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             except Unauthorized as exc:
                 return self._send(401, {"error": str(exc)})
             if urlsplit(self.path).path == "/status":
-                return self._send(200, {"status": run_action("run_status", {}, settings)})
+                return self._send(200,
+                                  {"status": services.run_action("run_status", {}, settings)})
             return self._send(404, {"error": f"no route {self.path}"})
 
         def do_POST(self):
@@ -315,9 +361,9 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                     if not text and not images:
                         return self._send(400, {"error": "missing 'text'"})
                     skey = prefix + str(body.get("session", "") or "default")
-                    turn = handle_turn(text, settings, make_llm(settings),
-                                       history=store.history(skey),
-                                       image_paths=images or None)
+                    turn = services.handle_turn(text, settings, make_llm(settings),
+                                                history=store.history(skey),
+                                                image_paths=images or None)
                     reply = turn.reply
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
                     store.append(skey, noted.strip(), reply, outcome=turn.outcome,
@@ -349,12 +395,13 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                 if self.path == "/run":
                     params = {"resume": True} if body.get("resume") else {}
                     return self._send(200,
-                                      {"result": run_action("trigger_run", params, settings)})
+                                      {"result": services.run_action("trigger_run",
+                                                                     params, settings)})
 
                 if self.path.startswith("/actions/"):
                     name = self.path.removeprefix("/actions/")
                     try:
-                        result = run_action(name, body, settings)
+                        result = services.run_action(name, body, settings)
                     except KeyError:
                         return self._send(404, {"error": f"unknown action {name!r}"})
                     except ValueError as exc:
@@ -426,7 +473,7 @@ def _staged_images(body: dict, settings: Settings) -> list[str]:
     return out[:settings.vision_max_images]
 
 
-def _tick_user_email(user: Settings, make_llm, polled: set) -> None:
+def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
     """One user's mailbox poll (§11.7): the user's **own IMAP creds are the
     identity** — the poller already runs as `Settings.for_user(uid)`, so no
     /chat auth is involved and the watermark (`chat_state.json`), media, and
@@ -436,10 +483,7 @@ def _tick_user_email(user: Settings, make_llm, polled: set) -> None:
     inbox, only the first polls it — otherwise one inbound mail would be
     answered twice (the registry's unique email binding is the admin-time guard;
     this is the runtime one)."""
-    from .chat.email_channel import EmailChannel
-    from .chat.service import _owner_addresses
-
-    email = EmailChannel(user, _owner_addresses(user))
+    email = services.email_channel(user)
     if not email.enabled:
         return
     box = str(user.smtp_user).strip().lower()
@@ -461,9 +505,9 @@ def _tick_user_email(user: Settings, make_llm, polled: set) -> None:
                  message.get("sender", "?"), message["text"])
         try:
             skey = f"{user.uid}:email:{message.get('sender', '')}"
-            turn = handle_turn(message["text"], user, make_llm(user),
-                               history=store.history(skey),
-                               image_paths=message.get("images"))
+            turn = services.handle_turn(message["text"], user, make_llm(user),
+                                        history=store.history(skey),
+                                        image_paths=message.get("images"))
             reply = turn.reply
             store.append(skey, message["text"], reply, outcome=turn.outcome,
                          repaired=turn.repaired, self_reported=turn.self_reported,
@@ -475,7 +519,7 @@ def _tick_user_email(user: Settings, make_llm, polled: set) -> None:
 
 
 def _tick_tenants(settings: Settings, now: "datetime | None" = None,
-                  llm_factory=None) -> None:
+                  llm_factory=None, services=None) -> None:
     """One multi-tenant proactive cycle: per-user **email polling** (§11.7),
     reminders + routines, and the daily-run fan-out (§12).
 
@@ -490,6 +534,7 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
     cycle can't double-run anyone. One user's failure never blocks another's."""
     from .registry import UserRegistry
 
+    services = _resolve_services(services)
     make_llm = llm_factory or (lambda s: LLM(s))
     now = now or datetime.now()
     if now.hour >= settings.daily_run_hour:
@@ -516,7 +561,7 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
             log.exception("tick: Settings.for_user(%s) failed", uid)
             continue
         try:  # per-user mailbox poller — the user's creds are the identity
-            _tick_user_email(user, make_llm, polled_mailboxes)
+            _tick_user_email(services, user, make_llm, polled_mailboxes)
         except Exception:
             log.exception("email tick failed for %s", uid)
         try:  # proactive path: due reminders go out with no inbound command
@@ -527,15 +572,13 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
         except Exception:
             log.exception("reminder delivery failed for %s", uid)
         try:  # conditional routines (workdays / weather gates / …)
-            from .routines import fire_due
-
-            fire_due(user)
+            services.fire_due(user)
         except Exception:
             log.exception("routine firing failed for %s", uid)
 
 
 def _chat_poll_loop(settings_factory, sessions: SessionStore,
-                    stop: threading.Event, llm_factory=None) -> None:
+                    stop: threading.Event, llm_factory=None, services=None) -> None:
     """Email (+WeCom) chat polling, absorbed from the standalone listener.
     Everything is rebuilt each cycle so `.env` edits apply within one poll.
 
@@ -544,8 +587,7 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
     identity, state/sessions in their own data dir), per-user reminders and
     routines, and the daily-run fan-out. The root `.env`'s inbox is nobody's
     tenant and is never polled in that mode; WeCom is out of scope there."""
-    from .chat.service import build_channels
-
+    services = _resolve_services(services)
     make_llm = llm_factory or (lambda s: LLM(s))
     first = True
     while not stop.is_set():
@@ -556,10 +598,10 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                     log.info("multi_tenant: ticking per-user email/reminders/"
                              "routines/daily-runs for active users")
                     first = False
-                _tick_tenants(settings, llm_factory=make_llm)
+                _tick_tenants(settings, llm_factory=make_llm, services=services)
                 stop.wait(settings.chat_poll_seconds)
                 continue
-            channels = build_channels(settings, log_wecom=first)
+            channels = services.build_channels(settings, log_wecom=first)
             first = False
             for channel in channels:
                 try:
@@ -572,10 +614,10 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                              message.get("sender", "?"), message["text"])
                     try:
                         session = f"{channel.name}:{message.get('sender', '')}"
-                        turn = handle_turn(message["text"], settings,
-                                           make_llm(settings),
-                                           history=sessions.history(session),
-                                           image_paths=message.get("images"))
+                        turn = services.handle_turn(message["text"], settings,
+                                                    make_llm(settings),
+                                                    history=sessions.history(session),
+                                                    image_paths=message.get("images"))
                         reply = turn.reply
                         sessions.append(session, message["text"], reply,
                                         outcome=turn.outcome, repaired=turn.repaired,
@@ -593,9 +635,7 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
             except Exception:
                 log.exception("reminder delivery failed")
             try:  # conditional routines (workdays / weather gates / …)
-                from .routines import fire_due
-
-                fire_due(settings)
+                services.fire_due(settings)
             except Exception:
                 log.exception("routine firing failed")
             stop.wait(settings.chat_poll_seconds)
@@ -604,38 +644,43 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
             stop.wait(60)
 
 
-def run_serve(settings: Settings) -> int:
+def run_serve(settings: Settings, services=None) -> int:
     """`assistant serve`: the long-lived daemon. Takes the shared inbox pid
     lock (so it can never race the standalone chat-listener on the watermark),
     starts the HTTP server plus the background chat-poll thread, wires
     SIGTERM/SIGINT to a clean shutdown, and blocks in `serve_forever`. Returns
-    1 if the pid lock is already held, else 0 after shutdown."""
+    1 if the pid lock is already held, else 0 after shutdown.
+
+    `services` (a `ServeServices`) supplies the agent behaviors and the worker
+    dispatch; omitted, it comes from the registered default (`agent.app`)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    from .chat.service import _acquire_pid_lock
+    services = _resolve_services(services)
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    if not _acquire_pid_lock(settings):  # same lock as chat-listen: one inbox reader
+    if not services.acquire_pid_lock(settings):  # same lock as chat-listen: one inbox reader
         return 1
 
-    server = make_server()
+    server = make_server(services=services)
     stop = threading.Event()
     poller = threading.Thread(
         target=_chat_poll_loop,
         args=(Settings, server.sessions, stop),
+        kwargs={"services": services},
         name="chat-poll", daemon=True)
     poller.start()
 
     # multi_tenant background jobs run on the durable in-process queue instead of
     # detached CLIs (§6); the pool recovers orphaned jobs on start. single_user
-    # keeps the legacy detached-Popen path, so no pool is needed there.
+    # keeps the legacy detached-Popen path, so no pool is needed there. The
+    # kind→handler dispatch comes from the injected services (agent-owned) so
+    # this platform module never imports agent code.
     pool = None
     if settings.deployment_mode == "multi_tenant":
         from .platform.jobs import JobQueue
         from .platform.worker import WorkerPool
-        from .agent.dispatch import build_dispatch
 
         pool = WorkerPool(JobQueue(settings.shared_dir),
-                          dispatch=build_dispatch(),
+                          dispatch=services.worker_dispatch,
                           max_workers=settings.job_workers).start()
         log.info("serve: job worker pool started (%d workers)", settings.job_workers)
 
