@@ -63,11 +63,20 @@ def _gather_evidence(settings: Settings) -> str:
     parts: list[str] = []
     sessions_dir = settings.data_dir / "sessions"
     if sessions_dir.exists():
-        for path in sorted(sessions_dir.glob("*.json")):
-            try:
-                turns = json.loads(path.read_text()).get("turns", [])
-            except ValueError:
-                continue
+        # sessions are day-sharded (sessions/<hash>/<date>.json), grouped per
+        # session; also tolerate a legacy flat sessions/<hash>.json (pre-migration).
+        # latest 10 turns PER SESSION (not per shard).
+        session_files = [sorted(d.glob("*.json"))
+                         for d in sorted(p for p in sessions_dir.iterdir() if p.is_dir())]
+        session_files += [[p] for p in sorted(sessions_dir.glob("*.json"))]
+        for shards in session_files:
+            turns = []
+            for shard in shards:
+                try:
+                    turns.extend(json.loads(shard.read_text()).get("turns", []))
+                except ValueError:
+                    continue
+            turns.sort(key=lambda t: t.get("ts", ""))
             for t in turns[-10:]:
                 owner = str(t.get("owner", ""))[:300]
                 reply = str(t.get("assistant", ""))[:400]

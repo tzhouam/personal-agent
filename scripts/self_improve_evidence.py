@@ -81,7 +81,10 @@ def _sessions(data: Path) -> list[str]:
     sessions_dir = data / "sessions"
     if not sessions_dir.exists():
         return out
-    for p in sorted(sessions_dir.glob("*.json")):
+    # sessions are day-sharded (sessions/<hash>/<date>.json); read every shard,
+    # tolerating a legacy flat sessions/<hash>.json (pre-migration). semantics
+    # unchanged: filter all turns by CUTOFF, cap total output at the end
+    for p in sorted(list(sessions_dir.glob("*/*.json")) + list(sessions_dir.glob("*.json"))):
         try:
             turns = json.loads(p.read_text()).get("turns", [])
         except ValueError:

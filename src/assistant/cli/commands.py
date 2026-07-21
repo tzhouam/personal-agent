@@ -426,10 +426,15 @@ def cmd_migrate_records(settings: Settings, args) -> int:
     def _revert(s: Settings) -> None:
         from assistant.agent.finance_store import FinanceStore
         from assistant.agent.health_store import HealthStore
+        from assistant.platform.locks import data_write_lock
+        from assistant.platform.serve import SessionStore
         with repo_write_lock(s.profile_dir):
             fin = FinanceStore(s.profile_dir).to_single_file()
             hea = HealthStore(s.profile_dir).to_single_file()
-        print(f"reverted {getattr(s, 'uid', 'default')}: {fin} finance + {hea} health records")
+        with data_write_lock(s.data_dir):
+            sess = SessionStore(s.data_dir).to_flat_files()
+        print(f"reverted {getattr(s, 'uid', 'default')}: {fin} finance + "
+              f"{hea} health records, {sess} sessions")
 
     if settings.deployment_mode == "multi_tenant":
         from assistant.platform.registry import UserRegistry

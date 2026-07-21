@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -41,6 +42,7 @@ from urllib.parse import parse_qs, urlsplit
 from assistant.platform.config import DEFAULT_UID, Settings
 from assistant.platform.identity import Unauthorized, onboarding_candidate, resolve_uid
 from assistant.platform.llm import LLM
+from assistant.platform.locks import _path_lock
 from assistant.platform.registry import UserRegistry
 
 log = logging.getLogger("assistant")
@@ -115,93 +117,198 @@ class SessionStore:
         self.context_hours = context_hours
         self.retention_days = retention_days
         self.max_turns = max_turns
+        self._lock_file = data_dir / "write.lock"
 
-    def _path(self, session_id: str) -> Path:
-        """Map a session id to its spill file via a short sha1 hash, so
-        arbitrary channel:peer ids become safe fixed-length filenames."""
-        return self.dir / (hashlib.sha1(session_id.encode()).hexdigest()[:16] + ".json")
+    def _sdir(self, session_id: str) -> Path:
+        """The per-session directory (short sha1 of the id) holding its day-shards."""
+        return self.dir / hashlib.sha1(session_id.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _local_day(ts: str) -> str:
+        """The system-local calendar date of a (UTC) ISO ts — the shard a turn
+        belongs to, so late-night turns land on the owner's day, not the UTC
+        day. `unknown` for a missing/unparseable ts (pre-timestamp legacy)."""
+        try:
+            return datetime.fromisoformat(str(ts)).astimezone().date().isoformat()
+        except (ValueError, TypeError):
+            return "unknown"
+
+    def _shards(self, session_id: str) -> list[Path]:
+        """The session's day-shard files, ascending by date (name)."""
+        d = self._sdir(session_id)
+        return sorted(d.glob("*.json")) if d.exists() else []
+
+    def _read(self, path: Path) -> dict:
+        try:
+            return json.loads(path.read_text())
+        except (ValueError, OSError):
+            return {"turns": []}
+
+    def _atomic_write(self, path: Path, data: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False))
+        tmp.replace(path)
+
+    def _ensure_migrated(self) -> None:
+        """One-time split of legacy flat `sessions/<hash>.json` into per-day
+        shards `sessions/<hash>/<local-date>.json`. Marker-gated, under the write
+        lock; the legacy file is renamed `.bak` so it is never double-read."""
+        marker = self.dir / ".migrated"
+        if marker.exists():
+            return
+        with _path_lock(self._lock_file):
+            if marker.exists():
+                return
+            self.dir.mkdir(parents=True, exist_ok=True)
+            for p in list(self.dir.glob("*.json")):   # legacy flat session files
+                data = self._read(p)
+                by_day: dict[str, list] = {}
+                for t in data.get("turns", []):
+                    by_day.setdefault(self._local_day(t.get("ts", "")), []).append(t)
+                sdir = self.dir / p.stem
+                for day, turns in by_day.items():
+                    self._atomic_write(sdir / f"{day}.json",
+                                       {"session": data.get("session", p.stem), "turns": turns})
+                p.replace(p.with_name(p.name + ".bak"))
+            marker.write_text("migrated\n")
 
     def _all(self, session_id: str) -> list[dict]:
-        """Every stored turn for the session (unfiltered); `[]` when the file
-        is absent or corrupt — a bad spill must never break a reply."""
-        path = self._path(session_id)
-        if not path.exists():
-            return []
-        try:
-            return json.loads(path.read_text()).get("turns", [])
-        except ValueError:
-            return []
+        """Every stored turn for the session across its shards, oldest first;
+        `[]` when absent/corrupt — a bad spill must never break a reply."""
+        turns: list[dict] = []
+        for p in self._shards(session_id):
+            turns.extend(self._read(p).get("turns", []))
+        return sorted(turns, key=lambda t: t.get("ts", ""))
 
     def _within(self, turns: list[dict], hours: float) -> list[dict]:
-        """Turns newer than `hours` ago; turns lacking a `ts` predate the
-        timestamp feature and are treated as expired."""
+        """Turns newer than `hours` ago (UTC ts compare); turns lacking a `ts`
+        predate the timestamp feature and are treated as expired."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         return [t for t in turns if t.get("ts", "") >= cutoff]
 
     def history(self, session_id: str) -> list[dict]:
         """The turns a prompt should see: the last `keep` within the context
         window. Older turns stay on disk (retention) but never reach a prompt."""
+        self._ensure_migrated()
         return self._within(self._all(session_id), self.context_hours)[-self.keep:]
 
     def append(self, session_id: str, owner: str, assistant: str,
                outcome: str | None = None, repaired: bool = False,
                self_reported: bool = False, prev_verdict: str | None = None) -> None:
-        """Record one owner/assistant exchange (each side capped at 2000 chars).
-        Keeps the whole retention window on disk — not just the prompt slice —
-        bounded by `max_turns`, so a month of history survives while prompts
-        stay short.
+        """Record one owner/assistant exchange (each side capped at 2000 chars)
+        into today's shard. Serialized under the per-user write lock; shard
+        writes are atomic.
 
         ``outcome``/``repaired``/``self_reported`` label the NEW turn
         (success/fail/neutral, chat/agent.py Stage 1); ``prev_verdict``
-        (satisfied/dissatisfied) is the owner's reaction to the PREVIOUS turn
-        and finalizes its label — a correction flips it to fail (the original
-        kept as ``outcome_initial``), an acknowledgment confirms success, but
-        a code-observed fail is never upgraded. Old turn dicts simply lack
-        these keys; every reader uses ``.get``."""
-        turns = self._within(self._all(session_id), self.retention_days * 24)
-        if prev_verdict in ("satisfied", "dissatisfied") and turns:
-            prev = turns[-1]
-            prev["owner_verdict"] = prev_verdict
-            was = prev.get("outcome")
-            final = ("fail" if prev_verdict == "dissatisfied"
-                     else ("success" if was != "fail" else was))
-            if final and final != was:
-                if was:
-                    prev["outcome_initial"] = was
-                prev["outcome"] = final
-        turn = {"ts": datetime.now(timezone.utc).isoformat(),
-                "owner": owner[:2000], "assistant": assistant[:2000]}
-        if outcome:
-            turn["outcome"] = outcome
-        if repaired:
-            turn["repaired"] = True
-        if self_reported:
-            turn["self"] = True
-        turns.append(turn)
-        self.dir.mkdir(parents=True, exist_ok=True)
-        self._path(session_id).write_text(json.dumps(
-            {"session": session_id, "turns": turns[-self.max_turns:]},
-            ensure_ascii=False))
+        (satisfied/dissatisfied) finalizes the PREVIOUS turn's label — a
+        correction flips it to fail (original kept as ``outcome_initial``), an
+        acknowledgment confirms success, a code-observed fail is never upgraded.
+        The previous turn may live in an EARLIER shard, so its shard is rewritten
+        in place; a previous turn older than ``retention_days`` is never
+        relabeled."""
+        self._ensure_migrated()
+        with _path_lock(self._lock_file):
+            if prev_verdict in ("satisfied", "dissatisfied"):
+                recent = self._within(self._all(session_id), self.retention_days * 24)
+                if recent:
+                    self._finalize_prev(session_id, recent[-1], prev_verdict)
+            turn = {"ts": datetime.now(timezone.utc).isoformat(),
+                    "owner": owner[:2000], "assistant": assistant[:2000]}
+            if outcome:
+                turn["outcome"] = outcome
+            if repaired:
+                turn["repaired"] = True
+            if self_reported:
+                turn["self"] = True
+            shard = self._sdir(session_id) / f"{self._local_day(turn['ts'])}.json"
+            data = self._read(shard) if shard.exists() else {"session": session_id, "turns": []}
+            data.setdefault("session", session_id)
+            data.setdefault("turns", []).append(turn)
+            self._atomic_write(shard, data)
+            self._enforce_max_turns(session_id)
+
+    def _finalize_prev(self, session_id: str, prev: dict, prev_verdict: str) -> None:
+        """Apply the owner's verdict to the previous turn, rewriting the (possibly
+        earlier) shard that holds it — matched by its ts."""
+        was = prev.get("outcome")
+        final = ("fail" if prev_verdict == "dissatisfied"
+                 else ("success" if was != "fail" else was))
+        shard = self._sdir(session_id) / f"{self._local_day(prev.get('ts', ''))}.json"
+        if not shard.exists():
+            return
+        data = self._read(shard)
+        for t in data.get("turns", []):
+            if t.get("ts") == prev.get("ts") and t.get("owner") == prev.get("owner"):
+                t["owner_verdict"] = prev_verdict
+                if final and final != was:
+                    if was:
+                        t["outcome_initial"] = was
+                    t["outcome"] = final
+                break
+        self._atomic_write(shard, data)
+
+    def _enforce_max_turns(self, session_id: str) -> None:
+        """Bound the session's total turns across ALL shards at `max_turns`,
+        dropping the oldest shards' turns first (preserves the per-session disk
+        bound, not per-shard)."""
+        shards = self._shards(session_id)
+        excess = sum(len(self._read(p).get("turns", [])) for p in shards) - self.max_turns
+        for p in shards:
+            if excess <= 0:
+                break
+            data = self._read(p)
+            turns = data.get("turns", [])
+            drop = min(excess, len(turns))
+            excess -= drop
+            remaining = turns[drop:]
+            if remaining:
+                data["turns"] = remaining
+                self._atomic_write(p, data)
+            else:
+                p.unlink(missing_ok=True)
+
+    def to_flat_files(self) -> int:
+        """Reverse migration (rollback): merge each session's day-shards back into
+        a flat `sessions/<hash>.json`, remove the marker + `.bak` snapshots.
+        Returns the session count. Caller quiesces writers + holds the lock."""
+        n = 0
+        for sdir in list(self.dir.iterdir()) if self.dir.exists() else []:
+            if not sdir.is_dir():
+                continue
+            turns, session = [], sdir.name
+            for shard in sorted(sdir.glob("*.json")):
+                data = self._read(shard)
+                session = data.get("session", session)
+                turns.extend(data.get("turns", []))
+            turns.sort(key=lambda t: t.get("ts", ""))
+            self._atomic_write(self.dir / f"{sdir.name}.json",
+                               {"session": session, "turns": turns})
+            shutil.rmtree(sdir, ignore_errors=True)
+            n += 1
+        (self.dir / ".migrated").unlink(missing_ok=True)
+        for bak in self.dir.glob("*.json.bak"):
+            bak.unlink(missing_ok=True)
+        return n
 
     def prune(self) -> dict:
-        """Drop turns past the retention window from disk; delete session files
-        left empty. Returns counts for the curate log/metrics."""
+        """Delete shards older than the retention window (by shard date), the
+        `unknown.json` shards (ts-less legacy turns, treated as expired), and
+        now-empty session dirs. Returns counts for the curate log/metrics."""
+        self._ensure_migrated()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.retention_days)).date().isoformat()
         removed_turns = removed_files = 0
-        for path in self.dir.glob("*.json") if self.dir.exists() else []:
-            try:
-                data = json.loads(path.read_text())
-            except ValueError:
-                path.unlink(missing_ok=True)
-                removed_files += 1
+        for sdir in list(self.dir.iterdir()) if self.dir.exists() else []:
+            if not sdir.is_dir():
                 continue
-            turns = data.get("turns", [])
-            fresh = self._within(turns, self.retention_days * 24)
-            removed_turns += len(turns) - len(fresh)
-            if not fresh:
-                path.unlink(missing_ok=True)
-                removed_files += 1
-            elif len(fresh) != len(turns):
-                path.write_text(json.dumps({**data, "turns": fresh}, ensure_ascii=False))
+            for p in sdir.glob("*.json"):
+                if p.stem == "unknown" or p.stem < cutoff:
+                    removed_turns += len(self._read(p).get("turns", []))
+                    p.unlink(missing_ok=True)
+                    removed_files += 1
+            if not any(sdir.iterdir()):
+                sdir.rmdir()
         return {"turns": removed_turns, "files": removed_files}
 
 

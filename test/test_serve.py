@@ -96,69 +96,70 @@ def test_bearer_token_enforced(settings):
         srv.shutdown()
 
 
+def _put_shard(store, sid, day, turns):
+    """Write turns directly into a session's day-shard (test seam)."""
+    import json
+    store._sdir(sid).mkdir(parents=True, exist_ok=True)
+    (store._sdir(sid) / f"{day}.json").write_text(
+        json.dumps({"session": sid, "turns": turns}))
+
+
 def test_session_store_trims_and_survives_corruption(settings):
+    from datetime import datetime
+
     store = SessionStore(settings.data_dir, keep=3)
     for i in range(5):
         store.append("s", f"q{i}", f"a{i}")
     assert [t["owner"] for t in store.history("s")] == ["q2", "q3", "q4"]
     assert all(t.get("ts") for t in store.history("s"))  # turns are timestamped
-    store._path("s").write_text("{corrupt")
+    # corrupt the (single, today) shard → tolerated, history empty
+    today = datetime.now().astimezone().date().isoformat()
+    (store._sdir("s") / f"{today}.json").write_text("{corrupt")
     assert store.history("s") == []
 
 
 def test_context_window_excludes_but_retention_keeps(settings):
     # a turn past the ~2-day context window never reaches a prompt, but stays
-    # on disk (retained ~1 month) and survives further appends.
-    import json
+    # on disk (retained ~1 month, in its own day-shard) and survives appends.
     from datetime import datetime, timedelta, timezone
 
     store = SessionStore(settings.data_dir, context_hours=48, retention_days=30)
     store.append("s", "fresh question", "fresh answer")
-    path = store._path("s")
-    data = json.loads(path.read_text())
-    old_ts = (datetime.now(timezone.utc) - timedelta(hours=49)).isoformat()  # >2d, <30d
-    data["turns"].insert(0, {"ts": old_ts, "owner": "day-old q", "assistant": "a"})
-    path.write_text(json.dumps(data))
-
+    old = datetime.now(timezone.utc) - timedelta(hours=49)  # >2d, <30d
+    _put_shard(store, "s", old.astimezone().date().isoformat(),
+               [{"ts": old.isoformat(), "owner": "day-old q", "assistant": "a"}])
     # prompt context: only the in-window turn
     assert [t["owner"] for t in store.history("s")] == ["fresh question"]
-    # retention: the day-old turn is still on disk...
+    # retention: the day-old turn is still on disk (across shards, oldest first)
     assert [t["owner"] for t in store._all("s")] == ["day-old q", "fresh question"]
-    # ...and an append preserves it (append loads the retention window, not the slice)
+    # ...and an append preserves it
     store.append("s", "q3", "a3")
     assert [t["owner"] for t in store._all("s")] == ["day-old q", "fresh question", "q3"]
-    # legacy turns without a ts are treated as expired for prompts
-    store._path("legacy").parent.mkdir(parents=True, exist_ok=True)
-    store._path("legacy").write_text(json.dumps(
-        {"session": "legacy", "turns": [{"owner": "x", "assistant": "y"}]}))
+    # legacy turns without a ts → the unknown shard, expired for prompts
+    _put_shard(store, "legacy", "unknown", [{"owner": "x", "assistant": "y"}])
     assert store.history("legacy") == []
 
 
 def test_prune_uses_retention_not_context(settings):
-    # prune drops turns past the retention window (~30d), NOT the context window;
-    # a turn one day old is kept even though it's out of the prompt window.
-    import json
+    # prune drops whole shards past the retention window (~30d), NOT the context
+    # window; a one-day-old shard is kept even though out of the prompt window.
     from datetime import datetime, timedelta, timezone
 
     store = SessionStore(settings.data_dir, context_hours=48, retention_days=30)
-    store.append("s", "recent", "a")
-    store.append("old", "gone", "a")
     now = datetime.now(timezone.utc)
-    for sid, mode in (("s", "mix"), ("old", "all")):
-        path = store._path(sid)
-        data = json.loads(path.read_text())
-        if mode == "all":
-            for t in data["turns"]:
-                t["ts"] = (now - timedelta(days=31)).isoformat()  # past retention
-        else:
-            data["turns"].insert(0, {"ts": (now - timedelta(days=40)).isoformat(),
-                                     "owner": "ancient", "assistant": "a"})
-        path.write_text(json.dumps(data))
+    today = now.astimezone().date().isoformat()
+    d40, d31 = now - timedelta(days=40), now - timedelta(days=31)
+    # 's': a recent shard + an ancient (40d) shard; 'old': entirely 31d ago
+    _put_shard(store, "s", today, [{"ts": now.isoformat(), "owner": "recent", "assistant": "a"}])
+    _put_shard(store, "s", d40.astimezone().date().isoformat(),
+               [{"ts": d40.isoformat(), "owner": "ancient", "assistant": "a"}])
+    _put_shard(store, "old", d31.astimezone().date().isoformat(),
+               [{"ts": d31.isoformat(), "owner": "gone", "assistant": "a"}])
 
     pruned = store.prune()
-    assert pruned == {"turns": 2, "files": 1}  # 1 ancient turn in 's' + all of 'old'
-    assert store._path("s").exists() and not store._path("old").exists()
-    assert [t["owner"] for t in store._all("s")] == ["recent"]  # in-window turn kept
+    assert pruned == {"turns": 2, "files": 2}  # ancient shard in 's' + old's shard
+    assert store._sdir("s").exists() and not store._sdir("old").exists()
+    assert [t["owner"] for t in store._all("s")] == ["recent"]  # in-window shard kept
     assert store.prune() == {"turns": 0, "files": 0}  # idempotent
 
 
@@ -227,3 +228,81 @@ def test_session_store_verdict_and_legacy_turns(settings):
     store.append("s2", "谢谢", "ok", outcome="neutral", prev_verdict="satisfied")
     prev = store.history("s2")[0]
     assert prev["outcome"] == "fail" and "outcome_initial" not in prev
+
+
+# ── per-day session sharding: migration, cross-shard verdict, reverse ──────
+
+def test_session_migration_splits_legacy_flat_file(settings):
+    import hashlib
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    store = SessionStore(settings.data_dir)
+    now = datetime.now(timezone.utc)
+    h = hashlib.sha1("s".encode()).hexdigest()[:16]
+    store.dir.mkdir(parents=True, exist_ok=True)
+    (store.dir / f"{h}.json").write_text(json.dumps({"session": "s", "turns": [
+        {"ts": (now - timedelta(days=2)).isoformat(), "owner": "old", "assistant": "a"},
+        {"ts": now.isoformat(), "owner": "new", "assistant": "b"},
+        {"owner": "legacy-no-ts", "assistant": "c"}]}))
+    # a public call migrates: two dated shards + an unknown shard, legacy → .bak
+    store._ensure_migrated()
+    assert [t["owner"] for t in store._all("s")] == ["legacy-no-ts", "old", "new"]
+    assert (store.dir / h / "unknown.json").exists()
+    assert (store.dir / f"{h}.json.bak").exists()
+    assert not (store.dir / f"{h}.json").exists()
+
+
+def test_prev_verdict_finalizes_turn_in_earlier_shard(settings):
+    from datetime import datetime, timedelta, timezone
+
+    store = SessionStore(settings.data_dir, retention_days=30)
+    y = datetime.now(timezone.utc) - timedelta(days=1)
+    _put_shard(store, "s", y.astimezone().date().isoformat(),
+               [{"ts": y.isoformat(), "owner": "帮我记45", "assistant": "记好了",
+                 "outcome": "success"}])
+    # a correction TODAY dissatisfies yesterday's turn → its (earlier) shard flips
+    store.append("s", "不对是54", "改好了", outcome="success", prev_verdict="dissatisfied")
+    prev = store._all("s")[0]
+    assert prev["owner_verdict"] == "dissatisfied"
+    assert prev["outcome"] == "fail" and prev["outcome_initial"] == "success"
+
+
+def test_prev_verdict_ignores_turn_older_than_retention(settings):
+    from datetime import datetime, timedelta, timezone
+
+    store = SessionStore(settings.data_dir, retention_days=30)
+    old = datetime.now(timezone.utc) - timedelta(days=40)   # beyond retention
+    _put_shard(store, "s", old.astimezone().date().isoformat(),
+               [{"ts": old.isoformat(), "owner": "ancient", "assistant": "a",
+                 "outcome": "success"}])
+    store.append("s", "谢谢", "不客气", prev_verdict="dissatisfied")
+    stale = store._all("s")[0]
+    assert "owner_verdict" not in stale and stale["outcome"] == "success"  # untouched
+
+
+def test_max_turns_enforced_across_shards(settings):
+    from datetime import datetime, timezone
+
+    store = SessionStore(settings.data_dir, max_turns=3)
+    now = datetime.now(timezone.utc)
+    _put_shard(store, "s", "2026-07-18", [{"ts": "2026-07-18T00:00:00+00:00",
+                                           "owner": f"a{i}", "assistant": "x"} for i in range(3)])
+    store.append("s", "newest", "y")   # total would be 4 > max_turns=3 → oldest dropped
+    owners = [t["owner"] for t in store._all("s")]
+    assert len(owners) == 3 and owners[-1] == "newest" and "a0" not in owners
+
+
+def test_session_reverse_migration(settings):
+    from datetime import datetime, timezone
+
+    store = SessionStore(settings.data_dir)
+    store.append("s", "q1", "a1")
+    store.append("s", "q2", "a2")
+    n = store.to_flat_files()
+    import hashlib
+    import json
+    h = hashlib.sha1("s".encode()).hexdigest()[:16]
+    assert n == 1 and not (store.dir / h).exists()   # shards folded back
+    flat = json.loads((store.dir / f"{h}.json").read_text())
+    assert [t["owner"] for t in flat["turns"]] == ["q1", "q2"]
