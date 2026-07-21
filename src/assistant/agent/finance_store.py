@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 
 from assistant.platform.locks import locked_transaction
+from assistant.platform.timeutil import weekday_cn
 
 CATEGORIES = ["food", "transport", "housing", "utilities", "entertainment",
               "shopping", "health", "education", "travel", "salary", "bonus",
@@ -268,9 +269,15 @@ def _stated_time(record: dict) -> str:
 
 
 def timestamp_of(record: dict) -> str:
-    """Full 'YYYY-MM-DD HH:MM' display identity of a record ('' time for
-    legacy records that never carried one)."""
-    return f"{record['date']} {record.get('time', '')}".strip()
+    """Full 'YYYY-MM-DD (周X) HH:MM' display identity of a record ('' time for
+    legacy records that never carried one). The weekday makes an off-by-one day
+    obvious in the reply the owner sees."""
+    d = str(record.get("date", ""))
+    try:
+        wk = f" ({weekday_cn(datetime.strptime(d, '%Y-%m-%d').date())})"
+    except ValueError:
+        wk = ""
+    return f"{d}{wk} {record.get('time', '')}".strip()
 
 
 def _signature(kind, amount, currency, when, time, note) -> tuple:

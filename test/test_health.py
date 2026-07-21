@@ -274,3 +274,41 @@ def test_query_health_action_formats_records_and_totals(settings):
     assert "2 meals" in out and "~800kcal" in out and "~38" in out
     assert "早餐" in out and "午餐" in out
     assert "no health records" in run_action("query_health", {"date": "2020-01-01"}, settings)
+
+
+# ── event-day resolution in the log handlers (per-day records bug fix) ──
+
+def test_log_meal_resolves_relative_date(settings):
+    from datetime import date, timedelta
+
+    from assistant.agent.actions.handlers import _log_meal
+    from assistant.agent.health_store import HealthStore
+
+    out = _log_meal(settings, {"description": "牛肉面", "date": "昨天", "time": "12:30"})
+    assert out.startswith("logged")
+    yday = (date.today() - timedelta(days=1)).isoformat()
+    recs = HealthStore(settings.profile_dir).records(days=3, kind="meal")
+    assert any(r["date"] == yday and r["description"] == "牛肉面" for r in recs)
+    assert yday in out                     # reply echoes the resolved (yesterday) date
+
+
+def test_log_meal_rejects_unparseable_date_writes_nothing(settings):
+    from assistant.agent.actions.handlers import _log_meal
+    from assistant.agent.actions.registry import looks_failed
+    from assistant.agent.health_store import HealthStore
+
+    store = HealthStore(settings.profile_dir)
+    before = len(store.records(days=90, kind="meal"))
+    out = _log_meal(settings, {"description": "牛肉面", "date": "上上个礼拜三"})
+    assert "rejected" in out and looks_failed(out)          # a failure → repair round
+    assert len(HealthStore(settings.profile_dir).records(days=90, kind="meal")) == before
+
+
+def test_prompt_and_examples_instruct_date_resolution(settings):
+    from assistant.agent.actions.registry import ACTIONS
+    from assistant.agent.chat.agent import system_prompt
+
+    assert '"date"' in ACTIONS["log_meal"].prompt_example
+    assert '"date"' in ACTIONS["log_transaction"].prompt_example
+    sp = system_prompt(settings)
+    assert "昨天" in sp and "temporal anchor" in sp         # told to resolve relative days

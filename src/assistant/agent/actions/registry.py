@@ -330,13 +330,16 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                 "protein_g": {"required": False, "desc": "estimate ok"},
                 "carbs_g": {"required": False, "desc": "estimate ok"},
                 "fat_g": {"required": False, "desc": "estimate ok"},
-                "date": {"required": False, "desc": "YYYY-MM-DD, default today"},
+                "date": {"required": False, "desc": "event day YYYY-MM-DD; resolve "
+                        "今天/昨天/前天/N天前 via the [temporal anchor] and pass it — "
+                        "omit ONLY when the day is genuinely today"},
                 "time": {"required": False, "desc": "HH:MM when known"},
                 "note": {"required": False, "desc": "e.g. ingredients seen on a label"}},
         llm=True,
         prompt_example='{"type": "log_meal", "description": "牛肉面", '
-                       '"calories_kcal": 550, "protein_g": 25, "time": "12:30"}   '
-                       '# meals/food photos/nutrition labels; estimate macros, say so in reply',
+                       '"calories_kcal": 550, "protein_g": 25, "date": "2026-07-19", '
+                       '"time": "12:30"}   # "昨天中午的牛肉面": set date to the event day '
+                       '(resolve 昨天 via the [temporal anchor]); omit date only if today',
         slash="health",
     ),
     Action(
@@ -347,12 +350,15 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                              "put sets/reps in note for strength work"},
                 "duration_min": {"required": False, "desc": "minutes if timed — "
                                  "OMIT for set/rep work rather than inventing one"},
-                "date": {"required": False, "desc": "YYYY-MM-DD, default today"},
+                "date": {"required": False, "desc": "event day YYYY-MM-DD; resolve "
+                        "今天/昨天/前天/N天前 via the [temporal anchor] and pass it — "
+                        "omit ONLY when the day is genuinely today"},
                 "time": {"required": False, "desc": "HH:MM when known"},
                 "note": {"required": False, "desc": "sets/reps, distance, intensity"}},
         llm=True,
-        prompt_example='{"type": "log_exercise", "activity": "跑步", "duration_min": 30}   '
-                       '# duration_min optional — omit for set/rep work, put sets in note',
+        prompt_example='{"type": "log_exercise", "activity": "跑步", "duration_min": 30, '
+                       '"date": "2026-07-19"}   # date = the event day (resolve 昨天/前天 via '
+                       'the anchor); duration_min optional — omit for set/rep work',
         slash="health",
     ),
     Action(
@@ -360,11 +366,13 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         description="record a body-weight measurement (kg) in the health log",
         handler=_log_weight,
         params={"weight_kg": {"required": True, "desc": "kilograms"},
-                "date": {"required": False, "desc": "YYYY-MM-DD, default today"},
+                "date": {"required": False, "desc": "event day YYYY-MM-DD; resolve "
+                        "今天/昨天/前天/N天前 via the [temporal anchor] and pass it — "
+                        "omit ONLY when the day is genuinely today"},
                 "time": {"required": False, "desc": "HH:MM when known"}},
         llm=True,
-        prompt_example='{"type": "log_weight", "weight_kg": 70.5}   # also from '
-                       'body-scale photos',
+        prompt_example='{"type": "log_weight", "weight_kg": 70.5, "date": "2026-07-19"}   '
+                       '# date = the day measured (omit only if today); also from body-scale photos',
         slash="health",
     ),
     Action(
@@ -437,7 +445,9 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                                      "housing; 水电燃气 → utilities"},
                 "note": {"required": False,
                          "desc": "context: merchant/what it was for — used for dedup"},
-                "date": {"required": False, "desc": "YYYY-MM-DD, default today"},
+                "date": {"required": False, "desc": "event day YYYY-MM-DD; resolve "
+                        "今天/昨天/前天/N天前 via the [temporal anchor] and pass it — "
+                        "omit ONLY when the day is genuinely today"},
                 "time": {"required": False,
                          "desc": "HH:MM — ALWAYS pass when the receipt/message shows "
                                  "one; distinguishes same-priced purchases (auto-filled "
@@ -445,9 +455,9 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
                 "currency": {"required": False, "desc": "e.g. CNY/HKD, default configured"}},
         llm=True,
         prompt_example='{"type": "log_transaction", "kind": "expense", "amount": 45, '
-                       '"category": "food", "note": "午饭", "time": "12:30"}   '
-                       '# kind: income|expense; note=context, time from receipt if shown; '
-                       'duplicates (same kind+amount+currency+date+time+note) are rejected',
+                       '"category": "food", "note": "午饭", "date": "2026-07-19", "time": "12:30"}   '
+                       '# "昨天午饭花了45": set date to the event day (resolve via the anchor), '
+                       'time from receipt if shown; duplicates are rejected',
         slash="fin",
     ),
     Action(

@@ -32,3 +32,37 @@ def test_anchor_tolerates_platform_tzname_forms():
 def test_default_clock_is_aware_local(monkeypatch):
     monkeypatch.setattr(timeutil, "_now", lambda: _FROZEN)
     assert "2026-07-17 09:32" in temporal_anchor()
+
+
+# ── event-day resolution (per-day records: "昨天" must become an absolute date) ──
+
+import pytest
+from datetime import date
+
+from assistant.platform.timeutil import resolve_day, weekday_cn
+
+_D = date(2026, 7, 20)  # a Monday
+
+
+@pytest.mark.parametrize("token,expected", [
+    ("今天", "2026-07-20"), ("today", "2026-07-20"),
+    ("昨天", "2026-07-19"), ("昨日", "2026-07-19"), ("yesterday", "2026-07-19"),
+    ("前天", "2026-07-18"), ("大前天", "2026-07-17"),
+    ("3天前", "2026-07-17"), ("三天前", "2026-07-17"), ("3 days ago", "2026-07-17"),
+    ("明天", "2026-07-21"), ("后天", "2026-07-22"),
+    ("2026-07-15", "2026-07-15"),          # absolute passthrough
+    ("  昨天 ", "2026-07-19"),              # whitespace tolerant
+])
+def test_resolve_day_resolves(token, expected):
+    assert resolve_day(token, _D) == expected
+
+
+@pytest.mark.parametrize("token", ["", "上上个礼拜三", "sometime", "13月40号", "昨"])
+def test_resolve_day_unparseable_is_none(token):
+    # None (not today!) so the caller rejects instead of silently mis-dating
+    assert resolve_day(token, _D) is None
+
+
+def test_weekday_cn():
+    assert weekday_cn(date(2026, 7, 20)) == "周一"   # Monday
+    assert weekday_cn(date(2026, 7, 17)) == "周五"   # Friday

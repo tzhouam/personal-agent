@@ -140,7 +140,10 @@ def test_every_record_has_full_time_identity(settings):
     assert auto["time"] and auto["time_source"] == "auto"   # logging clock time
     assert len(auto["logged_at"]) == 16                     # YYYY-MM-DD HH:MM
     from assistant.agent.finance_store import timestamp_of
-    assert timestamp_of(stated) == f"{stated['date']} 09:15"
+    from assistant.platform.timeutil import weekday_cn
+    from datetime import date as _date
+    wk = weekday_cn(_date.fromisoformat(stated["date"]))
+    assert timestamp_of(stated) == f"{stated['date']} ({wk}) 09:15"
 
 
 def test_auto_time_does_not_weaken_dedup(settings):

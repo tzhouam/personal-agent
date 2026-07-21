@@ -357,15 +357,39 @@ def _plan_task(settings: Settings, p: dict) -> str:
 
 # ── finance ──────────────────────────────────────────────────────────
 
+def _log_date(p: dict) -> tuple[str, str | None]:
+    """Resolve a log action's `date` param to an absolute event date.
+
+    Returns `(when, error)`. `when == ""` means the day was unstated → the store
+    defaults to today (the legitimate case). A non-None `error` means the model
+    gave an explicit date we could not parse — the caller must **reject** the log
+    (never silently record today). Already-absolute and relative days
+    (今天/昨天/前天/N天前/…) both resolve via `resolve_day`."""
+    from datetime import date as _date
+
+    from assistant.platform.timeutil import resolve_day
+
+    raw = str(p.get("date", "")).strip()
+    if not raw:
+        return "", None
+    resolved = resolve_day(raw, _date.today())
+    if resolved is None:
+        return "", f'没听懂日期"{raw}"，请用「昨天／前天／2026-07-20」这样的说法重说'
+    return resolved, None
+
+
 def _log_transaction(settings: Settings, p: dict) -> str:
     """Append an income/expense record to the finance ledger. Reports the new
     id, a rejection reason, or the existing record when this would be a
     duplicate (same kind/amount/currency/date/time/note)."""
     from assistant.agent.finance_store import FinanceStore
 
+    when, date_err = _log_date(p)
+    if date_err:
+        return f"transaction rejected — {date_err}"
     status, record = FinanceStore(settings.profile_dir).add(
         p.get("kind", ""), p.get("amount"), category=p.get("category", "other"),
-        note=p.get("note", ""), when=p.get("date", ""), time=p.get("time", ""),
+        note=p.get("note", ""), when=when, time=p.get("time", ""),
         currency=p.get("currency") or settings.finance_currency,
         source=p.get("source", "chat"))
     if status == "invalid":
@@ -531,8 +555,11 @@ def _log_meal(settings: Settings, p: dict) -> str:
     """Record a meal (description + optional calorie/macro estimates)."""
     from assistant.agent.health_store import HealthStore
 
+    when, date_err = _log_date(p)
+    if date_err:
+        return f"meal rejected — {date_err}"
     status, record = HealthStore(settings.profile_dir).add(
-        "meal", when=p.get("date", ""), time=p.get("time", ""),
+        "meal", when=when, time=p.get("time", ""),
         description=p.get("description", ""), note=p.get("note", ""),
         calories_kcal=p.get("calories_kcal"), protein_g=p.get("protein_g"),
         carbs_g=p.get("carbs_g"), fat_g=p.get("fat_g"))
@@ -547,8 +574,11 @@ def _log_exercise(settings: Settings, p: dict) -> str:
     """Record an exercise session (activity + duration minutes)."""
     from assistant.agent.health_store import HealthStore
 
+    when, date_err = _log_date(p)
+    if date_err:
+        return f"exercise rejected — {date_err}"
     status, record = HealthStore(settings.profile_dir).add(
-        "exercise", when=p.get("date", ""), time=p.get("time", ""),
+        "exercise", when=when, time=p.get("time", ""),
         activity=p.get("activity", ""), duration_min=p.get("duration_min"),
         note=p.get("note", ""))
     if status == "invalid":
@@ -562,8 +592,11 @@ def _log_weight(settings: Settings, p: dict) -> str:
     """Record a body-weight measurement (kg)."""
     from assistant.agent.health_store import HealthStore
 
+    when, date_err = _log_date(p)
+    if date_err:
+        return f"weight rejected — {date_err}"
     status, record = HealthStore(settings.profile_dir).add(
-        "weight", when=p.get("date", ""), time=p.get("time", ""),
+        "weight", when=when, time=p.get("time", ""),
         weight_kg=p.get("weight_kg"), note=p.get("note", ""))
     if status == "invalid":
         return "weight rejected — needs weight_kg (20-400)"

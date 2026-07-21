@@ -14,13 +14,70 @@ On a host pinned to UTC, set the process `TZ` env var — that moves the anchor
 and the schedulers together.
 """
 
-from datetime import datetime
+import re
+from datetime import date, datetime, timedelta
 
 
 def _now() -> datetime:
     """The module's single clock read (aware, system-local) — a seam so tests
     monkeypatch this instead of comparing against the live clock."""
     return datetime.now().astimezone()
+
+
+_WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def weekday_cn(d: date) -> str:
+    """Chinese short weekday (周一…周日) for a date — shown next to record dates
+    so the owner catches an off-by-one day at a glance."""
+    return _WEEKDAY_CN[d.weekday()]
+
+
+# fixed relative-day words → day offset from "today"
+_REL_DAYS = {
+    "今天": 0, "今日": 0, "today": 0,
+    "昨天": -1, "昨日": -1, "yesterday": -1,
+    "前天": -2, "前日": -2,
+    "大前天": -3,
+    "明天": 1, "明日": 1, "tomorrow": 1,
+    "后天": 2, "大后天": 3,
+}
+_CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def resolve_day(token: str, today: date | None = None) -> str | None:
+    """Resolve a day expression to an absolute ``YYYY-MM-DD``, or ``None`` if it
+    can't be parsed (the caller must then reject, never fall back to today).
+
+    Handles: an already-absolute ``YYYY-MM-DD`` (validated, passed through);
+    fixed relative words (今天/昨天/前天/大前天/明天/后天/today/yesterday/…); and
+    counted offsets ``N天前``/``N天后``/``N days ago`` incl. Chinese numerals
+    (三天前). Resolution is against system-local ``today`` (injectable for tests)."""
+    today = today or _now().date()
+    s = str(token or "").strip()
+    if not s:
+        return None
+    try:  # already absolute
+        return datetime.strptime(s, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        pass
+    low = s.lower()
+    if low in _REL_DAYS:
+        return (today + timedelta(days=_REL_DAYS[low])).isoformat()
+    m = re.fullmatch(r"(\d+)\s*天前", s)
+    if m:
+        return (today - timedelta(days=int(m.group(1)))).isoformat()
+    m = re.fullmatch(r"(\d+)\s*天后", s)
+    if m:
+        return (today + timedelta(days=int(m.group(1)))).isoformat()
+    m = re.fullmatch(r"(\d+)\s*days?\s*ago", low)
+    if m:
+        return (today - timedelta(days=int(m.group(1)))).isoformat()
+    m = re.fullmatch(r"([一二两三四五六七八九十]+)\s*天前", s)
+    if m and m.group(1) in _CN_NUM:
+        return (today - timedelta(days=_CN_NUM[m.group(1)])).isoformat()
+    return None
 
 
 def temporal_anchor(now: datetime | None = None) -> str:
