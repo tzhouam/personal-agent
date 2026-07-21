@@ -47,13 +47,15 @@ def test_system_prompt_is_mode_aware(settings, tmp_path, monkeypatch):
     single = system_prompt(settings)
     # single_user: today's prompt — reboot instruction + example, JSON shape intact
     assert "emit\nreboot" in single and '{"type": "reboot"}' in single
-    assert '{"reply": "<chat reply>", "actions": []}' in single  # template render kept literal braces
+    # template render kept literal braces (incl. the outcome-label fields)
+    assert '{"reply": "<chat reply>", "actions": [],' in single
+    assert '"self_check": "success|fail|neutral"' in single
 
     mt = system_prompt(_mt(tmp_path, monkeypatch))
     # multi_tenant: no reboot instruction, no reboot example — admin note instead
     assert "emit\nreboot" not in mt and '"type": "reboot"' not in mt
     assert "admin-only" in mt
-    assert '{"reply": "<chat reply>", "actions": []}' in mt
+    assert '{"reply": "<chat reply>", "actions": [],' in mt
 
 
 def test_task_runner_system_prompt_is_mode_aware(settings, tmp_path, monkeypatch):

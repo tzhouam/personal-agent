@@ -231,3 +231,81 @@ def test_query_action_composes_answer_from_retrieved_data(settings):
     reply = handle_message("我7月13号早餐吃了什么", settings, SeqLLM())
     assert reply == "7月13号早餐吃了蛋，约200大卡。"  # data-informed, not the blind first reply
     assert "✔" not in reply  # raw records not echoed as an outcome
+
+
+# ── per-turn outcome labels (success / fail / neutral) ──────────────────────
+
+def test_classify_turn_label_precedence():
+    from assistant.chat.agent import classify_turn
+
+    # unresolved failure in the FINAL round → fail, even after a retry
+    assert classify_turn(["x rejected — bad id", "(retry) still rejected — bad id"],
+                         ["still rejected — bad id"]) == ("fail", True, False)
+    # repaired: last round clean → success + repaired flag
+    assert classify_turn(["x rejected — bad id", "(retry) added todo t2"],
+                         ["added todo t2"]) == ("success", True, False)
+    # clean actions → success; retrieval-only turn (outcomes dropped) → success
+    assert classify_turn(["added todo t1"], ["added todo t1"]) == ("success", False, False)
+    assert classify_turn([], [], retrieved=True) == ("success", False, False)
+    # no actions: model self_check refines neutral (case-insensitive)
+    assert classify_turn([], [], self_check="Success") == ("success", False, True)
+    assert classify_turn([], [], self_check="fail") == ("fail", False, True)
+    assert classify_turn([], [], self_check="whatever") == ("neutral", False, False)
+    assert classify_turn([], []) == ("neutral", False, False)
+    # hard failure beats everything, including a self-reported success
+    assert classify_turn([], [], hard_fail=True, self_check="success") \
+        == ("fail", False, False)
+
+
+def test_owner_verdict_keywords_beat_model_judgment():
+    from assistant.chat.agent import owner_verdict
+
+    # deterministic correction markers win regardless of the model's field
+    assert owner_verdict("不对，改成周五", "satisfied") == "dissatisfied"
+    assert owner_verdict("That's wrong, redo it", None) == "dissatisfied"
+    # otherwise the model's judgment is honored; junk → None
+    assert owner_verdict("谢谢！", "satisfied") == "satisfied"
+    assert owner_verdict("嗯", "unclear") is None
+    assert owner_verdict("嗯", None) is None
+
+
+def test_handle_turn_labels_and_prev_verdict(settings):
+    from assistant.chat.agent import TurnResult, handle_turn
+
+    # clean action turn → provisional success
+    llm = FakeLLM({"reply": "加好了", "actions": [{"type": "add_todo", "title": "X"}]})
+    turn = handle_turn("加个待办X", settings, llm)
+    assert isinstance(turn, TurnResult)
+    assert turn.outcome == "success" and not turn.repaired
+
+    # bad-id turn the model can't fix → fail
+    llm = FakeLLM({"reply": "ok", "actions": [{"type": "done_todo", "id": "t99"}]})
+    assert handle_turn("完成t99", settings, llm).outcome == "fail"
+
+    # chit-chat turn with self_check → self-reported label
+    llm = FakeLLM({"reply": "早上好！", "actions": [], "self_check": "neutral"})
+    turn = handle_turn("早", settings, llm)
+    assert turn.outcome == "neutral" and not turn.self_reported
+
+    # model judges the owner's new message as feedback on the previous turn —
+    # only when history exists (no previous turn → no verdict)
+    llm = FakeLLM({"reply": "太好了", "actions": [], "prev_feedback": "satisfied"})
+    hist = [{"owner": "帮我记一笔", "assistant": "记好了"}]
+    assert handle_turn("谢谢，记对了", settings, llm, history=hist).prev_verdict \
+        == "satisfied"
+    assert handle_turn("谢谢，记对了", settings, llm).prev_verdict is None
+    # deterministic correction marker beats a lenient model
+    llm = FakeLLM({"reply": "好的", "actions": [], "prev_feedback": "unclear"})
+    assert handle_turn("不对，是45不是54", settings, llm, history=hist).prev_verdict \
+        == "dissatisfied"
+
+
+def test_handle_turn_hard_llm_failure_is_fail(settings):
+    from assistant.chat.agent import handle_turn
+
+    class DeadLLM:
+        def complete_json(self, *a, **kw):
+            raise RuntimeError("401 invalid key")
+
+    turn = handle_turn("你好", settings, DeadLLM())
+    assert turn.outcome == "fail" and "稍后再试" in turn.reply

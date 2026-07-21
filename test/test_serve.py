@@ -190,3 +190,40 @@ def test_chat_accepts_base64_images_and_image_only(server, monkeypatch):
     assert list((settings.data_dir / "media").glob("chat-*.png"))
     # neither text nor images → still a 400
     assert httpx.post(f"{base}/chat", json={"text": ""}).status_code == 400
+
+
+# ── per-turn outcome labels persisted in the session store ──────────────────
+
+def test_chat_persists_outcome_and_owner_verdict(server):
+    base, llm, settings = server
+    llm.result = {"reply": "记好了", "actions": [], "self_check": "success"}
+    httpx.post(f"{base}/chat", json={"session": "wechat:me", "text": "帮我记一笔45"})
+    store = SessionStore(settings.data_dir)
+    turns = store.history("wechat:me")
+    assert turns[-1]["outcome"] == "success" and turns[-1].get("self") is True
+
+    # the owner's correction flips the PREVIOUS turn to fail (original kept)
+    llm.result = {"reply": "改好了", "actions": [], "self_check": "success"}
+    httpx.post(f"{base}/chat", json={"session": "wechat:me", "text": "不对，是54"})
+    turns = store.history("wechat:me")
+    prev, cur = turns[-2], turns[-1]
+    assert prev["owner_verdict"] == "dissatisfied"
+    assert prev["outcome"] == "fail" and prev["outcome_initial"] == "success"
+    assert cur["outcome"] == "success"
+
+
+def test_session_store_verdict_and_legacy_turns(settings):
+    store = SessionStore(settings.data_dir)
+    # legacy signature still works; old turns have no label keys
+    store.append("s", "hi", "hello")
+    assert "outcome" not in store.history("s")[-1]
+    # satisfied confirms a provisional neutral up to success
+    store.append("s", "谢谢", "不客气", outcome="neutral", prev_verdict="satisfied")
+    turns = store.history("s")
+    assert turns[0]["owner_verdict"] == "satisfied"
+    assert turns[0].get("outcome") is None or turns[0].get("outcome") == "success"
+    # a code-observed fail is never upgraded by a satisfied verdict
+    store.append("s2", "do it", "boom", outcome="fail")
+    store.append("s2", "谢谢", "ok", outcome="neutral", prev_verdict="satisfied")
+    prev = store.history("s2")[0]
+    assert prev["outcome"] == "fail" and "outcome_initial" not in prev

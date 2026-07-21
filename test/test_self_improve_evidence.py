@@ -62,3 +62,23 @@ def test_quiet_window_prints_nothing(tmp_path):
 def test_shell_harness_syntax():
     script = SCRIPT.parent / "self-improve.sh"
     assert subprocess.run(["bash", "-n", str(script)]).returncode == 0
+
+
+def test_structured_labels_beat_keyword_heuristics(tmp_path):
+    data_dir = tmp_path / "data"
+    (data_dir / "sessions").mkdir(parents=True)
+    (data_dir / "sessions" / "s.json").write_text(json.dumps({"turns": [
+        # fail-labeled, clean text → surfaces as friction
+        {"ts": datetime.now().isoformat(), "owner": "查一下天气",
+         "assistant": "我现在查不到呢", "outcome": "fail"},
+        # success-labeled turn mentioning "failed" → suppressed
+        {"ts": datetime.now().isoformat(), "owner": "总结CI",
+         "assistant": "the build failed twice, summary sent", "outcome": "success"},
+        # owner verdict dissatisfied → friction even though labeled success
+        {"ts": datetime.now().isoformat(), "owner": "hmm ok",
+         "assistant": "done", "outcome": "success", "owner_verdict": "dissatisfied"},
+    ]}))
+    out = _run({"DEPLOYMENT_MODE": "single_user", "DATA_DIR": str(data_dir)})
+    assert "查不到" in out and "[friction]" in out
+    assert "summary sent" not in out
+    assert "done" in out

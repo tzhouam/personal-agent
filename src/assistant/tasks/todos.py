@@ -44,15 +44,16 @@ def update_todos(store: TodoStore, digest: dict, resume: dict, github=None, llm=
     """Reconcile the todo list against today's signals and return
     {added, closed, open (urgency-sorted), open_count}.
 
-    Passes in order: expire todos untouched for 30 days; if `github` is given,
+    Passes in order: expire stale todos (30 days untouched; committed
+    red/blocking items get 45 — see urgency.py); if `github` is given,
     auto-close ones whose underlying PR/issue is finished; add new todos from the
     digest's red-priority notifications (skipping keys already tracked), fetching
     context and writing LLM detail summaries only for genuinely new items; and
     add or clear the single resume-approval todo per `resume["status"]`. `github`
     and `llm` are optional — without them the monitor and summarization passes are
     skipped rather than failing."""
-    # ── age-out pass: a todo untouched for a month is stale by definition ──
-    closed = [{"id": t["id"], "title": t["title"], "reason": "outdated (open >30 days)"}
+    # ── age-out pass: untouched todos go stale (30d speculative / 45d committed) ──
+    closed = [{"id": t["id"], "title": t["title"], "reason": "outdated (stale)"}
               for t in store.expire_stale(days=30)]
 
     # ── monitor pass: close finished work before adding new items ──

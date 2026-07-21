@@ -1,5 +1,6 @@
 """The todo urgency metric (src/assistant/urgency.py): Taskwarrior-style
-polynomial — committed items age up, speculative items decay out."""
+polynomial — committed items age up on a longer 30→45-day leash, speculative
+items decay out over 14→30 days."""
 
 from datetime import date
 
@@ -49,12 +50,17 @@ def test_freshly_overdue_gets_flat_boost():
 
 
 def test_staleness_exemptions_and_decay():
-    assert staleness(_todo(priority="red", created="2026-01-01"), TODAY) == 1.0
-    assert staleness(_todo(action="review_requested", created="2026-01-01"), TODAY) == 1.0
-    assert staleness(_todo(source="resume", created="2026-01-01"), TODAY) == 1.0
-    # future/recent due: alive; a month past due: dead
+    # committed items get the longer 30→45 window — full at 25d, gone when ancient
+    assert staleness(_todo(priority="red", created="2026-06-14"), TODAY) == 1.0   # 25d
+    assert staleness(_todo(priority="red", created="2026-01-01"), TODAY) == 0.0
+    assert staleness(_todo(action="review_requested", created="2026-01-01"), TODAY) == 0.0
+    assert staleness(_todo(source="resume", created="2026-01-01"), TODAY) == 0.0
+    mid = staleness(_todo(priority="red", created="2026-06-01"), TODAY)           # 38d
+    assert 0.4 < mid < 0.55
+    # future/recent due: alive; a month past due: dead — committed or not
     assert staleness(_todo(due="2026-08-01", created="2026-01-01"), TODAY) == 1.0
     assert staleness(_todo(due="2026-05-01", created="2026-01-01"), TODAY) == 0.0
+    assert staleness(_todo(priority="red", due="2026-05-01", created="2026-01-01"), TODAY) == 0.0
     # undated yellow: full until day 14, gone at day 30
     assert staleness(_todo(created="2026-06-25"), TODAY) == 1.0          # 14d
     assert staleness(_todo(created="2026-06-17"), TODAY) == 0.5          # 22d
@@ -65,20 +71,29 @@ def test_going_stale_window():
     assert not going_stale(_todo(created="2026-06-25"), TODAY)           # 14d: fine
     assert going_stale(_todo(created="2026-06-17"), TODAY)               # 22d: warn
     assert not going_stale(_todo(created="2026-06-01"), TODAY)           # 38d: dead, not warning
-    assert not going_stale(_todo(priority="red", created="2026-06-17"), TODAY)  # exempt
+    # committed items warn later (35d) and die at 45
+    assert not going_stale(_todo(priority="red", created="2026-06-17"), TODAY)   # 22d: fine
+    assert going_stale(_todo(priority="red", created="2026-06-01"), TODAY)       # 38d: warn
+    assert not going_stale(_todo(priority="red", created="2026-05-20"), TODAY)   # 50d: dead
 
 
-def test_expire_stale_committed_items_never_silently_die(tmp_path):
+def test_expire_stale_committed_items_get_longer_leash(tmp_path):
     store = TodoStore(tmp_path)
-    store.upsert("k-red", title="Red forever", source="github", priority="red")
+    store.upsert("k-red", title="Red review ask", source="github", priority="red")
     store.upsert("k-block", title="Waiting on owner", source="github",
                  action="review_requested")
     store.upsert("k-note", title="Yellow note", source="manual")
     data = store.load()
     for item in data["items"]:
-        item["created"] = "2025-01-01"  # all ancient
+        item["created"] = "2026-06-01"  # 38 days before the first cutoff
     store._save(data, "age")
 
+    # day 38: the speculative note is dead, committed items are still fading
     expired = store.expire_stale(today=date(2026, 7, 9))
     assert [t["title"] for t in expired] == ["Yellow note"]
-    assert {t["title"] for t in store.open_items()} == {"Red forever", "Waiting on owner"}
+    assert {t["title"] for t in store.open_items()} == {"Red review ask", "Waiting on owner"}
+
+    # day 49: even committed review asks are auto-cleared as outdated
+    expired = store.expire_stale(today=date(2026, 7, 20))
+    assert {t["title"] for t in expired} == {"Red review ask", "Waiting on owner"}
+    assert store.open_items() == []

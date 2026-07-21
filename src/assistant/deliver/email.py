@@ -10,6 +10,7 @@ from email.mime.text import MIMEText
 import httpx
 
 from ..config import Settings
+from ..todo_store import group_todos
 from ..utils import ref_label
 
 _PRIORITY_META = {
@@ -27,8 +28,9 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
     one self-contained inline-styled string.
 
     Each argument is one section that renders only when it has content — open
-    `todos` (NEW-badged for today's additions) and auto-closed ones, the
-    red/yellow/white notification `digest`, the `reading` list with the day's
+    `todos` (NEW-badged for today's additions, grouped into PR-review/issue/CI/
+    personal sections) and auto-closed ones, the yellow/white notification
+    `digest` (red items are already the todo list), the `reading` list with the day's
     `research` summaries, industry/中文 feed items, a footer of failed sources,
     `website` sync status, a pending/failed `resume`, today's `profile_ops` diff,
     optional pre-rendered `health_html`, and a `stats` footer. All dynamic text
@@ -41,25 +43,29 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
     open_todos = todos.get("open", [])
     if open_todos:
         added_today = set(todos.get("added", []))
-        parts.append(f"<h3>✅ Todos ({len(open_todos)} open)</h3><ul style='margin-top:4px'>")
-        for todo in open_todos:
-            title = f"<b>{html.escape(todo.get('title', ''))}</b>"
-            label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
-                              todo.get("type", ""))
-            if label:  # short bracketed link, summary stays plain text
-                title = f"<a href='{todo['url']}'>[{label}]</a>: {title}"
-            elif todo.get("url"):
-                title = f"<a href='{todo['url']}'>[link]</a>: {title}"
-            badge = (" <b style='color:#c0392b'>NEW</b>" if todo.get("id") in added_today else "")
-            due = f" · due {html.escape(str(todo['due']))}" if todo.get("due") else ""
-            detail = (f"<br><span style='color:#6b7280;font-size:13px'>{html.escape(todo['detail'])}</span>"
-                      if todo.get("detail") else "")
-            parts.append(
-                f"<li style='margin-bottom:6px'>[<code>{todo.get('id')}</code>] {title}{badge}"
-                f"<span style='color:#9ca3af'> ({todo.get('source', '')}, since {todo.get('created', '')}{due})"
-                f"</span>{detail}</li>"
-            )
-        parts.append("</ul><p style='font-size:12px;color:#9ca3af'>"
+        parts.append(f"<h3>✅ Todos ({len(open_todos)} open)</h3>")
+        for group_label, group_items in group_todos(open_todos):
+            parts.append(f"<h4 style='margin:10px 0 2px;color:#374151'>"
+                         f"{group_label} ({len(group_items)})</h4><ul style='margin-top:4px'>")
+            for todo in group_items:
+                title = f"<b>{html.escape(todo.get('title', ''))}</b>"
+                label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
+                                  todo.get("type", ""))
+                if label:  # short bracketed link, summary stays plain text
+                    title = f"<a href='{todo['url']}'>[{label}]</a>: {title}"
+                elif todo.get("url"):
+                    title = f"<a href='{todo['url']}'>[link]</a>: {title}"
+                badge = (" <b style='color:#c0392b'>NEW</b>" if todo.get("id") in added_today else "")
+                due = f" · due {html.escape(str(todo['due']))}" if todo.get("due") else ""
+                detail = (f"<br><span style='color:#6b7280;font-size:13px'>{html.escape(todo['detail'])}</span>"
+                          if todo.get("detail") else "")
+                parts.append(
+                    f"<li style='margin-bottom:6px'>[<code>{todo.get('id')}</code>] {title}{badge}"
+                    f"<span style='color:#9ca3af'> ({todo.get('source', '')}, since {todo.get('created', '')}{due})"
+                    f"</span>{detail}</li>"
+                )
+            parts.append("</ul>")
+        parts.append("<p style='font-size:12px;color:#9ca3af'>"
                      "close with <code>assistant todo done &lt;id&gt;</code></p>")
     closed_today = todos.get("closed", [])
     if closed_today:
@@ -71,7 +77,9 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
     sections = digest.get("sections", {})
     if not any(sections.values()):
         parts.append("<p>No GitHub notifications today. 🎉</p>")
-    for key in ("red", "yellow", "white"):
+    # red notifications are NOT rendered here: every one of them already became
+    # a todo in the todos phase, so listing them again duplicated the todo list
+    for key in ("yellow", "white"):
         items = sections.get(key, [])
         if not items:
             continue

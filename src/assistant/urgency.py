@@ -4,9 +4,13 @@ proportions: due 12 > blocking 8 > priority 6 > age 2 > source 1.5, with the
 age horizon rescaled from Taskwarrior's 365 days to our 30-day lifecycle).
 
 Key design point: committed items (due date, red priority, or someone waiting
-on the owner) AGE UP and never silently expire; speculative undated items
-DECAY OUT via the staleness factor (stale-bot convention: fade after 14 days
-of no activity, gone at 30, warning surfaced from day 21).
+on the owner) get a longer leash than speculative ones, but nothing lives
+forever. Speculative undated items DECAY OUT via the staleness factor
+(stale-bot convention: fade after 14 days of no activity, gone at 30, warning
+surfaced from day 21); committed undated items age UP first, then fade from
+day 30 and expire at day 45 — a review request untouched for six weeks is
+outdated, not pending. Dated items live by their due date (dead a month past
+due) regardless of commitment.
 """
 
 from datetime import date, datetime
@@ -17,9 +21,11 @@ _BLOCKING_W = {"review_requested": 1.0, "mention": 0.6, "assign": 0.6, "assigned
 # external asks outrank self-generated notes
 _SOURCE_W = {"github": 1.0, "chat": 0.6, "resume": 0.4, "manual": 0.3}
 
-STALE_EXEMPT = "committed (due/red/blocking) — ages up instead of expiring"
-FADE_START, FADE_END = 14, 30  # days without activity: fade begins / item dies
+FADE_START, FADE_END = 14, 30  # speculative: fade begins / item dies
 WARN_AT = 21                   # "going stale" from here on
+# committed (red/blocking) undated items: same shape, longer horizon
+COMMITTED_FADE_START, COMMITTED_FADE_END = 30, 45
+COMMITTED_WARN_AT = 35
 
 
 def _day(value) -> date | None:
@@ -61,8 +67,9 @@ def _priority(todo: dict) -> float:
 
 
 def is_committed(todo: dict, today: date | None = None) -> bool:
-    """Committed items are exempt from staleness decay — but a due date only
-    protects until 30 days past due; after that even scheduled work is dead."""
+    """Committed items decay on the longer COMMITTED_* horizon — but a due
+    date only protects until 30 days past due; after that even scheduled work
+    is dead."""
     if _priority(todo) >= 1.0 or _blocking(todo) > 0:
         return True
     due = _day(todo.get("due"))
@@ -70,37 +77,43 @@ def is_committed(todo: dict, today: date | None = None) -> bool:
 
 
 def staleness(todo: dict, today: date | None = None) -> float:
-    """1.0 = fully alive; fades linearly to 0.0 between FADE_START and
-    FADE_END days without activity; 0.0 = expired. Activity anchor is the
-    creation date (todos are write-once today; a `touched` field would slot
-    in here if editing is ever added)."""
+    """1.0 = fully alive; fades linearly to 0.0 across the item's fade window
+    (FADE_START→FADE_END speculative, COMMITTED_FADE_START→COMMITTED_FADE_END
+    for red/blocking items); 0.0 = expired. Dated items instead live until a
+    month past due. Activity anchor is the creation date (todos are
+    write-once today; a `touched` field would slot in here if editing is
+    ever added)."""
     today = today or date.today()
-    if _priority(todo) >= 1.0 or _blocking(todo) > 0:
-        return 1.0
     due = _day(todo.get("due"))
     if due is not None:
-        overdue = (today - due).days
-        if overdue <= FADE_END:
-            return 1.0
-        return 0.0  # scheduled, but a month past due with no touch: dead
+        # scheduled work lives by its date, committed or not: alive until a
+        # month past due, dead after — never idle-decayed before its due date
+        return 1.0 if (today - due).days <= FADE_END else 0.0
     created = _day(todo.get("created"))
     if created is None:
         return 1.0
     idle = (today - created).days
-    if idle <= FADE_START:
+    start, end = ((COMMITTED_FADE_START, COMMITTED_FADE_END)
+                  if _priority(todo) >= 1.0 or _blocking(todo) > 0
+                  else (FADE_START, FADE_END))
+    if idle <= start:
         return 1.0
-    return max(0.0, 1.0 - (idle - FADE_START) / (FADE_END - FADE_START))
+    return max(0.0, 1.0 - (idle - start) / (end - start))
 
 
 def going_stale(todo: dict, today: date | None = None) -> bool:
-    """True while an item is fading (warn from WARN_AT days) but not yet dead."""
+    """True while an item is fading (its window's warn threshold up to death)
+    but not yet dead. Dated items never warn — the due ramp handles them."""
     today = today or date.today()
-    if is_committed(todo, today):
+    if _day(todo.get("due")) is not None:
         return False
     created = _day(todo.get("created"))
     if created is None:
         return False
-    return WARN_AT <= (today - created).days < FADE_END
+    idle = (today - created).days
+    if _priority(todo) >= 1.0 or _blocking(todo) > 0:
+        return COMMITTED_WARN_AT <= idle < COMMITTED_FADE_END
+    return WARN_AT <= idle < FADE_END
 
 
 def urgency(todo: dict, today: date | None = None) -> float:

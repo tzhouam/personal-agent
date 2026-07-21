@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .actions import run_action
-from .chat.agent import handle_message
+from .chat.agent import handle_turn
 from .config import DEFAULT_UID, Settings
 from .identity import Unauthorized, onboarding_candidate, resolve_uid
 from .llm import LLM
@@ -102,14 +102,41 @@ class SessionStore:
         window. Older turns stay on disk (retention) but never reach a prompt."""
         return self._within(self._all(session_id), self.context_hours)[-self.keep:]
 
-    def append(self, session_id: str, owner: str, assistant: str) -> None:
+    def append(self, session_id: str, owner: str, assistant: str,
+               outcome: str | None = None, repaired: bool = False,
+               self_reported: bool = False, prev_verdict: str | None = None) -> None:
         """Record one owner/assistant exchange (each side capped at 2000 chars).
         Keeps the whole retention window on disk — not just the prompt slice —
         bounded by `max_turns`, so a month of history survives while prompts
-        stay short."""
+        stay short.
+
+        ``outcome``/``repaired``/``self_reported`` label the NEW turn
+        (success/fail/neutral, chat/agent.py Stage 1); ``prev_verdict``
+        (satisfied/dissatisfied) is the owner's reaction to the PREVIOUS turn
+        and finalizes its label — a correction flips it to fail (the original
+        kept as ``outcome_initial``), an acknowledgment confirms success, but
+        a code-observed fail is never upgraded. Old turn dicts simply lack
+        these keys; every reader uses ``.get``."""
         turns = self._within(self._all(session_id), self.retention_days * 24)
-        turns.append({"ts": datetime.now(timezone.utc).isoformat(),
-                      "owner": owner[:2000], "assistant": assistant[:2000]})
+        if prev_verdict in ("satisfied", "dissatisfied") and turns:
+            prev = turns[-1]
+            prev["owner_verdict"] = prev_verdict
+            was = prev.get("outcome")
+            final = ("fail" if prev_verdict == "dissatisfied"
+                     else ("success" if was != "fail" else was))
+            if final and final != was:
+                if was:
+                    prev["outcome_initial"] = was
+                prev["outcome"] = final
+        turn = {"ts": datetime.now(timezone.utc).isoformat(),
+                "owner": owner[:2000], "assistant": assistant[:2000]}
+        if outcome:
+            turn["outcome"] = outcome
+        if repaired:
+            turn["repaired"] = True
+        if self_reported:
+            turn["self"] = True
+        turns.append(turn)
         self.dir.mkdir(parents=True, exist_ok=True)
         self._path(session_id).write_text(json.dumps(
             {"session": session_id, "turns": turns[-self.max_turns:]},
@@ -288,11 +315,14 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                     if not text and not images:
                         return self._send(400, {"error": "missing 'text'"})
                     skey = prefix + str(body.get("session", "") or "default")
-                    reply = handle_message(text, settings, make_llm(settings),
-                                           history=store.history(skey),
-                                           image_paths=images or None)
+                    turn = handle_turn(text, settings, make_llm(settings),
+                                       history=store.history(skey),
+                                       image_paths=images or None)
+                    reply = turn.reply
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
-                    store.append(skey, noted.strip(), reply)
+                    store.append(skey, noted.strip(), reply, outcome=turn.outcome,
+                                 repaired=turn.repaired, self_reported=turn.self_reported,
+                                 prev_verdict=turn.prev_verdict)
                     try:
                         return self._send(200, {"reply": reply})
                     except BrokenPipeError:
@@ -431,10 +461,13 @@ def _tick_user_email(user: Settings, make_llm, polled: set) -> None:
                  message.get("sender", "?"), message["text"])
         try:
             skey = f"{user.uid}:email:{message.get('sender', '')}"
-            reply = handle_message(message["text"], user, make_llm(user),
-                                   history=store.history(skey),
-                                   image_paths=message.get("images"))
-            store.append(skey, message["text"], reply)
+            turn = handle_turn(message["text"], user, make_llm(user),
+                               history=store.history(skey),
+                               image_paths=message.get("images"))
+            reply = turn.reply
+            store.append(skey, message["text"], reply, outcome=turn.outcome,
+                         repaired=turn.repaired, self_reported=turn.self_reported,
+                         prev_verdict=turn.prev_verdict)
             email.send(reply, in_reply_to=message)
             log.info("replied via email for %s (%d chars)", user.uid, len(reply))
         except Exception:
@@ -539,11 +572,15 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                              message.get("sender", "?"), message["text"])
                     try:
                         session = f"{channel.name}:{message.get('sender', '')}"
-                        reply = handle_message(message["text"], settings,
-                                               make_llm(settings),
-                                               history=sessions.history(session),
-                                               image_paths=message.get("images"))
-                        sessions.append(session, message["text"], reply)
+                        turn = handle_turn(message["text"], settings,
+                                           make_llm(settings),
+                                           history=sessions.history(session),
+                                           image_paths=message.get("images"))
+                        reply = turn.reply
+                        sessions.append(session, message["text"], reply,
+                                        outcome=turn.outcome, repaired=turn.repaired,
+                                        self_reported=turn.self_reported,
+                                        prev_verdict=turn.prev_verdict)
                         channel.send(reply, in_reply_to=message)
                         log.info("replied via %s (%d chars)", channel.name, len(reply))
                     except Exception:

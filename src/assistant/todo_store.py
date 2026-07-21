@@ -14,6 +14,25 @@ import yaml
 
 from .locks import locked_transaction
 
+# Todo display grouping, shared by the digest email and the website todos
+# page: first predicate that matches wins, so the catch-all must stay last.
+_TODO_GROUPS = (
+    ("🔍 PR reviews", lambda t: t.get("type") == "PullRequest"),
+    ("💬 Issues / RFCs", lambda t: t.get("type") == "Issue"),
+    ("⚙️ CI failures", lambda t: t.get("type") == "CheckSuite"),
+    ("📌 Personal / other", lambda t: True),
+)
+
+
+def group_todos(todos: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Split the (already urgency-sorted) open todos into the `_TODO_GROUPS`
+    sections, dropping empty groups. Order within a group is preserved."""
+    grouped: dict[str, list[dict]] = {label: [] for label, _ in _TODO_GROUPS}
+    for todo in todos:
+        label = next(l for l, match in _TODO_GROUPS if match(todo))
+        grouped[label].append(todo)
+    return [(label, items) for label, items in grouped.items() if items]
+
 
 class _YamlItems:
     """Base for the git-versioned YAML item stores. Subclasses set ``FILENAME``
@@ -104,10 +123,12 @@ class _YamlItems:
 
         Urgency-metric semantics (src/assistant/urgency.py): speculative
         undated items decay out over ``days``; committed items — red
-        priority, blocking someone, or a due date less than a month past —
-        are exempt and age UP instead, so a lingering review request is
-        surfaced, not silently deleted."""
-        # ``days`` is kept for call-site clarity; urgency.FADE_END (30) governs.
+        priority or blocking someone — get the longer COMMITTED window (45
+        days) before expiring, and a due date protects until a month past
+        due. A lingering review request is surfaced and warned about first,
+        but after six untouched weeks it is auto-cleared as outdated."""
+        # ``days`` is kept for call-site clarity; urgency FADE_END /
+        # COMMITTED_FADE_END govern.
         from .urgency import staleness
 
         today = today or date.today()

@@ -10,6 +10,7 @@ from what the code actually did, not from what the LLM claims it did.
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import date
 
 from ..actions import RETRIEVAL_ACTIONS, execute, looks_failed, prompt_block, run_action
@@ -22,6 +23,58 @@ from ..todo_store import ReadingList, TodoStore
 log = logging.getLogger("assistant")
 
 _TODO_CONTEXT_LIMIT = 25
+
+
+@dataclass
+class TurnResult:
+    """What one chat turn produced, for callers that persist sessions: the
+    reply plus the provisional outcome label, friction flags, and the owner's
+    verdict on the PREVIOUS turn (the satisfaction ground truth — "success"
+    means the owner was satisfied, not merely that output was produced)."""
+
+    reply: str
+    outcome: str               # success | fail | neutral (provisional)
+    repaired: bool = False     # an action failed and was fixed on retry
+    self_reported: bool = False   # label came from the model's self_check
+    prev_verdict: str | None = None   # satisfied | dissatisfied | None
+
+
+# Owner-side correction markers → deterministic "dissatisfied" verdict about
+# the previous reply. scripts/self_improve_evidence.py keeps a standalone copy
+# (it must run without the package importable) — update both together.
+CORRECTION_MARKERS = ("不对", "不是", "错", "改成", "别再", "以后", "应该", "重新", "取消",
+                      "wrong", "not what", "incorrect", "undo that", "redo")
+
+
+def classify_turn(all_outcomes: list, last_outcomes: list, retrieved: bool = False,
+                  hard_fail: bool = False, self_check=None) -> tuple[str, bool, bool]:
+    """Stage-1 provisional label, computed in code — fail > success >
+    self-report > neutral. Returns ``(label, repaired, self_reported)``.
+
+    ``last_outcomes`` is the FINAL repair round: ``all_outcomes`` keeps the
+    superseded failure lines after a successful "(retry)", so it must not
+    drive the fail decision. ``self_check`` (the model's own verdict) is only
+    consulted for action-less turns — code-observed outcomes always win."""
+    repaired = any(str(o).startswith("(retry) ") for o in all_outcomes)
+    if hard_fail or any(looks_failed(o) for o in last_outcomes):
+        return "fail", repaired, False
+    if all_outcomes or retrieved:
+        return "success", repaired, False
+    check = str(self_check).strip().lower() if self_check else ""
+    if check in ("success", "fail"):
+        return check, repaired, True
+    return "neutral", repaired, False
+
+
+def owner_verdict(owner_text: str, model_feedback=None) -> str | None:
+    """Stage-2 verdict the owner's NEW message delivers about the previous
+    reply — the satisfaction signal. Deterministic correction markers first
+    (a lenient model can't miss them), else the model's prev_feedback."""
+    low = str(owner_text or "").lower()
+    if any(m in low for m in CORRECTION_MARKERS):
+        return "dissatisfied"
+    feedback = str(model_feedback).strip().lower() if model_feedback else ""
+    return feedback if feedback in ("satisfied", "dissatisfied") else None
 
 # Rendered per call by `system_prompt()` (NOT an import-time f-string): the
 # «ACTIONS»/«REBOOT» placeholders depend on `settings.deployment_mode`, so the
@@ -113,7 +166,14 @@ sections. For every dominant cost area, drill into its sub-areas using the compu
 transaction, and the time-of-day pattern — then give ONE concrete suggestion per section.
 Numbers come from the computed blocks, never estimated.
 
-Respond with ONLY JSON: {"reply": "<chat reply>", "actions": []}
+Respond with ONLY JSON: {"reply": "<chat reply>", "actions": [],
+"self_check": "success|fail|neutral", "prev_feedback": "satisfied|dissatisfied|unclear"}
+self_check is your honest verdict on THIS reply: "success" only when it fully answers the
+owner from real context/data or completes what they asked; "fail" when you could not actually
+help (missing info, unable, had to guess); "neutral" for greetings, chit-chat, acknowledgments.
+prev_feedback reads the owner's NEW message as feedback on your PREVIOUS reply: "dissatisfied"
+when they correct it, complain, or re-ask the same thing; "satisfied" when they accept, thank,
+or build on it; otherwise "unclear".
 Never claim an action succeeded in the reply — outcomes are appended automatically."""
 
 # The «REBOOT» sentence, per mode. single_user keeps today's guidance verbatim;
@@ -271,17 +331,49 @@ def build_context(settings: Settings) -> str:
     return "\n\n".join(parts)
 
 
-def handle_message(text: str, settings: Settings, llm: LLM | None = None,
-                   history: list[dict] | None = None,
-                   image_paths: list[str] | None = None) -> str:
+def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
+                history: list[dict] | None = None,
+                image_paths: list[str] | None = None) -> TurnResult:
     """``history`` is optional prior exchanges for this session
     (``[{"owner": ..., "assistant": ...}, …]``, oldest first) — supplied by
     the serve daemon's session store so multi-turn references work.
     ``image_paths`` are local image files attached to this message; they are
     described by the vision chain (vision.py) and injected as context, so an
-    image-only message (empty ``text``) still gets a real reply."""
+    image-only message (empty ``text``) still gets a real reply.
+
+    Returns a `TurnResult` — the reply plus the turn's outcome label and the
+    owner's verdict on the previous turn, which session-persisting callers
+    (serve.py) store for the self-evolution passes."""
     llm = llm or LLM(settings)
     turn_start = time.monotonic()
+
+    def _finish(reply: str, label: str, *, repaired: bool = False,
+                self_reported: bool = False, actions_n: int = 0,
+                repair_rounds: int = 0, failures_left: int = 0,
+                model_feedback=None) -> TurnResult:
+        """Every exit path funnels through here: derive the previous-turn
+        verdict, record the per-turn metrics row (best-effort — labeling can
+        never break the reply), and build the result. Hard-failure exits are
+        measured too, which the old bare-string returns never were."""
+        verdict = owner_verdict(text, model_feedback) if history else None
+        try:
+            from ..events_store import EventsStore
+
+            events = EventsStore(settings.events_db)
+            events.record_metrics(f"chat-{date.today().isoformat()}", "chat_turn", {
+                "duration_s": round(time.monotonic() - turn_start, 2),
+                "prompt_chars": len(prompt), "actions": actions_n,
+                "repair_rounds": repair_rounds, "failures_left": failures_left,
+                "images": len(attach),
+                "success": int(label == "success"), "fail": int(label == "fail"),
+                "neutral": int(label == "neutral"), "repaired": int(repaired),
+                "prev_satisfied": int(verdict == "satisfied"),
+                "prev_dissatisfied": int(verdict == "dissatisfied")})
+            events.close()
+        except Exception:
+            log.exception("chat metrics failed")
+        return TurnResult(reply, label, repaired, self_reported, verdict)
+
     prompt = f"## Context\n{build_context(settings)}\n\n"
     attach: list[str] = []
     if image_paths:
@@ -353,19 +445,22 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                                                role="chat", images=attach)
             except Exception:
                 log.exception("image retry/fallback failed too")
-                return ("图片这次没能处理，请稍后重发一次 🙏 "
-                        "急的话也可以把关键内容用文字发我。")
+                return _finish("图片这次没能处理，请稍后重发一次 🙏 "
+                               "急的话也可以把关键内容用文字发我。", "fail")
         else:
             log.exception("chat LLM call failed")
-            return ("我这边连不上大脑了（LLM 接口报错），请稍后再试。"
-                    f"\n技术细节: {str(exc)[:200]}")
+            return _finish("我这边连不上大脑了（LLM 接口报错），请稍后再试。"
+                           f"\n技术细节: {str(exc)[:200]}", "fail")
     if not isinstance(result, dict):
-        return "(assistant error: unparseable model response)"
+        return _finish("(assistant error: unparseable model response)", "fail")
     reply = str(result.get("reply", "")).strip()
     actions = result.get("actions") or []
+    self_check = result.get("self_check")
+    model_feedback = result.get("prev_feedback")
     outcomes = execute(actions, settings)
     all_outcomes = list(outcomes)
     repair_rounds = 0
+    hard_fail = False
 
     # Empty reply AND nothing done = the model returned nothing usable (mimo /
     # other reasoning models occasionally do this on an ambiguous fragment).
@@ -381,12 +476,15 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
             if isinstance(retry, dict):
                 reply = str(retry.get("reply", "")).strip()
                 actions = retry.get("actions") or []
+                self_check = retry.get("self_check") or self_check
+                model_feedback = retry.get("prev_feedback") or model_feedback
                 outcomes = execute(actions, settings)
                 all_outcomes = list(outcomes)
         except Exception:
             log.exception("empty-reply retry failed")
         if not reply and not all_outcomes:
             reply = "抱歉，我刚才没组织好回复 🙏 可以再说一次，或者换个说法吗？"
+            hard_fail = True  # the model never produced anything usable
 
     # Retrieval → compose: query_* actions pull profile records on demand (any
     # day/period, not just the fixed context snapshot). The first reply was
@@ -438,8 +536,11 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
         except Exception:
             log.exception("action-review LLM call failed")
             break
-        if isinstance(fix, dict) and str(fix.get("reply", "")).strip():
-            reply = str(fix["reply"]).strip()  # revised even when unfixable
+        if isinstance(fix, dict):
+            if str(fix.get("reply", "")).strip():
+                reply = str(fix["reply"]).strip()  # revised even when unfixable
+            self_check = fix.get("self_check") or self_check
+            model_feedback = fix.get("prev_feedback") or model_feedback
         actions = (fix.get("actions") or []) if isinstance(fix, dict) else []
         if not actions:
             break
@@ -450,19 +551,19 @@ def handle_message(text: str, settings: Settings, llm: LLM | None = None,
 
     if all_outcomes:
         reply = (reply + "\n\n" if reply else "") + "✔ " + "\n✔ ".join(all_outcomes)
-    try:  # harness telemetry: per-turn latency/size/repair counts (best-effort)
-        from datetime import datetime
+    label, repaired, self_reported = classify_turn(
+        all_outcomes, outcomes, retrieved=bool(retrieved), hard_fail=hard_fail,
+        self_check=self_check)
+    return _finish(reply, label, repaired=repaired, self_reported=self_reported,
+                   actions_n=len(all_outcomes), repair_rounds=repair_rounds,
+                   failures_left=sum(1 for o in all_outcomes if looks_failed(o)),
+                   model_feedback=model_feedback)
 
-        from ..events_store import EventsStore
 
-        events = EventsStore(settings.events_db)
-        events.record_metrics(f"chat-{date.today().isoformat()}", "chat_turn", {
-            "duration_s": round(time.monotonic() - turn_start, 2),
-            "prompt_chars": len(prompt), "actions": len(all_outcomes),
-            "repair_rounds": repair_rounds,
-            "failures_left": sum(1 for o in all_outcomes if looks_failed(o)),
-            "images": len(attach)})
-        events.close()
-    except Exception:
-        log.exception("chat metrics failed")
-    return reply
+def handle_message(text: str, settings: Settings, llm: LLM | None = None,
+                   history: list[dict] | None = None,
+                   image_paths: list[str] | None = None) -> str:
+    """Back-compat string facade over `handle_turn` for callers that only
+    need the reply (CLI ask, routines, the legacy channel service)."""
+    return handle_turn(text, settings, llm, history=history,
+                       image_paths=image_paths).reply

@@ -128,7 +128,7 @@ def test_about_fallback_without_bio():
 def test_render_site_pages_and_calendar():
     today = date(2026, 7, 2)
     todos = [
-        {"id": "t1", "title": "Review scheduler PR", "source": "github",
+        {"id": "t1", "title": "Review scheduler PR", "source": "github", "type": "PullRequest",
          "url": "https://github.com/o/r/pull/5", "detail": "You were asked to review the scheduler fix.",
          "created": "2026-07-01", "due": "2026-07-15", "status": "open"},
         {"id": "t2", "title": "No due date", "source": "manual",
@@ -171,8 +171,10 @@ def test_render_site_pages_and_calendar():
     assert "class='todo due'" in page                       # due chip styled distinctly
     # …but an undated, non-red todo is list-only (no calendar chip)
     assert page.count("No due date") == 1
-    # the list is a scroll container
+    # the list is a scroll container, grouped into kind sections
     assert "class='todo-scroll'" in page
+    assert "🔍 PR reviews <span class='t-count'>(1)</span>" in page
+    assert "📌 Personal / other <span class='t-count'>(1)</span>" in page
     # list entries carry the short link label, the description, and pin/done buttons
     assert "[PR #5]</a>" in page
     assert "You were asked to review the scheduler fix." in page
@@ -201,13 +203,13 @@ def test_calendar_importance_cap_and_list_order():
     assert order == sorted(order)
     # undated items never earn calendar chips: single occurrence each
     assert page.count("Old undated") == 1 and page.count("New undated") == 1
-    # same-day todos embed into one collapsible group: 4 due days collapse to
-    # one <details> with a count, one group per distinct day overall
-    assert page.count("<details class='t-day'") == 4
-    assert "2026-07-10 · Fri · due <span class='t-count'>(4)</span>" in page
-    # nearest groups start open; each group holds its own ul for the pin JS
-    assert page.count("<details class='t-day' open>") == 4
-    assert page.count("<ul class='todos'>") == 4
+    # the scroll list groups by kind (none of these carry a GitHub type, so
+    # they all land in the catch-all section), open, with its own ul for the
+    # pin JS
+    assert page.count("<details class='t-day'") == 1
+    assert "📌 Personal / other <span class='t-count'>(7)</span>" in page
+    assert page.count("<details class='t-day' open>") == 1
+    assert page.count("<ul class='todos'>") == 1
 
 
 def test_reading_page_like_todos():
@@ -334,7 +336,7 @@ def test_update_todos_reports_expired_as_closed(tmp_path):
     result = update_todos(store, digest={}, resume={})
     assert result["open_count"] == 0
     assert result["closed"] == [{"id": "t1", "title": "Ancient todo",
-                                 "reason": "outdated (open >30 days)"}]
+                                 "reason": "outdated (stale)"}]
 
 
 def test_sync_website_not_configured(settings):

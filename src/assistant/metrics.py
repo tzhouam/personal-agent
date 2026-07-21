@@ -143,6 +143,19 @@ def build_health(events, profile_dir, days: int = 7) -> list[tuple[str, str]]:
                  and (_day(r.get("done_at")) or date.min) >= today - timedelta(days=days)]
     lines.append(("reading surfaced / read (7d)", f"{len(surfaced_week)} / {len(read_week)}"))
 
+    # chat outcome labels (chat/agent.py) — success means the owner was
+    # satisfied, so the dissatisfied count rides next to the success rate
+    cs = int(sum(_series(rows, "chat_turn", "success")))
+    cf = int(sum(_series(rows, "chat_turn", "fail")))
+    cn = int(sum(_series(rows, "chat_turn", "neutral")))
+    cr = int(sum(_series(rows, "chat_turn", "repaired")))
+    cd = int(sum(_series(rows, "chat_turn", "prev_dissatisfied")))
+    if cs or cf or cn:  # omitted entirely for pre-label data
+        lines.append((f"chat turns ({days}d)",
+                      f"{_rate(cs, cs + cf)} success · {cn} neutral"
+                      + (f" · {cd} dissatisfied" if cd else "")
+                      + (f" · {cr} repaired" if cr else "")))
+
     checked = _series(rows, "consolidate", "claims_checked")
     if checked:  # weekly judge audit (faithfulness/staleness/contradiction)
         last = {name: int(_series(rows, "consolidate", name)[-1])

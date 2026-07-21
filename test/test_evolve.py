@@ -162,3 +162,32 @@ def test_combined_block_survives_broken_shared_store(tmp_path, monkeypatch):
     (tmp_path / "shared" / "lessons").write_text("not a dir")
     block = combined_prompt_block(user)
     assert "personal rule" in block                      # personal block survives
+
+
+def test_gather_evidence_prefers_structured_labels(settings):
+    from assistant.tasks.evolve import _gather_evidence
+
+    sessions = settings.data_dir / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "a.json").write_text(json.dumps({"turns": [
+        # fail-labeled turn with clean text → friction (keywords would miss it)
+        {"ts": "2026-07-20T10:00:00+00:00", "owner": "帮我查天气",
+         "assistant": "我现在查不到呢", "outcome": "fail"},
+        # success-labeled turn whose text contains "failed" → NOT friction
+        {"ts": "2026-07-20T10:01:00+00:00", "owner": "总结一下CI",
+         "assistant": "The build failed twice last week, summary sent.",
+         "outcome": "success"},
+        # owner dissatisfied with an otherwise-success turn → friction
+        {"ts": "2026-07-20T10:02:00+00:00", "owner": "记45",
+         "assistant": "记好了", "outcome": "success",
+         "owner_verdict": "dissatisfied"},
+        # unlabeled legacy turn falls back to keywords
+        {"ts": "2026-07-20T10:03:00+00:00", "owner": "改一下",
+         "assistant": "rejected — bad id"},
+    ]}))
+    evidence = _gather_evidence(settings)
+    blocks = evidence.split("\n---\n")
+    assert "[FRICTION]" in blocks[0]
+    assert "[FRICTION]" not in blocks[1]
+    assert "[FRICTION]" in blocks[2]
+    assert "[FRICTION]" in blocks[3]

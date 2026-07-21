@@ -9,6 +9,7 @@ import calendar as _calendar
 import html
 from datetime import date, datetime
 
+from ..todo_store import group_todos
 from ..urgency import going_stale, urgency
 from ..utils import ref_label
 
@@ -48,8 +49,8 @@ def _todo_sort_key(today: date):
 def _render_calendar(todos: list[dict], today: date) -> str:
     """Render the todos page: a month grid showing only the important todos
     (`_cal_important`, ≤3 per day), then the full urgency-sorted open-todo list
-    grouped into collapsible day sections. `today` anchors the month and the
-    urgency scores."""
+    grouped into collapsible kind sections (PR reviews / issues / CI /
+    personal). `today` anchors the month and the urgency scores."""
     e = html.escape
     # calendar shows only the important todos: due date if set, else created day
     by_day: dict[int, list[dict]] = {}
@@ -82,26 +83,16 @@ def _render_calendar(todos: list[dict], today: date) -> str:
 
     todos = sorted(todos, key=_todo_sort_key(today))
     if todos:
-        # same-day todos embed into one collapsible group; group order follows
-        # the urgency-ordered flat sort (most urgent day first)
-        groups: dict[str, list[dict]] = {}
-        for todo in todos:
-            anchor = _parse_day(todo.get("due")) or _parse_day(todo.get("created"))
-            groups.setdefault(anchor.isoformat() if anchor else "no date", []).append(todo)
-
+        # kind sections (PR reviews / issues / CI / personal — same grouping
+        # as the digest email); most-urgent-first order within each section
         parts.append(f"<h3>Open todos ({len(todos)})</h3><div class='todo-scroll'>")
         idx = 0
-        for group_i, (day, day_todos) in enumerate(groups.items()):
-            anchor = _parse_day(day)
-            label = f"{day} · {anchor.strftime('%a')}" if anchor else day
-            if any(t.get("due") for t in day_todos):
-                label += " · due"
-            open_attr = " open" if group_i < 5 else ""  # older days start collapsed
-            parts.append(f"<details class='t-day'{open_attr}><summary>{label} "
-                         f"<span class='t-count'>({len(day_todos)})</span></summary>"
+        for label, group_items in group_todos(todos):
+            parts.append(f"<details class='t-day' open><summary>{html.escape(label)} "
+                         f"<span class='t-count'>({len(group_items)})</span></summary>"
                          "<ul class='todos'>")
-            parts.extend(_todo_li(todo, idx + j, today) for j, todo in enumerate(day_todos))
-            idx += len(day_todos)
+            parts.extend(_todo_li(todo, idx + j, today) for j, todo in enumerate(group_items))
+            idx += len(group_items)
             parts.append("</ul></details>")
         parts.append("</div>")
         parts.append("<div id='todo-hidden-bar'><span></span> — "
@@ -111,9 +102,9 @@ def _render_calendar(todos: list[dict], today: date) -> str:
 
 
 def _render_reading(reading: list[dict], today: date) -> str:
-    """The reading list, presented like the todo list: a scrollable list of
-    collapsible day groups (by surfaced date, newest first) with owner-only
-    pin/done buttons — reading ids (r#) share the todos' localStorage marks.
+    """The reading list: a scrollable list of collapsible day groups (by
+    surfaced date, newest first — reading is chronological, unlike the
+    kind-grouped todos) with owner-only pin/done buttons — reading ids (r#) share the todos' localStorage marks.
     Done/Unrelated act locally and instantly; the marks also queue and push
     to the private marks repo in the background, where the agent collects
     them each run (owner decision 2026-07-10: no more mailto handoff)."""
@@ -195,8 +186,8 @@ def _todo_li(todo: dict, idx: int, today: date, stale_badge: bool = True,
     Carries `data-tid` (the mark id) and a short bracketed source link."""
     e = html.escape
     title = f"<b>{e(todo['title'])}</b>"
-    if stale_badge and going_stale(todo, today):  # fading toward the 30-day expiry
-        title += " <span class='t-stale' title='untouched for 3+ weeks — expires at 30 days'>⏳ going stale</span>"
+    if stale_badge and going_stale(todo, today):  # fading toward auto-expiry
+        title += " <span class='t-stale' title='untouched for weeks — will auto-expire soon'>⏳ going stale</span>"
     label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
                       todo.get("type", ""))
     if label:  # short bracketed link; the summary stays plain text

@@ -91,9 +91,16 @@ def _sessions(data: Path) -> list[str]:
             if ts and ts < CUTOFF.isoformat():
                 continue
             owner, reply = str(t.get("owner", "")), str(t.get("assistant", ""))
-            friction = any(s in reply for s in
-                           ("(retry)", "NOT logged", "rejected", "couldn't",
-                            "failed", "assistant error", "无法", "抱歉"))
+            label = t.get("outcome")
+            if label:  # structured per-turn label (chat/agent.py Stage 1+2)
+                friction = (label == "fail" or bool(t.get("repaired"))
+                            or t.get("owner_verdict") == "dissatisfied")
+            else:  # pre-label turns: legacy keyword heuristic
+                friction = any(s in reply for s in
+                               ("(retry)", "NOT logged", "rejected", "couldn't",
+                                "failed", "assistant error", "无法", "抱歉"))
+            # standalone copy of chat/agent.py CORRECTION_MARKERS (this script
+            # must run without the package importable) — update both together
             corr = any(s in owner for s in
                        ("不对", "不是", "错", "改成", "别再", "以后", "应该", "重新", "取消"))
             if friction or corr:

@@ -90,3 +90,18 @@ def test_health_section_lands_in_email():
     assert "Health (7 days)" in body
     assert "Health" not in render_html("2026-07-09", {}, {}, {}, {}, [], {}, "", [],
                                        {"run": "x"})
+
+
+def test_health_includes_chat_outcome_line(settings):
+    events = EventsStore(settings.events_db)
+    # no labeled chat rows → line absent
+    assert "chat turns (7d)" not in dict(build_health(events, settings.profile_dir))
+    for i, label in enumerate(("success", "success", "fail", "neutral")):
+        events.record_metrics(f"chat-x{i}", "chat_turn", {
+            "success": int(label == "success"), "fail": int(label == "fail"),
+            "neutral": int(label == "neutral"), "repaired": int(i == 0),
+            "prev_satisfied": 0, "prev_dissatisfied": int(i == 2)})
+    line = dict(build_health(events, settings.profile_dir))["chat turns (7d)"]
+    assert line.startswith("2/3 (66%) success")
+    assert "1 neutral" in line and "1 dissatisfied" in line and "1 repaired" in line
+    events.close()

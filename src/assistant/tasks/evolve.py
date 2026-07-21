@@ -71,9 +71,15 @@ def _gather_evidence(settings: Settings) -> str:
             for t in turns[-10:]:
                 owner = str(t.get("owner", ""))[:300]
                 reply = str(t.get("assistant", ""))[:400]
-                marker = " [FRICTION]" if any(
-                    s in reply for s in ("(retry)", "NOT logged", "rejected",
-                                         "couldn't", "failed")) else ""
+                label = t.get("outcome")
+                if label:  # structured per-turn label (chat/agent.py Stage 1+2)
+                    friction = (label == "fail" or t.get("repaired")
+                                or t.get("owner_verdict") == "dissatisfied")
+                else:  # pre-label turns: legacy keyword heuristic
+                    friction = any(
+                        s in reply for s in ("(retry)", "NOT logged", "rejected",
+                                             "couldn't", "failed"))
+                marker = " [FRICTION]" if friction else ""
                 parts.append(f"owner: {owner}\nassistant{marker}: {reply}")
     tasks_dir = settings.data_dir / "tasks"
     if tasks_dir.exists():
