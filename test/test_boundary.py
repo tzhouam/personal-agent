@@ -28,9 +28,9 @@ PLATFORM_MODULES = {
 }
 
 # Known violators, inversion scheduled for a later phase. Must only shrink.
-# serve.py was inverted (phase 1) — its agent behaviors are injected via
-# ServeServices, so it is no longer allowlisted.
-ALLOWLIST = {"llm", "admin", "onboarding"}
+# serve.py (phase 1) and llm.py (phase 2) were inverted — their agent behaviors
+# are injected (ServeServices / metrics sink), so they are no longer allowlisted.
+ALLOWLIST = {"admin", "onboarding"}
 
 
 def _module_name(path: pathlib.Path) -> str:

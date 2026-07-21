@@ -71,6 +71,8 @@ def _dispatch_admin(settings: Settings, args) -> int:
 def main() -> None:
     """Parse argv and dispatch to the matching command handler / subsystem
     entry, exiting with its return code."""
+    from ..agent import observability  # noqa: F401 — registers the MoA metrics sink for every LLM
+
     parser = argparse.ArgumentParser(prog="assistant", description="Personal self-assistant agent")
     sub = parser.add_subparsers(dest="command", required=True)
 

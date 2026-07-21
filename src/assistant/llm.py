@@ -26,6 +26,19 @@ _RETRYABLE = (
 _CHEAP_ROLES = frozenset({"cheap", "bulk", "research", "score"})
 
 
+# Injected MoA metrics sink `(settings, run_id, step, values) -> None`. The
+# durable events.db is agent-owned, so llm.py never imports it — the agent
+# registers a default here (`agent.observability`) and any LLM without an
+# explicit `metrics_sink` uses it. None → MoA metrics are skipped.
+_default_metrics_sink = None
+
+
+def set_default_metrics_sink(sink) -> None:
+    """Register the agent-side MoA metrics sink. Keeps llm.py agent-free."""
+    global _default_metrics_sink
+    _default_metrics_sink = sink
+
+
 # ── provider circuit breaker (module-level: LLM is rebuilt per request) ──────
 #
 # A provider that is down must not cost every turn a fresh 40-60s retry window
@@ -166,10 +179,17 @@ class LLM:
     no entry falls back to the default (cheap tier for cheap-ish roles, else
     the main model); clients are cached per (base_url, key)."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, metrics_sink=None):
         """Cache the default provider, model tiers, the role map, and a lazy
-        per-provider client cache."""
+        per-provider client cache.
+
+        `metrics_sink` — an optional `(settings, run_id, step, values) -> None`
+        callback for the durable MoA metrics row. Injected so this platform
+        module imports no agent code (the events.db sink is agent-owned); when
+        omitted it falls back to the registered default (`agent.observability`),
+        and if nothing is registered, MoA metrics are silently skipped."""
         self.settings = settings
+        self.metrics_sink = metrics_sink
         self.default_model = settings.anthropic_model
         self.cheap_model = settings.cheap_model
         self.roles: dict = dict(settings.llm_roles or {})
@@ -321,16 +341,17 @@ class LLM:
 
     def _record_moa_metrics(self, stats: dict, duration_s: float) -> None:
         """Best-effort durable MoA sink (doc/PIPELINE_METRICS.md §0 cost/step):
-        one numeric row per mixture call, day-keyed like `chat_turn` rows."""
+        one numeric row per mixture call, day-keyed like `chat_turn` rows. The
+        sink is injected (agent-owned events.db) so this platform module imports
+        no agent code; with no sink registered, metrics are silently skipped."""
+        sink = self.metrics_sink or _default_metrics_sink
+        if sink is None:
+            return
         try:
             from datetime import date
 
-            from .events_store import EventsStore
-
-            events = EventsStore(self.settings.events_db)
-            events.record_metrics(f"moa-{date.today().isoformat()}", "moa",
-                                  {**stats, "duration_s": round(duration_s, 2)})
-            events.close()
+            sink(self.settings, f"moa-{date.today().isoformat()}", "moa",
+                 {**stats, "duration_s": round(duration_s, 2)})
         except Exception:
             import logging
 

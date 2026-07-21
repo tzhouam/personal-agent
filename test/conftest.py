@@ -1,6 +1,7 @@
 import pytest
 
 import assistant.agent.app  # noqa: F401 — registers default ServeServices for serve tests
+import assistant.agent.observability  # noqa: F401 — registers the default MoA metrics sink
 from assistant.config import Settings
 
 
