@@ -163,7 +163,7 @@ That's it — message your WeChat bot and the agent answers.
 
 > **multi_tenant note:** the gateway cron no longer drives per-user pipelines —
 > it (or any timer) calls the daemon's fan-out scheduler
-> (`assistant.scheduler.enqueue_daily_runs`), which enqueues one deduped daily
+> (`assistant.platform.scheduler.enqueue_daily_runs`), which enqueues one deduped daily
 > `run` per **active** user on the durable job queue; the in-process worker pool
 > executes them under each user's own settings. The command-job setup below is
 > the `single_user` arrangement.
