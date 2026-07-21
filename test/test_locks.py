@@ -3,7 +3,7 @@ independent across users (multi-user §8)."""
 import threading
 from types import SimpleNamespace
 
-from assistant.locks import _local, user_write_lock
+from assistant.platform.locks import _local, user_write_lock
 
 
 def _s(path):

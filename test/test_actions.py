@@ -1,6 +1,6 @@
-from assistant.actions import ACTIONS, execute, prompt_block, run_action, validate
-from assistant.state import persist_state
-from assistant.todo_store import ReadingList, TodoStore
+from assistant.agent.actions import ACTIONS, execute, prompt_block, run_action, validate
+from assistant.agent.state import persist_state
+from assistant.agent.todo_store import ReadingList, TodoStore
 
 
 def test_registry_covers_the_llm_action_set():
@@ -27,16 +27,16 @@ def test_registry_covers_the_llm_action_set():
 
 def test_run_phase_validation_and_dispatch(settings, monkeypatch):
     # subprocess + _trigger_run live in the actions.handlers submodule
-    from assistant.actions import handlers as actions_mod
+    from assistant.agent.actions import handlers as actions_mod
 
     # unknown phase → helpful error, nothing spawned
     result = run_action("run_phase", {"phase": "frobnicate"}, settings)
     assert "unknown phase" in result and "research" in result
 
     # website runs inline and reports the sync result
-    monkeypatch.setattr("assistant.website.sync_website",
+    monkeypatch.setattr("assistant.agent.website.sync_website",
                         lambda s, p, t, reading=None: {"status": "pushed", "url": "https://x"})
-    monkeypatch.setattr("assistant.profile_store.ProfileStore.load", lambda self: {})
+    monkeypatch.setattr("assistant.agent.profile_store.ProfileStore.load", lambda self: {})
     assert run_action("run_phase", {"phase": "website"}, settings) \
         == "website sync: pushed https://x"
 
@@ -67,7 +67,7 @@ def test_plan_task_plans_and_tracks(settings, monkeypatch):
             assert "book a dinner" in prompt
             return plan
 
-    monkeypatch.setattr("assistant.llm.LLM", FakeLLM)
+    monkeypatch.setattr("assistant.platform.llm.LLM", FakeLLM)
     result = run_action("plan_task", {"request": "book a dinner for the team"}, settings)
     assert result.startswith("planned: Book team dinner (todo t1)")
     assert "[owner] pick one of the 3 candidates" in result
@@ -157,7 +157,7 @@ def test_validate_passes_optional_params():
 def test_reboot_action_spawns_detached_cli(settings, monkeypatch):
     # the chat reboot action must fire a detached `assistant.cli reboot --delay 3`
     # (delay so the reply flushes) and never block on the restart.
-    import assistant.actions.handlers as h
+    import assistant.agent.actions.handlers as h
 
     spawned = []
     monkeypatch.setattr(h.subprocess, "Popen",
@@ -171,7 +171,7 @@ def test_reboot_action_spawns_detached_cli(settings, monkeypatch):
 def test_serve_reboot_starts_daemon_when_unsupervised(settings, monkeypatch):
     # with no running daemon and no supervisor respawn, reboot() starts a fresh
     # detached `serve` and returns once it answers /healthz.
-    import assistant.serve as sv
+    import assistant.platform.serve as sv
 
     spawned = []
     monkeypatch.setattr(sv.subprocess, "Popen",

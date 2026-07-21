@@ -2,7 +2,7 @@
 fairness, cooperative cancellation (multi-user §6)."""
 import pytest
 
-from assistant.jobs import DeliveryLedger, JobQueue
+from assistant.platform.jobs import DeliveryLedger, JobQueue
 
 
 @pytest.fixture

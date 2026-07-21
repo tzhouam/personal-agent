@@ -31,12 +31,12 @@ def _data_roots() -> list[tuple[str, Path]]:
     assistant package/registry is unavailable (never crash the harness)."""
     root = Path.home() / ".personal-agent"
     try:
-        from assistant.config import Settings
+        from assistant.platform.config import Settings
 
         settings = Settings()
         root = Path(settings.data_dir)
         if settings.deployment_mode == "multi_tenant":
-            from assistant.registry import UserRegistry
+            from assistant.platform.registry import UserRegistry
 
             return [(uid, root / "users" / uid)
                     for uid in UserRegistry(root).active()]

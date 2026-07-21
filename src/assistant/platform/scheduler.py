@@ -15,9 +15,9 @@ concern (§6.1).
 import logging
 from datetime import datetime
 
-from ..config import Settings
-from .jobs import GLOBAL_UID, JobQueue
-from ..registry import UserRegistry
+from assistant.platform.config import Settings
+from assistant.platform.jobs import GLOBAL_UID, JobQueue
+from assistant.platform.registry import UserRegistry
 
 log = logging.getLogger("assistant")
 

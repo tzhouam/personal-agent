@@ -1,8 +1,8 @@
 from datetime import date
 
-from assistant.tasks.todos import update_todos
-from assistant.todo_store import ReadingList, TodoStore
-from assistant.website import render_site, sync_website
+from assistant.agent.tasks.todos import update_todos
+from assistant.agent.todo_store import ReadingList, TodoStore
+from assistant.agent.website import render_site, sync_website
 
 
 def test_todo_upsert_dedupe_done(tmp_path):

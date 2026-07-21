@@ -6,13 +6,13 @@ setup, consolidation); `main` only parses argv and dispatches to them.
 
 from datetime import date
 
-from ..config import Settings
-from ..profile_store import ProfileStore, render_summary
+from assistant.platform.config import Settings
+from assistant.agent.profile_store import ProfileStore, render_summary
 
 
 def cmd_bootstrap(settings: Settings) -> int:
     """Seed profile.yaml from the GitHub account. Never overwrites an existing profile."""
-    from ..collectors.github import GitHubCollector
+    from assistant.agent.collectors.github import GitHubCollector
 
     store = ProfileStore(settings.profile_dir)
     if store.exists():
@@ -86,7 +86,7 @@ def cmd_show(settings: Settings) -> int:
 def cmd_todo(settings: Settings, args) -> int:
     """`assistant todo list|add|done` — dispatch to the corresponding action.
     Returns non-zero on a usage error or a failed `done`."""
-    from ..actions import run_action
+    from assistant.agent.actions import run_action
 
     if args.action == "list":
         print(run_action("list_todos", {}, settings))
@@ -113,7 +113,7 @@ def cmd_todo(settings: Settings, args) -> int:
 def cmd_reading(settings: Settings, args) -> int:
     """`assistant reading list|done|unrelated` — dispatch to the corresponding
     action. Returns non-zero on a usage error or a failed mark."""
-    from ..actions import run_action
+    from assistant.agent.actions import run_action
 
     if args.action == "list":
         print(run_action("list_reading", {}, settings))
@@ -142,10 +142,10 @@ def cmd_enrich_profile(settings: Settings, args) -> int:
     from collections import Counter
     from datetime import datetime, timezone
 
-    from ..collectors.github import GitHubCollector, summarize_commits
-    from ..events_store import EventsStore
-    from ..llm import LLM
-    from ..tasks.profile_update import update_profile
+    from assistant.agent.collectors.github import GitHubCollector, summarize_commits
+    from assistant.agent.events_store import EventsStore
+    from assistant.platform.llm import LLM
+    from assistant.agent.tasks.profile_update import update_profile
 
     if not _re.fullmatch(r"\d{4}-\d{2}", args.since):
         print(f"invalid --since {args.since!r} — expected YYYY-MM (e.g. 2025-07)")
@@ -223,7 +223,7 @@ def cmd_enrich_profile(settings: Settings, args) -> int:
 
     print(f"backfill done: {total_ops} ops total")
     if not args.no_consolidate:
-        from ..tasks.profile_consolidate import consolidate_profile
+        from assistant.agent.tasks.profile_consolidate import consolidate_profile
 
         result = consolidate_profile(llm, store, settings)
         print(f"consolidation: {len(result['applied'])} ops applied, "
@@ -242,11 +242,11 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
     (collect/profile/digest/deliver) belong to the full `assistant run`."""
     import logging
 
-    from ..events_store import EventsStore
-    from ..llm import LLM
-    from ..todo_store import ReadingList, TodoStore
-    from ..urgency import urgency
-    from ..website import sync_website
+    from assistant.agent.events_store import EventsStore
+    from assistant.platform.llm import LLM
+    from assistant.agent.todo_store import ReadingList, TodoStore
+    from assistant.agent.urgency import urgency
+    from assistant.agent.website import sync_website
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     store = ProfileStore(settings.profile_dir)
@@ -262,7 +262,7 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
         return result.get("status", "?")
 
     if phase == "research":
-        from ..research.pipeline import run_research
+        from assistant.agent.research.pipeline import run_research
 
         events = EventsStore(settings.events_db)
         try:
@@ -281,9 +281,9 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
         print(f"website: {_push_site()}")
         return 0
     if phase == "todos":
-        from ..collectors.github import GitHubCollector
-        from ..marks import collect_marks
-        from ..tasks.todos import update_todos
+        from assistant.agent.collectors.github import GitHubCollector
+        from assistant.agent.marks import collect_marks
+        from assistant.agent.tasks.todos import update_todos
 
         events = EventsStore(settings.events_db)
         try:
@@ -299,19 +299,19 @@ def cmd_run_phase(settings: Settings, phase: str) -> int:
               f"website {_push_site()}")
         return 0
     if phase == "resume":
-        from ..tasks.resume import sync_resume
+        from assistant.agent.tasks.resume import sync_resume
 
         result = sync_resume(llm, settings, store.load(), "")
         print(f"resume: {result.get('status')} {result.get('note', '')}".strip())
         return 0
     if phase == "curate":
-        from ..tasks.curate import curate
+        from assistant.agent.tasks.curate import curate
 
         curated = curate(store)
         print(f"curate: {len(curated.get('decayed', []))} entries decayed")
         return 0
     if phase == "consolidate":
-        from ..tasks.profile_consolidate import consolidate_profile
+        from assistant.agent.tasks.profile_consolidate import consolidate_profile
 
         if not store.exists():  # un-bootstrapped user: weekly job no-ops, never fail-loops
             print("no profile yet — skipping consolidate (run `assistant bootstrap`)")
@@ -360,7 +360,7 @@ def cmd_resume_status(settings: Settings) -> int:
 
 def cmd_test_email(settings: Settings) -> int:
     """Send a test email to verify delivery; reports the transport used."""
-    from ..deliver.email import send_email
+    from assistant.agent.deliver.email import send_email
 
     transport = send_email(
         settings,
@@ -377,8 +377,8 @@ def cmd_consolidate(settings: Settings, args) -> int:
     ops that would apply and changes nothing."""
     import logging
 
-    from ..llm import LLM
-    from ..tasks.profile_consolidate import consolidate_profile
+    from assistant.platform.llm import LLM
+    from assistant.agent.tasks.profile_consolidate import consolidate_profile
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     store = ProfileStore(settings.profile_dir)

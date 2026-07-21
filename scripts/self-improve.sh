@@ -43,8 +43,8 @@ trap cleanup EXIT
 announce() {  # best-effort WeChat ping (never fails the job)
   "$PY" - "$1" <<'PY' >>"$LOG" 2>&1 || true
 import sys
-from assistant.config import Settings
-from assistant.notify import send_wechat
+from assistant.platform.config import Settings
+from assistant.platform.notify import send_wechat
 send_wechat(Settings(), sys.argv[1])
 PY
 }

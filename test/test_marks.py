@@ -7,10 +7,10 @@ from datetime import date
 
 import httpx
 
-from assistant.events_store import EventsStore
-from assistant.marks import collect_marks
-from assistant.todo_store import ReadingList, TodoStore
-from assistant.website import render_site
+from assistant.agent.events_store import EventsStore
+from assistant.agent.marks import collect_marks
+from assistant.agent.todo_store import ReadingList, TodoStore
+from assistant.agent.website import render_site
 
 PROFILE = {"identity": {"name": "T", "github": "t", "emails": ["me@example.com"],
                         "affiliations": []},

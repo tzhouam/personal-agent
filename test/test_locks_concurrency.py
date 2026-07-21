@@ -7,10 +7,10 @@ import subprocess
 import threading
 from datetime import datetime, timedelta
 
-from assistant.actions import execute
-from assistant.notify import ReminderStore
-from assistant.routines import RoutineStore
-from assistant.todo_store import TodoStore
+from assistant.agent.actions import execute
+from assistant.platform.notify import ReminderStore
+from assistant.agent.routines import RoutineStore
+from assistant.agent.todo_store import TodoStore
 
 
 def _git_init(repo_dir):

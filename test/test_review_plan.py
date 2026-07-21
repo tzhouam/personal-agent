@@ -4,7 +4,7 @@ outside tools) plus the LLM_REVIEW config slot it rides on."""
 import importlib.util
 from pathlib import Path
 
-from assistant.config import Settings
+from assistant.platform.config import Settings
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "review_plan.py"
 spec = importlib.util.spec_from_file_location("review_plan", _SCRIPT)
@@ -46,8 +46,8 @@ def test_resolve_reviewer_order():
 
 
 def test_llm_review_config_degrades_and_routes(monkeypatch):
-    import assistant.llm as llm_mod
-    from assistant.llm import LLM
+    import assistant.platform.llm as llm_mod
+    from assistant.platform.llm import LLM
 
     # malformed JSON degrades to {} (feature off, never a crash)
     assert _settings(llm_review='{"model": broken').llm_review == {}
@@ -113,7 +113,7 @@ def test_review_file_exit_codes(tmp_path, monkeypatch):
 
     def run(out):
         fake = FakeLLM(out)
-        monkeypatch.setattr("assistant.llm.LLM", lambda s: fake)
+        monkeypatch.setattr("assistant.platform.llm.LLM", lambda s: fake)
         fake.roles = {}
         return review_plan.review_file(plan, "ctx")
 

@@ -2,12 +2,12 @@
 
 from datetime import date
 
-from assistant.actions import run_action
-from assistant.events_store import EventsStore
-from assistant.research import pipeline as pipeline_mod
-from assistant.research.pipeline import run_research
-from assistant.todo_store import ReadingList
-from assistant.website import render_site
+from assistant.agent.actions import run_action
+from assistant.agent.events_store import EventsStore
+from assistant.agent.research import pipeline as pipeline_mod
+from assistant.agent.research.pipeline import run_research
+from assistant.agent.todo_store import ReadingList
+from assistant.agent.website import render_site
 
 PROFILE = {"identity": {"name": "T", "github": "t", "emails": ["me@example.com"]},
            "skills": [], "interests": [], "projects": [],

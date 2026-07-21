@@ -3,9 +3,9 @@ exclusions, persistence, and the background-spawn handler."""
 
 import json
 
-from assistant.actions import run_action
-from assistant.task_runner import run_task
-from assistant.todo_store import TodoStore
+from assistant.agent.actions import run_action
+from assistant.agent.task_runner import run_task
+from assistant.agent.todo_store import TodoStore
 
 
 class ScriptedLLM:
@@ -81,7 +81,7 @@ def test_run_task_budgets_and_exclusions(settings):
 
 
 def test_execute_task_handler_spawns_detached(settings, monkeypatch):
-    from assistant.actions import handlers as handlers_mod
+    from assistant.agent.actions import handlers as handlers_mod
 
     spawned = {}
 
@@ -105,7 +105,7 @@ def test_run_task_cancel_check_aborts_between_steps(settings):
     call — and the raise propagates to the caller (the job worker)."""
     import pytest
 
-    from assistant.worker import Cancelled
+    from assistant.platform.worker import Cancelled
 
     llm = ScriptedLLM([
         _SIMPLE,

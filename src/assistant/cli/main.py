@@ -7,26 +7,15 @@ init wizard, chat listener, HTTP server) and exits with its code. `main` is the
 import argparse
 import sys
 
-from ..config import Settings
-from .commands import (
-    cmd_bootstrap,
-    cmd_consolidate,
-    cmd_enrich_profile,
-    cmd_reading,
-    cmd_resume_init,
-    cmd_resume_status,
-    cmd_run_phase,
-    cmd_show,
-    cmd_test_email,
-    cmd_todo,
-)
+from assistant.platform.config import Settings
+from assistant.cli.commands import cmd_bootstrap, cmd_consolidate, cmd_enrich_profile, cmd_reading, cmd_resume_init, cmd_resume_status, cmd_run_phase, cmd_show, cmd_test_email, cmd_todo
 
 
 def _dispatch_admin(settings: Settings, args) -> int:
     """Run one `assistant admin …` operator command and print its result. These
     manage the roster / deletion / migration protocols a tenant can never invoke
     (§10, §14). Returns a process exit code."""
-    from .. import admin
+    from assistant.platform import admin
 
     try:
         if args.admin_cmd == "add-user":
@@ -57,7 +46,7 @@ def _dispatch_admin(settings: Settings, args) -> int:
                     return 1
                 print(admin.retire_shared_lesson(settings, args.id))
         elif args.admin_cmd == "reboot":
-            from ..serve import reboot
+            from assistant.platform.serve import reboot
 
             result = reboot(settings)
             print(f"[{result['status']}] {result.get('note', result.get('pid', ''))}")
@@ -71,7 +60,7 @@ def _dispatch_admin(settings: Settings, args) -> int:
 def main() -> None:
     """Parse argv and dispatch to the matching command handler / subsystem
     entry, exiting with its return code."""
-    from ..agent import wiring  # noqa: F401 — registers all agent impls of platform contracts
+    from assistant.agent import wiring  # noqa: F401 — registers all agent impls of platform contracts
 
     parser = argparse.ArgumentParser(prog="assistant", description="Personal self-assistant agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -198,11 +187,11 @@ def main() -> None:
         sys.exit(_dispatch_admin(settings, args))
 
     if args.command == "init":
-        from ..init_wizard import run_init
+        from assistant.init_wizard import run_init
 
         sys.exit(run_init(settings, check_only=args.check))
     elif args.command == "run":
-        from ..orchestrator import run
+        from assistant.agent.orchestrator import run
 
         sys.exit(run(settings, dry_run=args.dry_run, resume=args.resume))
     elif args.command == "bootstrap":
@@ -218,7 +207,7 @@ def main() -> None:
     elif args.command == "resume-status":
         sys.exit(cmd_resume_status(settings))
     elif args.command == "approve-resume":
-        from ..tasks.resume import approve_resume
+        from assistant.agent.tasks.resume import approve_resume
 
         sys.exit(approve_resume(settings))
     elif args.command == "todo":
@@ -226,15 +215,15 @@ def main() -> None:
     elif args.command == "reading":
         sys.exit(cmd_reading(settings, args))
     elif args.command == "chat-listen":
-        from ..chat.service import run_listener
+        from assistant.agent.chat.service import run_listener
 
         sys.exit(run_listener(settings, once=args.once))
     elif args.command == "serve":
-        from ..agent.app import run as serve_run
+        from assistant.agent.app import run as serve_run
 
         sys.exit(serve_run(settings))
     elif args.command == "reboot":
-        from ..serve import reboot
+        from assistant.platform.serve import reboot
 
         result = reboot(settings, delay=args.delay)
         print(f"[{result['status']}] "
@@ -246,12 +235,12 @@ def main() -> None:
     elif args.command == "consolidate":
         sys.exit(cmd_consolidate(settings, args))
     elif args.command == "evolve":
-        from ..actions import run_action
+        from assistant.agent.actions import run_action
 
         print(run_action("self_evolve", {}, settings))
         sys.exit(0)
     elif args.command == "task":
-        from ..task_runner import run_task
+        from assistant.agent.task_runner import run_task
 
         if not args.request and not args.approved_id:
             print("task needs a request (or --approved-id to resume an approved task)")
@@ -263,7 +252,7 @@ def main() -> None:
         print(record.get("report", ""))
         sys.exit(0 if record["status"] in ("done", "awaiting_approval") else 1)
     elif args.command == "ask":
-        from ..chat.agent import handle_message
+        from assistant.agent.chat.agent import handle_message
 
         print(handle_message(args.text, settings, image_paths=args.image or None))
         sys.exit(0)

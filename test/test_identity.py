@@ -2,9 +2,9 @@
 caller-supplied one (multi-user §4.1, §6.1, Appendix A.2)."""
 import pytest
 
-from assistant.config import DEFAULT_UID, Settings
-from assistant.identity import Unauthorized, context_for, resolve_uid
-from assistant.registry import UserRegistry
+from assistant.platform.config import DEFAULT_UID, Settings
+from assistant.platform.identity import Unauthorized, context_for, resolve_uid
+from assistant.platform.registry import UserRegistry
 
 
 def _single(tmp_path):

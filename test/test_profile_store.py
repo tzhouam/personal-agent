@@ -1,4 +1,4 @@
-from assistant.profile_store import ProfileStore, render_summary
+from assistant.agent.profile_store import ProfileStore, render_summary
 
 
 def make_store(tmp_path):

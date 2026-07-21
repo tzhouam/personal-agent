@@ -1,8 +1,8 @@
 """Finance ledger: store math, action handlers, chat context, receipt flow."""
 
-from assistant.actions import run_action
-from assistant.chat.agent import build_context, handle_message
-from assistant.finance_store import FinanceStore, render_summary
+from assistant.agent.actions import run_action
+from assistant.agent.chat.agent import build_context, handle_message
+from assistant.agent.finance_store import FinanceStore, render_summary
 
 
 class FakeLLM:
@@ -103,7 +103,7 @@ def test_receipt_screenshot_flow(settings, tmp_path, monkeypatch):
     pic = tmp_path / "receipt.png"
     pic.write_bytes(b"\x89PNG fake")
     monkeypatch.setattr(
-        "assistant.vision.describe_images",
+        "assistant.platform.vision.describe_images",
         lambda s, p: ["WeChat Pay payment receipt: paid ¥68.00 to 深圳面点王餐饮 "
                       "on 2026-07-11, transaction id 42000..."])
     llm = FakeLLM({"reply": "已记账：面点王 68 元。", "actions": [
@@ -139,7 +139,7 @@ def test_every_record_has_full_time_identity(settings):
     assert stated["time"] == "09:15" and stated["time_source"] == "stated"
     assert auto["time"] and auto["time_source"] == "auto"   # logging clock time
     assert len(auto["logged_at"]) == 16                     # YYYY-MM-DD HH:MM
-    from assistant.finance_store import timestamp_of
+    from assistant.agent.finance_store import timestamp_of
     assert timestamp_of(stated) == f"{stated['date']} 09:15"
 
 

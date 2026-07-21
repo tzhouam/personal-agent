@@ -2,8 +2,8 @@
 prompt tail (deterministic: frozen datetimes, never the live clock)."""
 from datetime import datetime, timedelta, timezone
 
-from assistant import timeutil
-from assistant.timeutil import temporal_anchor
+from assistant.platform import timeutil
+from assistant.platform.timeutil import temporal_anchor
 
 _HKT = timezone(timedelta(hours=8), "HKT")
 _FROZEN = datetime(2026, 7, 17, 9, 32, 41, tzinfo=_HKT)   # a Friday

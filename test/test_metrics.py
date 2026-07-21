@@ -1,9 +1,9 @@
 from datetime import date, timedelta
 
-from assistant.deliver.email import render_html
-from assistant.events_store import EventsStore
-from assistant.metrics import EXTRACTORS, build_health, render_health_html
-from assistant.todo_store import ReadingList, TodoStore
+from assistant.agent.deliver.email import render_html
+from assistant.agent.events_store import EventsStore
+from assistant.agent.metrics import EXTRACTORS, build_health, render_health_html
+from assistant.agent.todo_store import ReadingList, TodoStore
 
 
 def test_record_and_window(settings):

@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from assistant.tasks.resume import apply_edits, find_main_tex, sync_resume
+from assistant.agent.tasks.resume import apply_edits, find_main_tex, sync_resume
 
 TEX = r"""\documentclass{article}
 \begin{document}
@@ -75,7 +75,7 @@ def test_sync_skips_when_profile_unchanged(settings, resume_repo):
 
 def test_sync_commits_locally_and_marks_pending(settings, resume_repo, monkeypatch):
     # no LaTeX toolchain in CI → force the "skipped" path deterministically
-    monkeypatch.setattr("assistant.tasks.resume.compile_check", lambda r, t: (None, "skipped"))
+    monkeypatch.setattr("assistant.agent.tasks.resume.compile_check", lambda r, t: (None, "skipped"))
     llm = StubLLM([{"search": r"\item vllm-omni rebase automation",
                     "replace": "\\item vllm-omni rebase automation (merged PR \\#4709)"}])
     result = sync_resume(llm, settings, {"projects": []}, "+ highlight: merged PR #4709")
@@ -92,7 +92,7 @@ def test_sync_commits_locally_and_marks_pending(settings, resume_repo, monkeypat
 
 
 def test_sync_rolls_back_on_compile_failure(settings, resume_repo, monkeypatch):
-    monkeypatch.setattr("assistant.tasks.resume.compile_check", lambda r, t: (False, "err"))
+    monkeypatch.setattr("assistant.agent.tasks.resume.compile_check", lambda r, t: (False, "err"))
     llm = StubLLM([{"search": r"\item vllm-omni rebase automation", "replace": "\\broken{"}])
     result = sync_resume(llm, settings, {}, "diff")
     assert result["status"] == "failed"

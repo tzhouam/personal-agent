@@ -4,8 +4,8 @@ items decay out over 14→30 days."""
 
 from datetime import date
 
-from assistant.todo_store import TodoStore
-from assistant.urgency import _due_ramp, going_stale, staleness, urgency
+from assistant.agent.todo_store import TodoStore
+from assistant.agent.urgency import _due_ramp, going_stale, staleness, urgency
 
 TODAY = date(2026, 7, 9)
 

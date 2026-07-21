@@ -8,44 +8,44 @@ actions, routines, channels) and the job dispatch, then either hands it to
 so the existing test/CLI call sites that don't pass one still work.
 
 Each service is a thin wrapper that imports its agent target **at call time**, so
-tests monkeypatching the source module (e.g. `assistant.routines.fire_due`) take
+tests monkeypatching the source module (e.g. `assistant.agent.routines.fire_due`) take
 effect exactly as they did when serve.py imported these lazily itself.
 """
 
-from ..config import Settings
-from .. import serve  # platform module (still at the legacy root; agent → platform is allowed)
-from ..serve import ServeServices, run_serve
-from .dispatch import build_dispatch
+from assistant.platform.config import Settings
+from assistant.platform import serve  # platform module (still at the legacy root; agent → platform is allowed)
+from assistant.platform.serve import ServeServices, run_serve
+from assistant.agent.dispatch import build_dispatch
 
 
 def _run_action(name, params, settings):
-    from ..actions import run_action
+    from assistant.agent.actions import run_action
     return run_action(name, params, settings)
 
 
 def _handle_turn(text, settings, llm, *, history=None, image_paths=None):
-    from ..chat.agent import handle_turn
+    from assistant.agent.chat.agent import handle_turn
     return handle_turn(text, settings, llm, history=history, image_paths=image_paths)
 
 
 def _build_channels(settings, *, log_wecom=False):
-    from ..chat.service import build_channels
+    from assistant.agent.chat.service import build_channels
     return build_channels(settings, log_wecom=log_wecom)
 
 
 def _email_channel(settings):
-    from ..chat.email_channel import EmailChannel
-    from ..chat.service import _owner_addresses
+    from assistant.agent.chat.email_channel import EmailChannel
+    from assistant.agent.chat.service import _owner_addresses
     return EmailChannel(settings, _owner_addresses(settings))
 
 
 def _fire_due(settings):
-    from ..routines import fire_due
+    from assistant.agent.routines import fire_due
     return fire_due(settings)
 
 
 def _acquire_pid_lock(settings):
-    from ..chat.service import _acquire_pid_lock as acquire
+    from assistant.agent.chat.service import _acquire_pid_lock as acquire
     return acquire(settings)
 
 

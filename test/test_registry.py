@@ -2,7 +2,7 @@
 (multi-user §4.1, Appendix A.1)."""
 import pytest
 
-from assistant.registry import UserRegistry, hash_token
+from assistant.platform.registry import UserRegistry, hash_token
 
 
 @pytest.fixture

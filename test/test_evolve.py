@@ -3,11 +3,11 @@ capture in chat, and the evolve pass over chat/task evidence."""
 
 import json
 
-from assistant.actions import run_action
-from assistant.chat.agent import handle_message, system_prompt
-from assistant.config import Settings
-from assistant.lessons_store import MAX_ACTIVE, LessonsStore
-from assistant.tasks.evolve import evolve
+from assistant.agent.actions import run_action
+from assistant.agent.chat.agent import handle_message, system_prompt
+from assistant.platform.config import Settings
+from assistant.agent.lessons_store import MAX_ACTIVE, LessonsStore
+from assistant.agent.tasks.evolve import evolve
 
 
 class FakeLLM:
@@ -97,10 +97,10 @@ def test_evolve_distills_from_sessions_and_tasks(settings):
 
 
 def test_self_evolve_action(settings, monkeypatch):
-    monkeypatch.setattr("assistant.tasks.evolve.evolve",
+    monkeypatch.setattr("assistant.agent.tasks.evolve.evolve",
                         lambda s, l: {"reviewed": 100, "proposed": [{}],
                                       "learned": []})
-    monkeypatch.setattr("assistant.llm.LLM.__init__", lambda self, s: None)
+    monkeypatch.setattr("assistant.platform.llm.LLM.__init__", lambda self, s: None)
     out = run_action("self_evolve", {}, settings)
     assert "no new durable lesson" in out
 
@@ -108,7 +108,7 @@ def test_self_evolve_action(settings, monkeypatch):
 # ── shared-store mechanics + two-layer injection (multi-user §12b) ────────
 
 def test_store_prefix_cap_and_header(tmp_path):
-    from assistant.lessons_store import LessonsStore
+    from assistant.agent.lessons_store import LessonsStore
 
     store = LessonsStore(tmp_path / "shared", id_prefix="G", max_active=2)
     assert store.learn("rule one", source="evolve")["id"] == "G1"
@@ -123,7 +123,7 @@ def test_store_prefix_cap_and_header(tmp_path):
 
 
 def test_combined_block_single_user_ignores_planted_shared_file(settings):
-    from assistant.lessons_store import LessonsStore, combined_prompt_block, shared_store
+    from assistant.agent.lessons_store import LessonsStore, combined_prompt_block, shared_store
 
     LessonsStore(settings.profile_dir).learn("personal rule")
     # plant a shared store — single_user must NOT read it
@@ -135,8 +135,8 @@ def test_combined_block_single_user_ignores_planted_shared_file(settings):
 
 
 def test_combined_block_multi_tenant_orders_shared_then_personal(tmp_path, monkeypatch):
-    from assistant.chat.agent import system_prompt
-    from assistant.lessons_store import LessonsStore, combined_prompt_block, shared_store
+    from assistant.agent.chat.agent import system_prompt
+    from assistant.agent.lessons_store import LessonsStore, combined_prompt_block, shared_store
 
     monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -151,7 +151,7 @@ def test_combined_block_multi_tenant_orders_shared_then_personal(tmp_path, monke
 
 
 def test_combined_block_survives_broken_shared_store(tmp_path, monkeypatch):
-    from assistant.lessons_store import LessonsStore, combined_prompt_block
+    from assistant.agent.lessons_store import LessonsStore, combined_prompt_block
 
     monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -165,7 +165,7 @@ def test_combined_block_survives_broken_shared_store(tmp_path, monkeypatch):
 
 
 def test_gather_evidence_prefers_structured_labels(settings):
-    from assistant.tasks.evolve import _gather_evidence
+    from assistant.agent.tasks.evolve import _gather_evidence
 
     sessions = settings.data_dir / "sessions"
     sessions.mkdir(parents=True)

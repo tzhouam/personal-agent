@@ -8,10 +8,10 @@ import json
 import httpx
 import pytest
 
-import assistant.collectors.github as github_mod
+import assistant.agent.collectors.github as github_mod
 from assistant.cli import cmd_enrich_profile
-from assistant.collectors.github import GitHubCollector, summarize_commits
-from assistant.events_store import EventsStore
+from assistant.agent.collectors.github import GitHubCollector, summarize_commits
+from assistant.agent.events_store import EventsStore
 
 
 @pytest.fixture(autouse=True)
@@ -164,7 +164,7 @@ def _args(**over):
 
 
 def test_enrich_flow_chronological_batches_and_consolidation(settings, monkeypatch):
-    from assistant.profile_store import ProfileStore
+    from assistant.agent.profile_store import ProfileStore
 
     store = ProfileStore(settings.profile_dir)
     store.ensure_repo()
@@ -199,12 +199,12 @@ def test_enrich_flow_chronological_batches_and_consolidation(settings, monkeypat
             {"commit": {"author": {"date": "2026-07-02T00:00:00Z"}, "message": "direct push"}}])
 
     llm = RecordingLLM()
-    monkeypatch.setattr("assistant.llm.LLM.__init__", lambda self, s: None)
-    monkeypatch.setattr("assistant.llm.LLM.complete_json",
+    monkeypatch.setattr("assistant.platform.llm.LLM.__init__", lambda self, s: None)
+    monkeypatch.setattr("assistant.platform.llm.LLM.complete_json",
                         lambda self, prompt, system=None, **kw: llm.complete_json(prompt, system))
 
     consolidated = []
-    import assistant.tasks.profile_consolidate as pc
+    import assistant.agent.tasks.profile_consolidate as pc
     monkeypatch.setattr(pc, "consolidate_profile",
                         lambda *a, **k: consolidated.append(1) or
                         {"applied": [], "rejected": [], "notes": "", "diff": "", "emailed": False})
@@ -235,8 +235,8 @@ def test_enrich_rejects_bad_since(settings):
 
 
 def test_update_profile_context_block(settings):
-    from assistant.profile_store import ProfileStore
-    from assistant.tasks.profile_update import update_profile
+    from assistant.agent.profile_store import ProfileStore
+    from assistant.agent.tasks.profile_update import update_profile
 
     store = ProfileStore(settings.profile_dir)
     store.ensure_repo()

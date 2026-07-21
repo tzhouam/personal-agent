@@ -3,10 +3,10 @@ on both the chat-action path and direct /actions dispatch — and never even
 *advertised* in tenant prompts (multi-user §10)."""
 import pytest
 
-from assistant.actions import prompt_block, run_action
-from assistant.actions.registry import execute
-from assistant.chat.agent import system_prompt
-from assistant.config import Settings
+from assistant.agent.actions import prompt_block, run_action
+from assistant.agent.actions.registry import execute
+from assistant.agent.chat.agent import system_prompt
+from assistant.platform.config import Settings
 
 
 def _mt(tmp_path, monkeypatch):
@@ -27,7 +27,7 @@ def test_reboot_refused_via_chat_actions_in_multi_tenant(tmp_path, monkeypatch):
 
 def test_reboot_allowed_in_single_user(settings, monkeypatch):
     # single_user (one owner) keeps reboot as a normal action — just don't spawn
-    from assistant.actions import handlers
+    from assistant.agent.actions import handlers
     monkeypatch.setattr(handlers.subprocess, "Popen", lambda *a, **k: None)
     assert "restart" in run_action("reboot", {}, settings).lower() \
         or "重启" in run_action("reboot", {}, settings)
@@ -59,7 +59,7 @@ def test_system_prompt_is_mode_aware(settings, tmp_path, monkeypatch):
 
 
 def test_task_runner_system_prompt_is_mode_aware(settings, tmp_path, monkeypatch):
-    from assistant.task_runner import run_task
+    from assistant.agent.task_runner import run_task
 
     class CaptureLLM:
         def __init__(self):

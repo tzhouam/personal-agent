@@ -16,8 +16,8 @@ import contextvars
 import logging
 import threading
 
-from ..config import Settings
-from .jobs import GLOBAL_UID
+from assistant.platform.config import Settings
+from assistant.platform.jobs import GLOBAL_UID
 
 log = logging.getLogger("assistant")
 

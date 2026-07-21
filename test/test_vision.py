@@ -1,9 +1,9 @@
 """Vision chain: input validation, backend fallback order, and the plumbing
 that carries image paths from chat entry points into the prompt."""
 
-import assistant.vision as vision
-from assistant.chat.agent import handle_message
-from assistant.vision import describe_images, media_type_for, render_image_context
+import assistant.platform.vision as vision
+from assistant.agent.chat.agent import handle_message
+from assistant.platform.vision import describe_images, media_type_for, render_image_context
 
 
 class FakeLLM:
@@ -59,7 +59,7 @@ def test_render_image_context():
 
 def test_handle_message_injects_descriptions(settings, tmp_path, monkeypatch):
     pic = _png(tmp_path)
-    monkeypatch.setattr("assistant.vision.describe_images",
+    monkeypatch.setattr("assistant.platform.vision.describe_images",
                         lambda s, p: ["a whiteboard with '15:30' written on it"])
     llm = FakeLLM({"reply": "那是下午三点半的会议安排。", "actions": []})
     reply = handle_message("这是什么？", settings, llm, image_paths=[str(pic)])
@@ -70,7 +70,7 @@ def test_handle_message_injects_descriptions(settings, tmp_path, monkeypatch):
 
 def test_handle_message_image_only_gets_default_text(settings, tmp_path, monkeypatch):
     pic = _png(tmp_path)
-    monkeypatch.setattr("assistant.vision.describe_images", lambda s, p: ["a cat"])
+    monkeypatch.setattr("assistant.platform.vision.describe_images", lambda s, p: ["a cat"])
     llm = FakeLLM({"reply": "可爱的猫！", "actions": []})
     handle_message("", settings, llm, image_paths=[str(pic)])
     assert "without text" in llm.prompts[0]
@@ -79,7 +79,7 @@ def test_handle_message_image_only_gets_default_text(settings, tmp_path, monkeyp
 def test_handle_message_caps_image_count(settings, tmp_path, monkeypatch):
     pics = [str(_png(tmp_path, f"p{i}.png")) for i in range(5)]
     seen = {}
-    monkeypatch.setattr("assistant.vision.describe_images",
+    monkeypatch.setattr("assistant.platform.vision.describe_images",
                         lambda s, p: seen.setdefault("n", len(p)) and ["d"] * len(p) or ["d"] * len(p))
     llm = FakeLLM({"reply": "ok", "actions": []})
     handle_message("look", settings, llm, image_paths=pics)
@@ -91,7 +91,7 @@ def test_email_channel_extracts_image_attachments(settings):
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
 
-    from assistant.chat.email_channel import EmailChannel
+    from assistant.agent.chat.email_channel import EmailChannel
 
     msg = MIMEMultipart()
     msg["From"] = "Owner <tester@example.com>"
@@ -142,7 +142,7 @@ def test_native_multimodal_attaches_images(settings, tmp_path, monkeypatch):
     # llm_supports_images: the main LLM gets the files, no vision pass runs
     pic = _png(tmp_path)
     settings.llm_supports_images = True
-    monkeypatch.setattr("assistant.vision.describe_images",
+    monkeypatch.setattr("assistant.platform.vision.describe_images",
                         lambda s, p: (_ for _ in ()).throw(AssertionError("vision ran")))
     seen = {}
 
@@ -164,7 +164,7 @@ def test_native_multimodal_attaches_images(settings, tmp_path, monkeypatch):
 
 
 def test_llm_builds_image_blocks(settings, tmp_path, monkeypatch):
-    from assistant.llm import LLM
+    from assistant.platform.llm import LLM
 
     pic = _png(tmp_path)
     captured = {}
@@ -198,7 +198,7 @@ def test_native_image_failure_falls_back_to_describe_with_backend(settings, tmp_
     settings.llm_supports_images = True
     settings.vision_api_key = "vk"
     settings.vision_model = "vm"
-    monkeypatch.setattr("assistant.vision.describe_images",
+    monkeypatch.setattr("assistant.platform.vision.describe_images",
                         lambda s, p: ["a receipt for ¥45"])
     calls = {"n": 0}
 
@@ -225,7 +225,7 @@ def test_native_image_failure_retries_when_no_vision_backend(settings, tmp_path,
     settings.llm_supports_images = True
     settings.vision_api_key = ""
     settings.vision_model = ""
-    monkeypatch.setattr("assistant.vision.describe_images",
+    monkeypatch.setattr("assistant.platform.vision.describe_images",
                         lambda s, p: (_ for _ in ()).throw(AssertionError("describe ran")))
     calls = {"n": 0}
 

@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from assistant.actions import run_action
-from assistant.notify import ReminderStore, parse_when
+from assistant.agent.actions import run_action
+from assistant.platform.notify import ReminderStore, parse_when
 
 NOW = datetime(2026, 7, 9, 22, 0)
 
@@ -49,6 +49,6 @@ def test_reminder_actions(settings):
 
 
 def test_send_wechat_disabled_without_target(settings):
-    from assistant.notify import send_wechat
+    from assistant.platform.notify import send_wechat
 
     assert send_wechat(settings, "hi").startswith("disabled")

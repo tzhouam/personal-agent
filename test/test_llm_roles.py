@@ -2,9 +2,9 @@
 
 import pytest
 
-import assistant.llm as llm_mod
-from assistant.config import Settings
-from assistant.llm import LLM
+import assistant.platform.llm as llm_mod
+from assistant.platform.config import Settings
+from assistant.platform.llm import LLM
 
 
 @pytest.fixture(autouse=True)
@@ -256,7 +256,7 @@ _FROZEN = datetime(2026, 7, 17, 9, 32, tzinfo=_tz(timedelta(hours=8), "HKT"))
 
 
 def _freeze_clock(monkeypatch):
-    from assistant import timeutil
+    from assistant.platform import timeutil
     monkeypatch.setattr(timeutil, "_now", lambda: _FROZEN)
     return timeutil.temporal_anchor()
 
@@ -634,7 +634,7 @@ class _MoaResp:
 
 
 def _moa_rows(settings):
-    from assistant.events_store import EventsStore
+    from assistant.agent.events_store import EventsStore
 
     events = EventsStore(settings.events_db)
     rows = [r for r in events.metrics_window(1) if r["step"] == "moa"]
@@ -643,7 +643,7 @@ def _moa_rows(settings):
 
 
 def test_mixture_observability_spans_and_durable_metrics(monkeypatch, tmp_path):
-    from assistant import tracing
+    from assistant.platform import tracing
 
     llm_mod._reset_breaker()
 

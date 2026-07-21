@@ -5,8 +5,8 @@ import time
 
 import pytest
 
-from assistant.jobs import JobQueue
-from assistant.worker import Cancelled, WorkerPool
+from assistant.platform.jobs import JobQueue
+from assistant.platform.worker import Cancelled, WorkerPool
 
 
 @pytest.fixture
@@ -146,9 +146,9 @@ def test_cancel_before_dispatch_never_runs_body(q):
 
 
 def test_default_settings_for_global_sentinel(tmp_path, monkeypatch):
-    from assistant.config import Settings
-    from assistant.jobs import GLOBAL_UID
-    from assistant.worker import _default_settings_for
+    from assistant.platform.config import Settings
+    from assistant.platform.jobs import GLOBAL_UID
+    from assistant.platform.worker import _default_settings_for
 
     monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -160,7 +160,7 @@ def test_default_settings_for_global_sentinel(tmp_path, monkeypatch):
 
 
 def test_global_job_dispatches_with_root_settings(q, tmp_path, monkeypatch):
-    from assistant.jobs import GLOBAL_UID
+    from assistant.platform.jobs import GLOBAL_UID
 
     monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))

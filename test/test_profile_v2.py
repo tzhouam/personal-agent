@@ -3,12 +3,10 @@ stability gating, initiatives, ops-log context, and the consolidation task."""
 
 import json
 
-from assistant.profile_store import (ALIASES_TEMPLATE, CONSOLIDATE_OPS, DAILY_OPS,
-                                     ProfileStore, append_ops_log, load_aliases,
-                                     recent_ops, render_initiatives, render_markdown)
-from assistant.tasks import profile_consolidate
-from assistant.tasks.profile_consolidate import consolidate_profile
-from assistant.tasks.profile_update import update_profile
+from assistant.agent.profile_store import ALIASES_TEMPLATE, CONSOLIDATE_OPS, DAILY_OPS, ProfileStore, append_ops_log, load_aliases, recent_ops, render_initiatives, render_markdown
+from assistant.agent.tasks import profile_consolidate
+from assistant.agent.tasks.profile_consolidate import consolidate_profile
+from assistant.agent.tasks.profile_update import update_profile
 
 
 class FakeLLM:
@@ -297,8 +295,8 @@ def test_consolidate_dry_run_changes_nothing(tmp_path, settings, monkeypatch):
 
 
 def test_resume_voice_rules_wired_into_both_writers():
-    from assistant.tasks import resume
-    from assistant.writing import RESUME_VOICE_RULES
+    from assistant.agent.tasks import resume
+    from assistant.agent.writing import RESUME_VOICE_RULES
 
     assert "as measured by" in RESUME_VOICE_RULES  # XYZ formula present
     assert RESUME_VOICE_RULES in profile_consolidate._SYSTEM

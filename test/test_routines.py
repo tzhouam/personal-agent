@@ -1,8 +1,8 @@
 from datetime import datetime
 
-from assistant import routines as routines_mod
-from assistant.actions import run_action
-from assistant.routines import RoutineStore, check_condition, fire_due, parse_days
+from assistant.agent import routines as routines_mod
+from assistant.agent.actions import run_action
+from assistant.agent.routines import RoutineStore, check_condition, fire_due, parse_days
 
 MON_9 = datetime(2026, 7, 6, 9, 0)   # Monday
 SAT_9 = datetime(2026, 7, 11, 10, 30)  # Saturday, past the weekend routine's time
@@ -36,7 +36,7 @@ def test_store_due_and_once_per_day(settings):
 
 def test_condition_gate(settings, monkeypatch):
     assert check_condition(settings, "") == (True, "")  # unconditional
-    monkeypatch.setattr("assistant.search.web_search",
+    monkeypatch.setattr("assistant.platform.search.web_search",
                         lambda q, max_results=6, settings=None: [
                             {"title": "Rainstorm warning", "url": "u",
                              "snippet": "red rainstorm alert issued"}])
@@ -49,7 +49,7 @@ def test_condition_gate(settings, monkeypatch):
             assert "weather alert" in prompt and "Rainstorm" in prompt
             return {"holds": True, "why": "red rainstorm alert active"}
 
-    monkeypatch.setattr("assistant.llm.LLM", FakeLLM)
+    monkeypatch.setattr("assistant.platform.llm.LLM", FakeLLM)
     holds, why = check_condition(settings, "there is a weather alert in Shenzhen")
     assert holds and "rainstorm" in why.lower()
     # judge failure → conservative false
@@ -68,10 +68,10 @@ def test_fire_due_gates_and_sends(settings, monkeypatch):
     monkeypatch.setattr(routines_mod, "check_condition",
                         lambda s, c: (False, "no alert") if c else (True, ""))
     sent, handled = [], []
-    monkeypatch.setattr("assistant.chat.agent.handle_message",
+    monkeypatch.setattr("assistant.agent.chat.agent.handle_message",
                         lambda task, s, llm=None, history=None:
                         handled.append(task) or f"reply to: {task}")
-    monkeypatch.setattr("assistant.notify.send_wechat",
+    monkeypatch.setattr("assistant.platform.notify.send_wechat",
                         lambda s, text: sent.append(text) or "sent")
 
     outcomes = fire_due(settings, now=MON_9)
@@ -104,7 +104,7 @@ def test_routine_actions(settings):
 
 
 def test_valid_days_monthly_yearly():
-    from assistant.routines import valid_days
+    from assistant.agent.routines import valid_days
 
     assert valid_days("monthly:1") and valid_days("monthly:31")
     assert not valid_days("monthly:0") and not valid_days("monthly:32")
@@ -118,7 +118,7 @@ def test_valid_days_monthly_yearly():
 def test_day_matches_monthly_clamps():
     from datetime import date
 
-    from assistant.routines import day_matches
+    from assistant.agent.routines import day_matches
 
     assert day_matches("monthly:15", date(2026, 7, 15))
     assert not day_matches("monthly:15", date(2026, 7, 14))
@@ -132,7 +132,7 @@ def test_day_matches_monthly_clamps():
 def test_day_matches_yearly_and_leap():
     from datetime import date
 
-    from assistant.routines import day_matches
+    from assistant.agent.routines import day_matches
 
     assert day_matches("yearly:03-15", date(2026, 3, 15))
     assert not day_matches("yearly:03-15", date(2026, 3, 16))

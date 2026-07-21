@@ -1,4 +1,4 @@
-from assistant.events_store import EventsStore
+from assistant.agent.events_store import EventsStore
 
 
 def test_seen_dedup(tmp_path):

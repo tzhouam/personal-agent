@@ -8,8 +8,8 @@ still writes the row. Import this module once at a composition root (`cli.main`,
 tests via conftest) to activate it.
 """
 
-from .. import llm as _llm
-from ..events_store import EventsStore
+from assistant.platform import llm as _llm
+from assistant.agent.events_store import EventsStore
 
 
 def moa_metrics_sink(settings, run_id: str, step: str, values: dict) -> None:

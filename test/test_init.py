@@ -3,9 +3,7 @@
 from pathlib import Path
 
 import assistant.init_wizard as iw
-from assistant.init_wizard import (FAIL, OK, SKIP, WARN, probe_email, probe_marks,
-                                   probe_model_routing, probe_search, run_check,
-                                   run_wizard, upsert_env)
+from assistant.init_wizard import FAIL, OK, SKIP, WARN, probe_email, probe_marks, probe_model_routing, probe_search, run_check, run_wizard, upsert_env
 
 
 # ── env editing ──────────────────────────────────────────────────────

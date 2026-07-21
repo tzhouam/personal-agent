@@ -2,9 +2,9 @@
 caller's own uid instead of spawning a detached CLI (multi-user §6, §A.5)."""
 import pytest
 
-from assistant.actions import run_action
-from assistant.config import Settings
-from assistant.jobs import JobQueue
+from assistant.agent.actions import run_action
+from assistant.platform.config import Settings
+from assistant.platform.jobs import JobQueue
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def mt_settings(tmp_path, monkeypatch):
 
 
 def _no_popen(monkeypatch):
-    from assistant.actions import handlers
+    from assistant.agent.actions import handlers
     monkeypatch.setattr(handlers.subprocess, "Popen",
                         lambda *a, **k: pytest.fail("multi_tenant must not spawn a CLI"))
 

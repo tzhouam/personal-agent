@@ -492,38 +492,42 @@ distill it into `skills/<name>/SKILL.md` — the growing runbook library.
 
 ## 12. Project layout
 
+The package is split into two layers with a one-way import rule — **`agent/`
+may import `platform/`; `platform/` must never import `agent/`** — enforced by
+`test/test_boundary.py`. Where the runtime needs agent behavior it declares a
+contract and the agent registers an implementation, wired at a composition root
+(`cli`, `agent/app.py`/`wiring.py`). `agent/` is one owner's personal agent
+(the daily pipeline is per-owner, not a system concern); `platform/` hosts it.
+
 ```
 src/assistant/
-├── orchestrator.py     the 9-phase graph, run loop, resume, metrics wrapper
-├── state.py            AssistantState + state.json persistence
-├── config.py           Pydantic Settings (all .env knobs)
-├── init_wizard.py      `init` wizard + `--check` doctor
-├── cli/                argparse entry points
-├── llm.py              Anthropic client wrapper (retry, JSON, image blocks)
-├── vision.py           image → description fallback (remote API only)
-├── profile_store.py    the profile: apply_ops, git, aliases, render
-├── finance_store.py    income/expense ledger (finance.yaml, dedup, summaries)
-├── health_store.py     health subprofile (health.yaml: body, meals, exercise)
-├── insights.py         cross-links between the sub-stores (computed joins)
-├── task_runner.py      agentic executor for novel multi-step tasks
-├── events_store.py     evidence log + seen-store + metrics (SQLite/FTS5)
-├── todo_store.py       todos + reading list (YAML in the profile repo)
-├── urgency.py          the todo urgency metric
-├── metrics.py          per-phase extractors + the Health footer
-├── marks.py            website marks collection
-├── notify.py           proactive WeChat + reminders
-├── routines.py         recurring conditional routines (weekly/monthly/yearly)
-├── search.py           web search backends
-├── writing.py          résumé-voice rules (shared prompt block)
-├── website/            site render + publish
-├── actions/            the typed action registry + handlers
-├── serve.py            the loopback HTTP daemon
-├── collectors/         github, chrome, gmail
-├── deliver/            email render/send, wechat announce
-├── research/           arxiv, feeds, ranking pipeline
-├── chat/               agent, email/wecom channels, session service
-└── tasks/              profile_update, profile_consolidate, github_digest,
-                        todos, research, resume, curate
+├── cli/                argparse entry points  (composition root — imports both)
+├── init_wizard.py      `init` wizard + `--check` doctor  (composition root)
+│
+├── platform/           SYSTEM — runtime, hosting, tenancy (never imports agent/)
+│   ├── config.py           Pydantic Settings (all .env knobs)
+│   ├── llm.py              Anthropic client (retry, JSON, roles, MoA; injected metrics sink)
+│   ├── serve.py            loopback HTTP daemon (injected ServeServices)
+│   ├── jobs.py scheduler.py worker.py   durable job queue + in-process pool
+│   ├── dispatch.py         the job-kind contract (agent supplies handlers)
+│   ├── identity.py registry.py onboarding.py admin.py   multi-tenant tenancy
+│   ├── notify.py search.py vision.py    shared services (WeChat, web search, vision)
+│   └── locks.py timeutil.py tracing.py uidsafe.py       infra leaves
+│
+└── agent/              USER — one owner's personal agent (imports platform/)
+    ├── orchestrator.py state.py        the 9-phase daily pipeline + resume
+    ├── dispatch.py app.py observability.py wiring.py   the platform-contract impls
+    ├── profile_store.py finance_store.py health_store.py insights.py
+    ├── events_store.py todo_store.py lessons_store.py workflow_store.py
+    ├── task_runner.py routines.py marks.py metrics.py urgency.py writing.py utils.py
+    ├── actions/            the typed action registry + handlers
+    ├── chat/               agent, email/wecom channels, session service
+    ├── collectors/         github, chrome, gmail
+    ├── deliver/            email render/send, wechat announce
+    ├── research/           arxiv, feeds, ranking pipeline
+    ├── website/            site render + publish
+    └── tasks/              profile_update, profile_consolidate, github_digest,
+                            todos, research, resume, curate, evolve, global_evolve
 openclaw-plugin/        the WeChat bridge (Node)
 config/sources.yaml     research follow-list
 doc/                    this doc + the sub-docs

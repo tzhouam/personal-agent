@@ -8,13 +8,12 @@ import httpx
 import pytest
 import yaml
 
-from assistant import admin
-from assistant.config import Settings
-from assistant.identity import onboarding_candidate
-from assistant.onboarding import (InviteStore, handle,
-                                  provision_user)
-from assistant.registry import UserRegistry
-from assistant.serve import make_server
+from assistant.platform import admin
+from assistant.platform.config import Settings
+from assistant.platform.identity import onboarding_candidate
+from assistant.platform.onboarding import InviteStore, handle, provision_user
+from assistant.platform.registry import UserRegistry
+from assistant.platform.serve import make_server
 
 
 def _base(tmp_path, **kw):
@@ -39,7 +38,7 @@ def test_invite_create_reserve_single_use_and_expiry(tmp_path):
     assert store.reserve("ZZZZ-ZZZZ-ZZZZ", "wx-C") == "bad"  # unknown
     # expired
     raw = yaml.safe_load(store.path.read_text())
-    raw["invites"].append({"code_hash": __import__("assistant.registry", fromlist=["hash_token"])
+    raw["invites"].append({"code_hash": __import__("assistant.platform.registry", fromlist=["hash_token"])
                            .hash_token("AAAA-AAAA-AAAA"), "status": "open",
                            "created": "2000-01-01T00:00:00+00:00",
                            "expires": "2000-01-02T00:00:00+00:00"})

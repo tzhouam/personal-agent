@@ -11,12 +11,12 @@ them:
 - tenant profile seeding   (`onboarding.set_profile_seeder`)
 """
 
-from .. import admin as _admin
-from .. import onboarding as _onboarding
-from ..lessons_store import shared_store
-from ..profile_store import ALIASES_TEMPLATE, ProfileStore
-from . import app as _app          # noqa: F401 — import registers serve services
-from . import observability as _obs  # noqa: F401 — import registers the MoA metrics sink
+from assistant.platform import admin as _admin
+from assistant.platform import onboarding as _onboarding
+from assistant.agent.lessons_store import shared_store
+from assistant.agent.profile_store import ALIASES_TEMPLATE, ProfileStore
+from assistant.agent import app as _app          # noqa: F401 — import registers serve services
+from assistant.agent import observability as _obs  # noqa: F401 — import registers the MoA metrics sink
 
 
 def _seed_profile(profile_dir, display: str, uid: str) -> None:

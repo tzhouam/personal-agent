@@ -1,5 +1,5 @@
-from assistant.research.arxiv import parse_feed as parse_arxiv
-from assistant.research.feeds import parse_feed as parse_rss
+from assistant.agent.research.arxiv import parse_feed as parse_arxiv
+from assistant.agent.research.feeds import parse_feed as parse_rss
 
 ARXIV_ATOM = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">

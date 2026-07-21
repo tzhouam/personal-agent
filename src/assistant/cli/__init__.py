@@ -7,19 +7,8 @@ imported elsewhere) is re-exported so importers and the entry point are
 unchanged.
 """
 
-from .commands import (
-    cmd_bootstrap,
-    cmd_consolidate,
-    cmd_enrich_profile,
-    cmd_reading,
-    cmd_resume_init,
-    cmd_resume_status,
-    cmd_run_phase,
-    cmd_show,
-    cmd_test_email,
-    cmd_todo,
-)
-from .main import main
+from assistant.cli.commands import cmd_bootstrap, cmd_consolidate, cmd_enrich_profile, cmd_reading, cmd_resume_init, cmd_resume_status, cmd_run_phase, cmd_show, cmd_test_email, cmd_todo
+from assistant.cli.main import main
 
 __all__ = [
     "main",

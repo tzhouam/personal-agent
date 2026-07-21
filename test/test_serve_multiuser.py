@@ -6,9 +6,9 @@ import threading
 import httpx
 import pytest
 
-from assistant.config import Settings
-from assistant.registry import UserRegistry
-from assistant.serve import SessionStore, make_server
+from assistant.platform.config import Settings
+from assistant.platform.registry import UserRegistry
+from assistant.platform.serve import SessionStore, make_server
 
 
 class FakeLLM:
@@ -135,7 +135,7 @@ def test_run_endpoint_enqueues_for_resolved_uid(mt_server):
     r = httpx.post(f"{base}/run", json={"account_id": "wx-A"}, headers=_auth())
     assert r.status_code == 200 and "queued" in r.json()["result"]
     # the durable job landed on the shared queue, owned by the resolved uid
-    from assistant.jobs import JobQueue
+    from assistant.platform.jobs import JobQueue
     job = JobQueue(data_dir / "shared").claim()
     assert job["uid"] == "alice1" and job["kind"] == "run"
 
@@ -145,7 +145,7 @@ def test_filesystem_image_paths_refused_in_multi_tenant(mt_server, tmp_path, mon
     # a network-supplied local path is a traversal/cross-user vector → ignored
     secret = tmp_path / "outside.png"
     secret.write_bytes(b"\x89PNG fake")
-    monkeypatch.setattr("assistant.vision.describe_images", lambda s, p: ["LEAK"])
+    monkeypatch.setattr("assistant.platform.vision.describe_images", lambda s, p: ["LEAK"])
     r = httpx.post(f"{base}/chat",
                    json={"account_id": "wx-A", "text": "look", "image_paths": [str(secret)]},
                    headers=_auth(), timeout=10)
@@ -161,8 +161,8 @@ def test_tick_tenants_per_user_and_daily_fanout(tmp_path, monkeypatch):
     run fans out once per user, idempotently (§12)."""
     from datetime import datetime
 
-    from assistant.jobs import JobQueue
-    from assistant.serve import _tick_tenants
+    from assistant.platform.jobs import JobQueue
+    from assistant.platform.serve import _tick_tenants
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -188,8 +188,8 @@ def test_tick_tenants_per_user_and_daily_fanout(tmp_path, monkeypatch):
             ticked.append((s.uid, s.data_dir))
             return []
 
-    monkeypatch.setattr("assistant.notify.ReminderStore", FakeStore)
-    monkeypatch.setattr("assistant.routines.fire_due", lambda s: fired.append(s.uid))
+    monkeypatch.setattr("assistant.platform.notify.ReminderStore", FakeStore)
+    monkeypatch.setattr("assistant.agent.routines.fire_due", lambda s: fired.append(s.uid))
 
     root = Settings(_env_file=None)
     # before daily_run_hour (default 7): reminders/routines only, no fan-out
@@ -210,8 +210,8 @@ def test_chat_accepts_image_bytes_and_caps_size(mt_server, monkeypatch):
     import base64 as b64
 
     base, llm, data_dir = mt_server
-    monkeypatch.setattr("assistant.vision.describe_images", lambda s, p: ["a receipt"])
-    monkeypatch.setattr("assistant.serve._MAX_IMAGE_BYTES", 64)   # keep the test tiny
+    monkeypatch.setattr("assistant.platform.vision.describe_images", lambda s, p: ["a receipt"])
+    monkeypatch.setattr("assistant.platform.serve._MAX_IMAGE_BYTES", 64)   # keep the test tiny
     small = {"media_type": "image/png", "data": b64.b64encode(b"\x89PNG ok").decode()}
     big = {"media_type": "image/png",
            "data": b64.b64encode(b"\x89PNG" + b"x" * 200).decode()}
@@ -231,7 +231,7 @@ def test_tick_tenants_polls_each_users_own_mailbox(tmp_path, monkeypatch):
     own data dir, and a mailbox configured by two users is polled only once."""
     from datetime import datetime
 
-    from assistant.serve import _tick_tenants
+    from assistant.platform.serve import _tick_tenants
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -264,7 +264,7 @@ def test_tick_tenants_polls_each_users_own_mailbox(tmp_path, monkeypatch):
         def send(self, reply, in_reply_to=None):
             sent.append((self.settings.uid, reply))
 
-    monkeypatch.setattr("assistant.chat.email_channel.EmailChannel", FakeEmail)
+    monkeypatch.setattr("assistant.agent.chat.email_channel.EmailChannel", FakeEmail)
 
     class NoStore:                                    # keep the tick email-only
         def __init__(self, d):
@@ -273,8 +273,8 @@ def test_tick_tenants_polls_each_users_own_mailbox(tmp_path, monkeypatch):
         def deliver_due(self, s):
             return []
 
-    monkeypatch.setattr("assistant.notify.ReminderStore", NoStore)
-    monkeypatch.setattr("assistant.routines.fire_due", lambda s: None)
+    monkeypatch.setattr("assistant.platform.notify.ReminderStore", NoStore)
+    monkeypatch.setattr("assistant.agent.routines.fire_due", lambda s: None)
 
     llm = FakeLLM()
     _tick_tenants(Settings(_env_file=None), now=datetime(2026, 7, 16, 5, 0),
@@ -296,7 +296,7 @@ def test_tick_tenants_email_failure_isolated(tmp_path, monkeypatch):
     poller — failure isolation per user."""
     from datetime import datetime
 
-    from assistant.serve import _tick_tenants
+    from assistant.platform.serve import _tick_tenants
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -327,8 +327,8 @@ def test_tick_tenants_email_failure_isolated(tmp_path, monkeypatch):
         def send(self, reply, in_reply_to=None):
             pass
 
-    monkeypatch.setattr("assistant.chat.email_channel.EmailChannel", FlakyEmail)
-    monkeypatch.setattr("assistant.routines.fire_due", lambda s: None)
+    monkeypatch.setattr("assistant.agent.chat.email_channel.EmailChannel", FlakyEmail)
+    monkeypatch.setattr("assistant.agent.routines.fire_due", lambda s: None)
 
     class NoStore:
         def __init__(self, d):
@@ -337,7 +337,7 @@ def test_tick_tenants_email_failure_isolated(tmp_path, monkeypatch):
         def deliver_due(self, s):
             return []
 
-    monkeypatch.setattr("assistant.notify.ReminderStore", NoStore)
+    monkeypatch.setattr("assistant.platform.notify.ReminderStore", NoStore)
     _tick_tenants(Settings(_env_file=None), now=datetime(2026, 7, 16, 5, 0),
                   llm_factory=lambda s: FakeLLM())
     assert polls == ["alice1", "bob123"]              # bob polled despite alice's error
@@ -348,8 +348,8 @@ def test_tick_tenants_weekly_gate(tmp_path, monkeypatch):
     Saturday or too-early Sunday doesn't."""
     from datetime import datetime
 
-    from assistant.jobs import GLOBAL_UID, JobQueue
-    from assistant.serve import _tick_tenants
+    from assistant.platform.jobs import GLOBAL_UID, JobQueue
+    from assistant.platform.serve import _tick_tenants
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -367,8 +367,8 @@ def test_tick_tenants_weekly_gate(tmp_path, monkeypatch):
         def deliver_due(self, s):
             return []
 
-    monkeypatch.setattr("assistant.notify.ReminderStore", NoStore)
-    monkeypatch.setattr("assistant.routines.fire_due", lambda s: None)
+    monkeypatch.setattr("assistant.platform.notify.ReminderStore", NoStore)
+    monkeypatch.setattr("assistant.agent.routines.fire_due", lambda s: None)
     root = Settings(_env_file=None)
     q = JobQueue(root.shared_dir)
 
@@ -412,7 +412,7 @@ def test_late_reply_delivered_to_originating_conversation(tmp_path, monkeypatch)
             return {"reply": "the slow answer", "actions": []}
 
     sent = []
-    monkeypatch.setattr("assistant.notify.send_to_conversation",
+    monkeypatch.setattr("assistant.platform.notify.send_to_conversation",
                         lambda s, acct, target, text: (sent.append(
                             (acct, target, text)) or "sent"))
     srv = make_server(settings_factory=lambda: Settings(_env_file=None),

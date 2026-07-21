@@ -4,8 +4,8 @@ import threading
 import httpx
 import pytest
 
-from assistant.serve import SessionStore, make_server
-from assistant.state import persist_state
+from assistant.platform.serve import SessionStore, make_server
+from assistant.agent.state import persist_state
 
 
 class FakeLLM:
@@ -166,7 +166,7 @@ def test_chat_accepts_image_paths(server, tmp_path, monkeypatch):
     base, llm, _ = server
     pic = tmp_path / "shot.png"
     pic.write_bytes(b"\x89PNG fake")
-    monkeypatch.setattr("assistant.vision.describe_images",
+    monkeypatch.setattr("assistant.platform.vision.describe_images",
                         lambda s, p: ["a build log full of errors"])
     r = httpx.post(f"{base}/chat", json={"session": "s1", "text": "看看这个",
                                          "image_paths": [str(pic)]},
@@ -179,7 +179,7 @@ def test_chat_accepts_image_paths(server, tmp_path, monkeypatch):
 def test_chat_accepts_base64_images_and_image_only(server, monkeypatch):
     base, llm, settings = server
     import base64 as b64
-    monkeypatch.setattr("assistant.vision.describe_images", lambda s, p: ["a chart"])
+    monkeypatch.setattr("assistant.platform.vision.describe_images", lambda s, p: ["a chart"])
     body = {"session": "s2", "text": "",
             "images": [{"media_type": "image/png",
                         "data": b64.b64encode(b"\x89PNG fake").decode()}]}

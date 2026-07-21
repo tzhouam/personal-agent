@@ -3,12 +3,12 @@ adaptive reading quota (doc/PIPELINE_METRICS.md §2 + §6)."""
 
 from datetime import date, timedelta
 
-from assistant.events_store import EventsStore
-from assistant.metrics import build_health
-from assistant.profile_store import ProfileStore
-from assistant.research.pipeline import adaptive_paper_quota
-from assistant.tasks import profile_consolidate
-from assistant.tasks.profile_consolidate import consolidate_profile, judge_profile
+from assistant.agent.events_store import EventsStore
+from assistant.agent.metrics import build_health
+from assistant.agent.profile_store import ProfileStore
+from assistant.agent.research.pipeline import adaptive_paper_quota
+from assistant.agent.tasks import profile_consolidate
+from assistant.agent.tasks.profile_consolidate import consolidate_profile, judge_profile
 
 TODAY = date.today()
 

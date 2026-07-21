@@ -30,7 +30,7 @@ def test_build_dispatch_exposes_exactly_the_expected_kinds():
 
 def test_run_handler_invokes_orchestrator(monkeypatch):
     called = {}
-    import assistant.orchestrator as orch
+    import assistant.agent.orchestrator as orch
     monkeypatch.setattr(orch, "run",
                         lambda settings, **kw: called.update(settings=settings, kw=kw))
     build_dispatch()["run"]("S", {"resume": False}, _Token())
@@ -49,7 +49,7 @@ def test_run_phase_handler_invokes_cmd_run_phase(monkeypatch):
 
 def test_task_handler_invokes_run_task(monkeypatch):
     seen = {}
-    import assistant.task_runner as tr
+    import assistant.agent.task_runner as tr
     monkeypatch.setattr(tr, "run_task",
                         lambda request, settings, **kw: seen.update(request=request, kw=kw))
     build_dispatch()["task"]("S", {"request": "do a thing"}, _Token())
@@ -57,8 +57,8 @@ def test_task_handler_invokes_run_task(monkeypatch):
 
 
 def test_evolve_and_global_evolve_handlers(monkeypatch):
-    import assistant.tasks.evolve as ev
-    import assistant.tasks.global_evolve as gev
+    import assistant.agent.tasks.evolve as ev
+    import assistant.agent.tasks.global_evolve as gev
     hits = []
     monkeypatch.setattr(ev, "evolve", lambda settings: hits.append(("evolve", settings)))
     monkeypatch.setattr(gev, "global_evolve", lambda settings: hits.append(("global", settings)))

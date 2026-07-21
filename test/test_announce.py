@@ -1,4 +1,4 @@
-from assistant.deliver.announce import announce_digest
+from assistant.agent.deliver.announce import announce_digest
 
 
 def _enabled(settings, tmp_path, script: str):

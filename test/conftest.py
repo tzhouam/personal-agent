@@ -1,7 +1,7 @@
 import pytest
 
 import assistant.agent.wiring  # noqa: F401 — registers all agent impls of platform contracts
-from assistant.config import Settings
+from assistant.platform.config import Settings
 
 
 @pytest.fixture

@@ -6,11 +6,11 @@ import json
 
 import pytest
 
-import assistant.notify as notify
-from assistant.actions.base import Action
-from assistant.actions.handlers import _approve_task
-from assistant.actions.registry import ACTIONS, is_risky
-from assistant.task_runner import TASK_ID_RE, run_task
+import assistant.platform.notify as notify
+from assistant.agent.actions.base import Action
+from assistant.agent.actions.handlers import _approve_task
+from assistant.agent.actions.registry import ACTIONS, is_risky
+from assistant.agent.task_runner import TASK_ID_RE, run_task
 
 
 class ScriptedLLM:
@@ -139,7 +139,7 @@ def test_approve_then_resume_runs_pending_action_once(settings, sent, risky_acti
     task_id = paused["id"]
 
     spawns = []
-    monkeypatch.setattr("assistant.actions.handlers.subprocess.Popen",
+    monkeypatch.setattr("assistant.agent.actions.handlers.subprocess.Popen",
                         lambda *a, **k: spawns.append(a))
     out = _approve_task(settings, {"id": task_id})
     assert "approved" in out and len(spawns) == 1

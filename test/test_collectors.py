@@ -1,8 +1,8 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from assistant.collectors.chrome import ChromeCollector, _to_chrome_time
-from assistant.collectors.github import GitHubCollector, _api_to_html_url
+from assistant.agent.collectors.chrome import ChromeCollector, _to_chrome_time
+from assistant.agent.collectors.github import GitHubCollector, _api_to_html_url
 
 
 def test_api_to_html_url():

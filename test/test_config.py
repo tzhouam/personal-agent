@@ -1,7 +1,7 @@
 """The `Settings.for_user` isolation seam + deployment mode (multi-user §4, §6.1)."""
 import pytest
 
-from assistant.config import DEFAULT_UID, Settings
+from assistant.platform.config import DEFAULT_UID, Settings
 
 
 def test_single_user_is_the_default_and_backward_compatible():

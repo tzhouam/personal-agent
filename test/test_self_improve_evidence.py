@@ -27,7 +27,7 @@ def _seed_friction(data_dir: Path):
 
 
 def test_multi_tenant_reads_each_active_user(tmp_path):
-    from assistant.registry import UserRegistry
+    from assistant.platform.registry import UserRegistry
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()

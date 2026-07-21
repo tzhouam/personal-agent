@@ -1,9 +1,9 @@
 from datetime import date, timedelta
 
-from assistant.llm import _parse_json
-from assistant.profile_store import ProfileStore
-from assistant.tasks.curate import curate
-from assistant.tasks.github_digest import build_digest
+from assistant.platform.llm import _parse_json
+from assistant.agent.profile_store import ProfileStore
+from assistant.agent.tasks.curate import curate
+from assistant.agent.tasks.github_digest import build_digest
 
 
 class BrokenLLM:
@@ -55,7 +55,7 @@ def test_curator_decay(tmp_path):
 
 
 def test_ref_label():
-    from assistant.utils import ref_label
+    from assistant.agent.utils import ref_label
 
     assert ref_label("https://github.com/o/r/pull/4803") == "PR #4803"
     assert ref_label("https://github.com/o/r/issues/7") == "Issue #7"
@@ -75,7 +75,7 @@ def test_parse_json_variants():
 def test_run_refuses_when_lock_held(settings):
     import fcntl
 
-    from assistant import orchestrator
+    from assistant.agent import orchestrator
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     holder = (settings.data_dir / "run.lock").open("w")
@@ -91,8 +91,8 @@ def test_run_streams_phases_and_cancels_at_boundaries(settings, monkeypatch):
     abort at a phase boundary (§6); a completed stream still returns 0."""
     import pytest
 
-    from assistant import orchestrator
-    from assistant.worker import Cancelled
+    from assistant.agent import orchestrator
+    from assistant.platform.worker import Cancelled
 
     class FakeGraph:
         def __init__(self, phases):

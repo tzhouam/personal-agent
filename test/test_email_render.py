@@ -1,8 +1,8 @@
 """Digest email rendering (src/assistant/deliver/email.py): todo grouping and
 the no-red-section rule (red notifications already are the todo list)."""
 
-from assistant.deliver.email import render_html
-from assistant.todo_store import group_todos
+from assistant.agent.deliver.email import render_html
+from assistant.agent.todo_store import group_todos
 
 
 def _render(todos=None, digest=None):

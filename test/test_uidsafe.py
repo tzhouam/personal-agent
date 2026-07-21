@@ -1,7 +1,7 @@
 """UID validation + per-user path containment (multi-user isolation, §4.3)."""
 import pytest
 
-from assistant.uidsafe import user_data_dir, validate_uid
+from assistant.platform.uidsafe import user_data_dir, validate_uid
 
 
 def test_validate_uid_accepts_opaque_ids():

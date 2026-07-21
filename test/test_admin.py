@@ -2,10 +2,10 @@
 single-user migration (multi-user §10, §14)."""
 import pytest
 
-from assistant import admin
-from assistant.config import Settings
-from assistant.jobs import JobQueue
-from assistant.registry import UserRegistry
+from assistant.platform import admin
+from assistant.platform.config import Settings
+from assistant.platform.jobs import JobQueue
+from assistant.platform.registry import UserRegistry
 
 
 @pytest.fixture
@@ -136,7 +136,7 @@ def test_migrate_skips_infra_and_refuses_existing_uid(root):
 
 def test_shared_lessons_list_and_retire(root):
     settings, _ = root
-    from assistant.lessons_store import shared_store
+    from assistant.agent.lessons_store import shared_store
 
     assert admin.list_shared_lessons(settings) == "(no active shared lessons)"
     shared_store(settings).learn("verify dates before reminders",

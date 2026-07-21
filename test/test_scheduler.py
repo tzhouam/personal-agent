@@ -1,10 +1,10 @@
 """Daily fan-out scheduler — one deduped `run` per active user (multi-user §12)."""
 import pytest
 
-from assistant.config import Settings
-from assistant.jobs import JobQueue
-from assistant.registry import UserRegistry
-from assistant.scheduler import enqueue_daily_runs
+from assistant.platform.config import Settings
+from assistant.platform.jobs import JobQueue
+from assistant.platform.registry import UserRegistry
+from assistant.platform.scheduler import enqueue_daily_runs
 
 
 @pytest.fixture
@@ -47,8 +47,8 @@ def test_single_user_is_a_noop(tmp_path, monkeypatch):
 
 
 def test_weekly_fan_out_full_set(root):
-    from assistant.jobs import GLOBAL_UID
-    from assistant.scheduler import enqueue_weekly_jobs
+    from assistant.platform.jobs import GLOBAL_UID
+    from assistant.platform.scheduler import enqueue_weekly_jobs
 
     settings, _ = root
     labels = enqueue_weekly_jobs(settings, week="2026-W29")
@@ -71,7 +71,7 @@ def test_weekly_fan_out_full_set(root):
 
 
 def test_weekly_single_user_is_a_noop(tmp_path, monkeypatch):
-    from assistant.scheduler import enqueue_weekly_jobs
+    from assistant.platform.scheduler import enqueue_weekly_jobs
 
     monkeypatch.setenv("DEPLOYMENT_MODE", "single_user")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))

@@ -2,10 +2,10 @@ import base64
 import hashlib
 import struct
 
-from assistant.chat.agent import handle_message
-from assistant.chat.email_channel import EmailChannel
-from assistant.chat.wecom import _MsgCrypto
-from assistant.todo_store import TodoStore
+from assistant.agent.chat.agent import handle_message
+from assistant.agent.chat.email_channel import EmailChannel
+from assistant.agent.chat.wecom import _MsgCrypto
+from assistant.agent.todo_store import TodoStore
 
 
 class FakeLLM:
@@ -119,7 +119,7 @@ def test_action_review_retries_failures(settings):
     assert "Actions you just emitted" in llm.prompts[1]
     assert reply.startswith("修正后已记录")               # revised reply kept
     assert "(retry) logged f1: expense 45.0" in reply
-    from assistant.finance_store import FinanceStore
+    from assistant.agent.finance_store import FinanceStore
     assert FinanceStore(settings.profile_dir).records()[0]["amount"] == 45.0
 
 
@@ -138,7 +138,7 @@ def test_action_review_skips_success_and_duplicates(settings):
     handle_message("add todo", settings, llm)
     assert llm.calls == 1
     # duplicate rejection → no retry round
-    from assistant.finance_store import FinanceStore
+    from assistant.agent.finance_store import FinanceStore
     FinanceStore(settings.profile_dir).add("expense", 68, note="面点王", time="12:30")
     llm = CountingLLM({"reply": "ok", "actions": [
         {"type": "log_transaction", "kind": "expense", "amount": 68,
@@ -166,7 +166,7 @@ def test_action_review_gives_up_when_unfixable(settings):
 
 
 def test_context_caps_todos_by_urgency(settings):
-    from assistant.chat.agent import build_context
+    from assistant.agent.chat.agent import build_context
 
     store = TodoStore(settings.profile_dir)
     for i in range(40):
@@ -210,7 +210,7 @@ def test_query_action_composes_answer_from_retrieved_data(settings):
     # a query_* action retrieves records; the model then answers FROM them (the
     # composed reply replaces the blind first reply) and the raw records are not
     # echoed as a "✔" outcome.
-    from assistant.health_store import HealthStore
+    from assistant.agent.health_store import HealthStore
     HealthStore(settings.profile_dir).add(
         "meal", when="2026-07-13", time="08:00", description="早餐 蛋",
         calories_kcal=200, protein_g=10)
@@ -236,7 +236,7 @@ def test_query_action_composes_answer_from_retrieved_data(settings):
 # ── per-turn outcome labels (success / fail / neutral) ──────────────────────
 
 def test_classify_turn_label_precedence():
-    from assistant.chat.agent import classify_turn
+    from assistant.agent.chat.agent import classify_turn
 
     # unresolved failure in the FINAL round → fail, even after a retry
     assert classify_turn(["x rejected — bad id", "(retry) still rejected — bad id"],
@@ -258,7 +258,7 @@ def test_classify_turn_label_precedence():
 
 
 def test_owner_verdict_keywords_beat_model_judgment():
-    from assistant.chat.agent import owner_verdict
+    from assistant.agent.chat.agent import owner_verdict
 
     # deterministic correction markers win regardless of the model's field
     assert owner_verdict("不对，改成周五", "satisfied") == "dissatisfied"
@@ -270,7 +270,7 @@ def test_owner_verdict_keywords_beat_model_judgment():
 
 
 def test_handle_turn_labels_and_prev_verdict(settings):
-    from assistant.chat.agent import TurnResult, handle_turn
+    from assistant.agent.chat.agent import TurnResult, handle_turn
 
     # clean action turn → provisional success
     llm = FakeLLM({"reply": "加好了", "actions": [{"type": "add_todo", "title": "X"}]})
@@ -301,7 +301,7 @@ def test_handle_turn_labels_and_prev_verdict(settings):
 
 
 def test_handle_turn_hard_llm_failure_is_fail(settings):
-    from assistant.chat.agent import handle_turn
+    from assistant.agent.chat.agent import handle_turn
 
     class DeadLLM:
         def complete_json(self, *a, **kw):

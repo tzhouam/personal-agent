@@ -4,7 +4,7 @@ import importlib
 
 def _fresh(monkeypatch, enabled="1"):
     monkeypatch.setenv("AGENT_TRACE", enabled)
-    import assistant.tracing as tracing
+    import assistant.platform.tracing as tracing
     importlib.reload(tracing)
     return tracing
 
@@ -35,7 +35,7 @@ def test_disabled_noop(monkeypatch, tmp_path):
 def test_llm_complete_records_span(monkeypatch, tmp_path, settings):
     tr = _fresh(monkeypatch)
     tr.init("run-llm", tmp_path / "trace.jsonl")
-    from assistant.llm import LLM
+    from assistant.platform.llm import LLM
 
     class Usage:
         input_tokens = 1200
@@ -100,8 +100,8 @@ def test_moa_proposers_stay_traced(monkeypatch, tmp_path):
     # MoA proposers run in a thread pool; the ContextVar tracer must propagate
     # (llm.py copies the context per proposer) or their spans vanish.
     tr = _fresh(monkeypatch)
-    from assistant.config import Settings
-    import assistant.llm as llm_mod
+    from assistant.platform.config import Settings
+    import assistant.platform.llm as llm_mod
 
     class Resp:
         def __init__(self, t):

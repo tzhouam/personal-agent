@@ -1,7 +1,6 @@
-from assistant import search as search_mod
-from assistant.actions import run_action
-from assistant.search import (_real_url, fetch_page, format_results, web_search,
-                              web_search_answer)
+from assistant.platform import search as search_mod
+from assistant.agent.actions import run_action
+from assistant.platform.search import _real_url, fetch_page, format_results, web_search, web_search_answer
 
 _DDG_PAGE = """<html><body><table>
 <tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=x" class='result-link'>First &amp; Best</a></td></tr>
@@ -78,7 +77,7 @@ def test_gemini_query_carries_temporal_anchor(settings, monkeypatch):
     # date-relative searches ("today's news") must ground on the right day
     from datetime import datetime, timedelta, timezone
 
-    from assistant import timeutil
+    from assistant.platform import timeutil
 
     frozen = datetime(2026, 7, 17, 9, 32, tzinfo=timezone(timedelta(hours=8), "HKT"))
     monkeypatch.setattr(timeutil, "_now", lambda: frozen)
@@ -102,7 +101,7 @@ def test_gemini_query_carries_temporal_anchor(settings, monkeypatch):
 
 def test_web_search_action_uses_grounded_answer(settings, monkeypatch):
     monkeypatch.setattr(
-        "assistant.search.web_search_answer",
+        "assistant.platform.search.web_search_answer",
         lambda q, max_results=8, settings=None: {
             "answer": "It is 42.",
             "results": [{"title": "hitchhikers.com", "url": "https://h", "snippet": ""}]})
@@ -175,7 +174,7 @@ def test_tavily_used_when_key_present(settings, monkeypatch):
 
 
 def test_web_search_action_synthesizes(settings, monkeypatch):
-    monkeypatch.setattr("assistant.search.web_search_answer",
+    monkeypatch.setattr("assistant.platform.search.web_search_answer",
                         lambda q, max_results=8, settings=None: {
                             "answer": "",
                             "results": [{"title": "Doc", "url": "https://d",
@@ -189,7 +188,7 @@ def test_web_search_action_synthesizes(settings, monkeypatch):
             assert "answer here" in prompt
             return "The answer (https://d)."
 
-    monkeypatch.setattr("assistant.llm.LLM", FakeLLM)
+    monkeypatch.setattr("assistant.platform.llm.LLM", FakeLLM)
     assert run_action("web_search", {"query": "what is X"}, settings) \
         == "The answer (https://d)."
     # synthesis failure → raw results, still useful
@@ -197,13 +196,13 @@ def test_web_search_action_synthesizes(settings, monkeypatch):
                         lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("api")))
     assert "top results:" in run_action("web_search", {"query": "what is X"}, settings)
     # no results → honest message
-    monkeypatch.setattr("assistant.search.web_search_answer",
+    monkeypatch.setattr("assistant.platform.search.web_search_answer",
                         lambda q, max_results=8, settings=None: {"answer": "", "results": []})
     assert "returned nothing" in run_action("web_search", {"query": "zzz"}, settings)
 
 
 def test_plan_task_gets_search_enrichment(settings, monkeypatch):
-    monkeypatch.setattr("assistant.search.web_search",
+    monkeypatch.setattr("assistant.platform.search.web_search",
                         lambda q, max_results=6, settings=None: [
                             {"title": "Yu Zhi Lan", "url": "https://r", "snippet": "sichuan"}])
     prompts = []
@@ -218,7 +217,7 @@ def test_plan_task_gets_search_enrichment(settings, monkeypatch):
                     "steps": [{"who": "owner", "step": "call Yu Zhi Lan"}],
                     "next": "call"}
 
-    monkeypatch.setattr("assistant.llm.LLM", FakeLLM)
+    monkeypatch.setattr("assistant.platform.llm.LLM", FakeLLM)
     result = run_action("plan_task", {"request": "find a sichuan restaurant"}, settings)
     assert "Web search results" in prompts[0] and "Yu Zhi Lan" in prompts[0]
     assert result.startswith("planned: Book dinner")

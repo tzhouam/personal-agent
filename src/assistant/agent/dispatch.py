@@ -13,11 +13,11 @@ the task loop — not just at job start.
 
 import os
 
-from ..platform.dispatch import Dispatch
+from assistant.platform.dispatch import Dispatch
 
 
 def _dispatch_run(settings, args, token):
-    from ..orchestrator import run
+    from assistant.agent.orchestrator import run
     token.check()
     # Default resume=True: a REQUEUED job (daemon restart mid-run) then continues
     # from its state.json checkpoint instead of restarting from collect. Safe for
@@ -26,13 +26,13 @@ def _dispatch_run(settings, args, token):
 
 
 def _dispatch_run_phase(settings, args, token):
-    from ..cli.commands import cmd_run_phase
+    from assistant.cli.commands import cmd_run_phase
     token.check()
     cmd_run_phase(settings, str(args.get("phase", "")))
 
 
 def _dispatch_task(settings, args, token):
-    from ..task_runner import run_task
+    from assistant.agent.task_runner import run_task
     token.check()
     # force_resume: a queue retry legitimately resumes a record left `running`
     # by a dead worker (the queue marks failure only after the worker raised,
@@ -44,7 +44,7 @@ def _dispatch_task(settings, args, token):
 
 def _dispatch_evolve(settings, args, token):
     """Weekly per-user personal-lessons pass (§12b layer 1)."""
-    from ..tasks.evolve import evolve
+    from assistant.agent.tasks.evolve import evolve
     token.check()
     evolve(settings)
 
@@ -52,7 +52,7 @@ def _dispatch_evolve(settings, args, token):
 def _dispatch_global_evolve(settings, args, token):
     """Weekly cross-user shared-lessons pass (§12b layer 2). `settings` is the
     deployment ROOT (GLOBAL_UID job)."""
-    from ..tasks.global_evolve import global_evolve
+    from assistant.agent.tasks.global_evolve import global_evolve
     token.check()
     global_evolve(settings)
 

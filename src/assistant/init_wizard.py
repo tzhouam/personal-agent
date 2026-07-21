@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .config import Settings
+from assistant.platform.config import Settings
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 OK, WARN, FAIL, SKIP = "✅", "⚠️ ", "❌", "◌ "
@@ -63,7 +63,7 @@ def probe_llm(s: Settings):
     if not s.anthropic_api_key:
         return FAIL, "ANTHROPIC_API_KEY unset — the agent cannot think without it"
     try:
-        from .llm import LLM
+        from assistant.platform.llm import LLM
 
         reply = LLM(s).complete("Reply with the single word: ok", max_tokens=1500)
         return (OK, f"model {s.anthropic_model} answers") if reply.strip() \
@@ -197,7 +197,7 @@ def probe_profile(s: Settings):
     """Report whether the profile has been seeded (WARN with the fix if not)
     and whether `aliases.yaml` exists, since its absence disables initiative
     merging. Returns `(status, detail)`."""
-    from .profile_store import ProfileStore
+    from assistant.agent.profile_store import ProfileStore
 
     store = ProfileStore(s.profile_dir)
     if not store.exists():
@@ -464,13 +464,13 @@ def run_wizard(settings: Settings, env_path: Path | None = None) -> int:
             print(f"  {status} {detail}")
 
     # post-env: seed the profile + aliases so the first run has something to build on
-    from .profile_store import ALIASES_TEMPLATE, ProfileStore
+    from assistant.agent.profile_store import ALIASES_TEMPLATE, ProfileStore
 
     final = Settings(_env_file=env_path)
     store = ProfileStore(final.profile_dir)
     if not store.exists() and final.github_token:
         if _ask("\nseed profile.yaml from your GitHub account now? [Y/n]: ").lower() != "n":
-            from .cli import cmd_bootstrap
+            from assistant.cli import cmd_bootstrap
 
             cmd_bootstrap(final)
     aliases = final.profile_dir / "aliases.yaml"

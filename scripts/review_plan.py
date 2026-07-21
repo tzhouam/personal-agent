@@ -88,8 +88,8 @@ def resolve_reviewer(settings) -> dict:
 def review_file(plan_path: Path, context: str = "") -> int:
     """Review `plan_path`, write `<plan>.review.md` beside it, print the
     critique, and return the exit code (0/2/3)."""
-    from assistant.config import Settings
-    from assistant.llm import LLM
+    from assistant.platform.config import Settings
+    from assistant.platform.llm import LLM
 
     plan = plan_path.read_text()
     settings = Settings()

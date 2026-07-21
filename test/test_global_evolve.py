@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from assistant.config import Settings
-from assistant.lessons_store import shared_store
-from assistant.registry import UserRegistry
-from assistant.tasks.global_evolve import _looks_user_specific, global_evolve
+from assistant.platform.config import Settings
+from assistant.agent.lessons_store import shared_store
+from assistant.platform.registry import UserRegistry
+from assistant.agent.tasks.global_evolve import _looks_user_specific, global_evolve
 
 
 class FakeLLM:

@@ -8,12 +8,12 @@ import threading
 
 import pytest
 
-import assistant.notify as notify
-from assistant.actions import run_action
-from assistant.actions.handlers import _approve_task
-from assistant.routines import RoutineStore, fire_due
-from assistant.task_runner import TASK_ID_RE, run_task
-from assistant.workflow_store import WorkflowStore, WorkflowStoreError, valid_steps
+import assistant.platform.notify as notify
+from assistant.agent.actions import run_action
+from assistant.agent.actions.handlers import _approve_task
+from assistant.agent.routines import RoutineStore, fire_due
+from assistant.agent.task_runner import TASK_ID_RE, run_task
+from assistant.agent.workflow_store import WorkflowStore, WorkflowStoreError, valid_steps
 
 
 class ScriptedLLM:
@@ -119,7 +119,7 @@ def test_create_and_show_actions(settings):
 def test_run_workflow_mints_queued_record_and_dispatches(settings, monkeypatch):
     wf = _mk(settings)
     spawns = []
-    monkeypatch.setattr("assistant.actions.handlers.subprocess.Popen",
+    monkeypatch.setattr("assistant.agent.actions.handlers.subprocess.Popen",
                         lambda *a, **k: spawns.append(a[0]))
     out = run_action("run_workflow", {"id": wf["id"]}, settings)
     assert "started" in out and len(spawns) == 1
@@ -139,7 +139,7 @@ def test_run_workflow_mints_queued_record_and_dispatches(settings, monkeypatch):
 def test_resume_executes_preset_plan_without_drafting(settings, monkeypatch, sent):
     wf = _mk(settings, steps=("add a todo", "finish up"))
     spawns = []
-    monkeypatch.setattr("assistant.actions.handlers.subprocess.Popen",
+    monkeypatch.setattr("assistant.agent.actions.handlers.subprocess.Popen",
                         lambda *a, **k: spawns.append(a[0]))
     run_action("run_workflow", {"id": wf["id"]}, settings)
     task_id = spawns[0][spawns[0].index("--approved-id") + 1]
@@ -164,8 +164,8 @@ def test_resume_executes_preset_plan_without_drafting(settings, monkeypatch, sen
 def test_workflow_risky_step_pauses_each_time(settings, monkeypatch, sent):
     """Per-action approval: two risky steps pause twice; each approval
     releases exactly one."""
-    from assistant.actions.base import Action
-    from assistant.actions.registry import ACTIONS
+    from assistant.agent.actions.base import Action
+    from assistant.agent.actions.registry import ACTIONS
 
     fired = []
     monkeypatch.setitem(ACTIONS, "publish_test", Action(
@@ -173,7 +173,7 @@ def test_workflow_risky_step_pauses_each_time(settings, monkeypatch, sent):
         handler=lambda s, p: fired.append(dict(p)) or "published!",
         prompt_example='{"type": "publish_test"}'))
     spawns = []
-    monkeypatch.setattr("assistant.actions.handlers.subprocess.Popen",
+    monkeypatch.setattr("assistant.agent.actions.handlers.subprocess.Popen",
                         lambda *a, **k: spawns.append(a[0]))
     wf = _mk(settings, steps=("publish once", "publish twice"))
     run_action("run_workflow", {"id": wf["id"]}, settings)
@@ -207,7 +207,7 @@ def test_workflow_risky_step_pauses_each_time(settings, monkeypatch, sent):
 def test_finish_nudge_once_for_unticked_milestones(settings, monkeypatch, sent):
     wf = _mk(settings, steps=("s1", "s2", "s3"))
     spawns = []
-    monkeypatch.setattr("assistant.actions.handlers.subprocess.Popen",
+    monkeypatch.setattr("assistant.agent.actions.handlers.subprocess.Popen",
                         lambda *a, **k: spawns.append(a[0]))
     run_action("run_workflow", {"id": wf["id"]}, settings)
     task_id = spawns[0][spawns[0].index("--approved-id") + 1]
@@ -226,7 +226,7 @@ def test_finish_nudge_once_for_unticked_milestones(settings, monkeypatch, sent):
 def test_retired_workflow_task_cancels_and_crash_recovery_resumes(settings, monkeypatch):
     wf = _mk(settings)
     spawns = []
-    monkeypatch.setattr("assistant.actions.handlers.subprocess.Popen",
+    monkeypatch.setattr("assistant.agent.actions.handlers.subprocess.Popen",
                         lambda *a, **k: spawns.append(a[0]))
     run_action("run_workflow", {"id": wf["id"]}, settings)
     task_id = spawns[0][spawns[0].index("--approved-id") + 1]
@@ -257,7 +257,7 @@ def test_retired_workflow_task_cancels_and_crash_recovery_resumes(settings, monk
 def test_routine_binding_fires_deterministically(settings, monkeypatch, sent):
     wf = _mk(settings)
     spawns = []
-    monkeypatch.setattr("assistant.actions.handlers.subprocess.Popen",
+    monkeypatch.setattr("assistant.agent.actions.handlers.subprocess.Popen",
                         lambda *a, **k: spawns.append(a[0]))
     out = run_action("create_routine", {"task": "", "time": "00:00",
                                         "days": "daily", "workflow": wf["id"]}, settings)
@@ -279,7 +279,7 @@ def test_routine_binding_fires_deterministically(settings, monkeypatch, sent):
 
 
 def test_two_tenant_isolation(tmp_path):
-    from assistant.config import Settings
+    from assistant.platform.config import Settings
 
     a = Settings(_env_file=None, data_dir=tmp_path / "users" / "aa11aa11")
     b = Settings(_env_file=None, data_dir=tmp_path / "users" / "bb22bb22")
@@ -304,7 +304,7 @@ def test_workflow_actions_excluded_inside_task_loop(settings):
 
 
 def test_context_lists_saved_workflows(settings):
-    from assistant.chat.agent import build_context
+    from assistant.agent.chat.agent import build_context
 
     assert "Saved workflows" not in build_context(settings)   # only when non-empty
     _mk(settings)

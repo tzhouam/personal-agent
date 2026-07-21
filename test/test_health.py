@@ -3,9 +3,9 @@ needs lifecycle, chat context, and the food-photo flow."""
 
 from datetime import date, timedelta
 
-from assistant.actions import run_action
-from assistant.chat.agent import build_context, handle_message
-from assistant.health_store import HealthStore, render_summary
+from assistant.agent.actions import run_action
+from assistant.agent.chat.agent import build_context, handle_message
+from assistant.agent.health_store import HealthStore, render_summary
 
 
 class FakeLLM:
@@ -175,8 +175,8 @@ def test_food_photo_flow_native_multimodal(settings, tmp_path):
 
 
 def test_crosslinks_join_the_stores(settings):
-    from assistant.finance_store import FinanceStore
-    from assistant.insights import build_crosslinks
+    from assistant.agent.finance_store import FinanceStore
+    from assistant.agent.insights import build_crosslinks
 
     finance = FinanceStore(settings.profile_dir)
     health = HealthStore(settings.profile_dir)
@@ -202,7 +202,7 @@ def test_crosslinks_join_the_stores(settings):
 
 
 def test_crosslinks_in_chat_context(settings):
-    from assistant.finance_store import FinanceStore
+    from assistant.agent.finance_store import FinanceStore
 
     FinanceStore(settings.profile_dir).add("expense", 45, category="food",
                                            note="午饭", time="12:30")
