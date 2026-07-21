@@ -107,13 +107,30 @@ def list_users(settings: Settings) -> str:
     return "\n".join(out)
 
 
+# The shared-lessons store is agent-owned (self-evolution). This platform module
+# governs it but does not import it: the agent registers a factory
+# `(settings) -> store` here (see `agent.wiring`), keeping admin.py agent-free.
+_shared_lessons_factory = None
+
+
+def set_shared_lessons_factory(factory) -> None:
+    """Register the agent-side `(settings) -> shared_lessons_store` factory."""
+    global _shared_lessons_factory
+    _shared_lessons_factory = factory
+
+
+def _shared_lessons(settings):
+    if _shared_lessons_factory is None:
+        raise RuntimeError("shared-lessons store not configured — import "
+                           "assistant.agent.wiring to register it")
+    return _shared_lessons_factory(settings)
+
+
 def list_shared_lessons(settings: Settings) -> str:
     """The shared (cross-user) lessons roster: id · created · rule — why
     (provenance). These render into EVERY user's prompts; retire what misfires."""
     _require_multi_tenant(settings)
-    from .lessons_store import shared_store
-
-    rows = shared_store(settings).active()
+    rows = _shared_lessons(settings).active()
     if not rows:
         return "(no active shared lessons)"
     return "\n".join(f"[{l['id']}] {l.get('created', '?')}  {l['rule']}"
@@ -125,9 +142,7 @@ def retire_shared_lesson(settings: Settings, lesson_id: str) -> str:
     """Retire (never delete) one shared lesson — it leaves every user's prompts
     on their next turn."""
     _require_multi_tenant(settings)
-    from .lessons_store import shared_store
-
-    ok = shared_store(settings).retire(str(lesson_id))
+    ok = _shared_lessons(settings).retire(str(lesson_id))
     return (f"retired shared lesson {lesson_id}" if ok
             else f"no active shared lesson {lesson_id!r}")
 

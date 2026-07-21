@@ -207,6 +207,19 @@ ANNOUNCE_TO=
 """
 
 
+# Seeding a new tenant's profile.yaml is agent-owned (the ProfileStore lives in
+# the agent layer). This platform module provisions the tenant but delegates the
+# profile seed to an injected `(profile_dir, display, uid) -> None` callback the
+# agent registers (see `agent.wiring`), keeping onboarding.py agent-free.
+_profile_seeder = None
+
+
+def set_profile_seeder(seeder) -> None:
+    """Register the agent-side profile seeder used during provisioning."""
+    global _profile_seeder
+    _profile_seeder = seeder
+
+
 def provision_user(base_settings: Settings, account_id: str, display: str) -> str:
     """Transactionally create a new tenant for `account_id` with display name
     `display`. Under the shared lock: mint an opaque uid, register + bind the
@@ -215,7 +228,9 @@ def provision_user(base_settings: Settings, account_id: str, display: str) -> st
     failure after `add_user`, roll back (remove the record + the partial dir)
     and re-raise, so a failure never leaves a half-provisioned user. Returns the
     uid."""
-    from .profile_store import ALIASES_TEMPLATE, ProfileStore
+    if _profile_seeder is None:
+        raise RuntimeError("profile seeder not configured — import "
+                           "assistant.agent.wiring to register it")
 
     reg = UserRegistry(base_settings.data_dir)
     with _path_lock(_lock_path(base_settings.shared_dir)):
@@ -231,13 +246,7 @@ def provision_user(base_settings: Settings, account_id: str, display: str) -> st
             # isolation and any non-default base. profile_dir mirrors
             # Settings.profile_dir = <data_dir>/profile.
             profile_dir = udir / "profile"
-            store = ProfileStore(profile_dir)
-            store.save({"identity": {"name": display}, "skills": [],
-                        "projects": [], "interests": []},
-                       f"onboard {uid}: seed profile")
-            aliases = profile_dir / "aliases.yaml"
-            if not aliases.exists():
-                aliases.write_text(ALIASES_TEMPLATE)
+            _profile_seeder(profile_dir, display, uid)
             cfg = udir / "config.env"
             if not cfg.exists():
                 cfg.touch(mode=0o600)
