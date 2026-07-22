@@ -17,6 +17,9 @@ class FakeLLM:
         self.prompts.append(prompt)
         return self.result
 
+    def complete(self, prompt, system=None, **kw):
+        return ""   # onboarding name-extraction: empty → deterministic fallback
+
 
 @pytest.fixture
 def server(settings):
