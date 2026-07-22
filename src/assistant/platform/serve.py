@@ -351,6 +351,18 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_bytes(self, code: int, content_type: str, body: bytes,
+                        extra: dict | None = None) -> None:
+            """Write raw `body` bytes with `content_type` (e.g. the login-QR PNG)
+            plus any `extra` headers."""
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            for key, val in (extra or {}).items():
+                self.send_header(key, val)
+            self.end_headers()
+            self.wfile.write(body)
+
         def _authorized(self, settings: Settings) -> bool:
             """Gate a request on the bearer token: open when no `serve_token` is
             configured, else require an exact `Authorization: Bearer <token>`.
@@ -419,6 +431,22 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             `resolve_uid` except `/healthz` (§A.2)."""
             if urlsplit(self.path).path == "/healthz":
                 return self._send(200, {"ok": True})
+            if urlsplit(self.path).path == "/qr":
+                # Deployment-global operator route (NOT per-user): serve the
+                # current always-on login QR. Gated on the serve token directly —
+                # it must never require a resolved uid. The PNG is held in memory
+                # by the refresher; ?format=json returns just the fallback URL/ts.
+                boot = settings_factory()
+                if boot.serve_token and self._bearer() != boot.serve_token:
+                    return self._send(401, {"error": "unauthorized"})
+                refresher = getattr(self.server, "qr_refresher", None)
+                cur = refresher.current() if refresher is not None else None
+                if not cur:
+                    return self._send(503, {"error": "no login QR available yet"})
+                if self._query().get("format") == "json":
+                    return self._send(200, {"url": cur["url"], "ts": cur["ts"]})
+                return self._send_bytes(200, "image/png", cur["png"],
+                                        extra={"X-QR-URL": cur["url"]})
             try:
                 _uid, settings, _store, _pfx = self._resolve(self._query())
             except Unauthorized as exc:
@@ -773,6 +801,18 @@ def run_serve(settings: Settings, services=None) -> int:
         return 1
 
     server = make_server(services=services)
+
+    # Always-on login-QR refresher (deployment-global): keep a freshly-rendered
+    # WeChat login QR available at loopback GET /qr so an invitee can scan any
+    # time. Off when login_qr_refresh is disabled.
+    qr = None
+    if settings.login_qr_refresh:
+        from assistant.platform.login_qr import LoginQRRefresher
+
+        qr = LoginQRRefresher(settings).start()
+        server.qr_refresher = qr
+        log.info("serve: login-QR refresher started (always-on) → GET /qr")
+
     stop = threading.Event()
     poller = threading.Thread(
         target=_chat_poll_loop,
@@ -800,6 +840,8 @@ def run_serve(settings: Settings, services=None) -> int:
         """Signal handler: log the signal and trigger a graceful shutdown."""
         log.info("serve: signal %d — shutting down", signum)
         stop.set()
+        if qr is not None:
+            qr.stop()
         if pool is not None:
             pool.stop()
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -811,6 +853,8 @@ def run_serve(settings: Settings, services=None) -> int:
              server.server_address[1], settings.chat_poll_seconds)
     server.serve_forever()
     stop.set()
+    if qr is not None:
+        qr.stop()
     if pool is not None:
         pool.stop()
     return 0

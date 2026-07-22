@@ -177,6 +177,13 @@ class Settings(BaseSettings):
     # local processes out.
     serve_port: int = 8377
     serve_token: str = ""
+    # Always-on WeChat login-QR refresher (platform.login_qr): the daemon keeps a
+    # freshly-rendered login QR available at loopback GET /qr so an invitee can
+    # scan any time (openclaw's own login gives up after 3 refreshes). Deployment-
+    # global infra, NOT a per-user field. ⚠️ Exercises the unverified A.8 path
+    # continuously against the live account — the QR is a join credential, so the
+    # /qr route is serve-token-gated and the image is NEVER written to a repo.
+    login_qr_refresh: bool = True
     job_workers: int = 2            # in-process worker threads draining the durable
                                     # job queue in multi_tenant (§6)
     moa_chat_proposer_timeout_s: int = 60   # chat-role MoA: abandon a proposer
