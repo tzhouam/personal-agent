@@ -35,6 +35,8 @@ def _dispatch_admin(settings: Settings, args) -> int:
             print(admin.bind_channel(settings, args.uid, args.channel, args.external_id))
         elif args.admin_cmd == "schedule":
             print(admin.set_schedule(settings, args.uid, args.schedule))
+        elif args.admin_cmd == "set-display":
+            print(admin.set_display(settings, args.uid, args.display))
         elif args.admin_cmd == "set-bridge-token":
             print(admin.set_bridge_token(settings, args.token))
         elif args.admin_cmd == "migrate-single-user":
@@ -179,6 +181,9 @@ def main() -> None:
                                               "(daily = scheduled; on_demand = self-serve only)")
     sc.add_argument("uid")
     sc.add_argument("schedule", choices=["daily", "on_demand"])
+    sd = admin_sub.add_parser("set-display", help="rename a user's display name (metadata)")
+    sd.add_argument("uid")
+    sd.add_argument("display")
     st = admin_sub.add_parser("set-bridge-token", help="store the bridge token hash")
     st.add_argument("token")
     mig = admin_sub.add_parser("migrate-single-user",
