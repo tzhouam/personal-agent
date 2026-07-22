@@ -196,11 +196,20 @@ def _connect_github(settings: Settings, p: dict) -> str:
     it back."""
     import httpx
 
+    from assistant.platform.secrets import looks_like_github_token
     from assistant.platform.user_config import update_user_config
 
-    token = str(p.get("token", "")).strip()
+    # The token is bound from the owner's RAW message upstream (chat/agent.py) —
+    # never from the model's echo, which on a retry is the masked `github_pat_…`
+    # read back from history. Validate the shape here too (defense in depth for
+    # the CLI/direct path): a masked/partial token contains the non-ASCII `…` and
+    # must be rejected, not sent into an HTTP header (that crashes on encode).
+    token = looks_like_github_token(p.get("token"))
     if not token:
-        return "no token found — paste your GitHub token (ghp_… or github_pat_…)."
+        return ("没收到完整的 token。请把 GitHub token 完整地直接粘贴给我"
+                "（形如 ghp_… 或 github_pat_…，全是字母和数字，别带省略号/空格）。\n"
+                "I didn't get a complete token — paste the full GitHub token "
+                "(all letters/numbers, no '…').")
     try:
         resp = httpx.get("https://api.github.com/user",
                          headers={"Authorization": f"Bearer {token}",

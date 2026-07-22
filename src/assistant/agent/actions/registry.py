@@ -100,12 +100,14 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         description="store the owner's GitHub token (pasted in chat) after "
                     "validating it — prerequisite for building their website",
         handler=_connect_github,
-        params={"token": {"required": True,
-                          "desc": "the GitHub token the owner pasted (ghp_… / github_pat_…)"}},
+        params={"token": {"required": False,
+                          "desc": "leave empty — the real token is read from the owner's "
+                                  "message by code; do NOT copy or abbreviate it yourself"}},
         llm=True,
-        prompt_example='{"type": "connect_github", "token": "ghp_…"}   # owner pasted a '
-                       'GitHub token / said "connect my github" — the raw token is scrubbed '
-                       'from history automatically',
+        prompt_example='{"type": "connect_github"}   # emit this whenever the owner pastes '
+                       'a GitHub token or asks to connect GitHub. Do NOT put the token in '
+                       'the JSON — code extracts it from their message; the raw token is '
+                       'scrubbed from history automatically',
         slash="connect",
     ),
     Action(

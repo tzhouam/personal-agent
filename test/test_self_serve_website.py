@@ -84,6 +84,41 @@ def test_connect_github_rejects_bad_token(mt_settings, monkeypatch):
     assert not (mt_settings.data_dir / "config.env").exists()   # nothing persisted
 
 
+def test_connect_github_rejects_masked_token_without_crashing(mt_settings, monkeypatch):
+    # Regression: a masked token (github_pat_…KFh, the form the LLM echoes from
+    # history) must NOT reach httpx — the non-ASCII '…' used to crash on header
+    # encode ('ascii' codec can't encode '…').
+    def _boom(*a, **k):
+        raise AssertionError("httpx.get must not be called with a masked token")
+    monkeypatch.setattr(httpx, "get", _boom)
+    msg = run_action("connect_github", {"token": "github_pat_…KFh"}, mt_settings)
+    assert "完整" in msg or "complete token" in msg
+    assert not (mt_settings.data_dir / "config.env").exists()
+
+
+def test_find_and_validate_github_token():
+    from assistant.platform.secrets import find_github_token, looks_like_github_token
+    real = "github_pat_11AT4MNKI03po409CESWrQ_QZpnRzich1PBxAhxldWUZkCAkkdMj27FRpZi2IVGjsd4OHZM"
+    assert find_github_token(f"here you go: {real} thanks") == real
+    assert find_github_token("ghp_" + "A" * 36) == "ghp_" + "A" * 36
+    # a token that wrapped with a stray space still resolves
+    assert find_github_token("github_pat_ " + "B" * 40) == "github_pat_" + "B" * 40
+    assert find_github_token("no token here") == ""
+    # masked form is rejected by the validator (non-ASCII '…')
+    assert looks_like_github_token("github_pat_…KFh") is None
+    assert looks_like_github_token(real) == real
+
+
+def test_bind_github_token_uses_raw_message_not_llm_echo():
+    from assistant.agent.chat.agent import _bind_github_token
+    real = "ghp_" + "Z" * 36
+    actions = [{"type": "connect_github", "token": "github_pat_…KFh"}]   # LLM's masked echo
+    bound = _bind_github_token(actions, f"connect my github {real}")
+    assert bound[0]["token"] == real                                     # overridden from raw text
+    # no token in the raw message → cleared so the handler asks for it
+    assert _bind_github_token([{"type": "connect_github", "token": "x"}], "connect it")[0]["token"] == ""
+
+
 # ── build_personal_website (synchronous pre-flight) ──────────────────
 
 def _stub_status(monkeypatch, state):
