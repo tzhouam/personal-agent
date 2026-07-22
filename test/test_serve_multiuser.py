@@ -21,6 +21,9 @@ class FakeLLM:
         self.prompts.append(prompt)
         return self.result
 
+    def complete(self, prompt, system=None, **kw):
+        return ""   # onboarding name-extraction: empty → deterministic fallback
+
 
 BRIDGE = "bridge-secret-token"
 

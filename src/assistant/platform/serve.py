@@ -484,7 +484,8 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                         from assistant.platform.onboarding import handle
 
                         try:
-                            reply = handle(acct, str(body.get("text", "")), base)
+                            reply = handle(acct, str(body.get("text", "")), base,
+                                           make_llm(base))
                             return self._send(200, {"reply": reply})
                         except BrokenPipeError:
                             return None
