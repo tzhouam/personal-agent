@@ -57,6 +57,16 @@ def set_schedule(settings: Settings, uid: str, schedule: str) -> str:
     return f"{uid} schedule set to {schedule}"
 
 
+def set_display(settings: Settings, uid: str, display: str) -> str:
+    """Rename a user's human display name (roster metadata, not identity). The
+    profile's identity.name is agent-owned and fixed separately."""
+    _require_multi_tenant(settings)
+    if not str(display).strip():
+        raise ValueError("display must be non-empty")
+    UserRegistry(settings.data_dir).set_display(uid, str(display).strip())
+    return f"{uid} display set to {display.strip()!r}"
+
+
 def set_bridge_token(settings: Settings, token: str) -> str:
     """Store the hash of the (single) bridge↔daemon token; the bridge keeps the
     plaintext (§A.6). Refuses an empty token — an empty token is never valid."""

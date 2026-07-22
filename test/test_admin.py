@@ -24,6 +24,15 @@ def test_add_bind_list(root):
     assert "alice1" in listed and "active" in listed and "weixin:wx-A" in listed
 
 
+def test_set_display_renames(root):
+    settings, data_dir = root
+    admin.add_user(settings, "alice1", "可以叫我 Alice")
+    admin.set_display(settings, "alice1", "Alice")
+    assert UserRegistry(data_dir).get("alice1")["display"] == "Alice"
+    with pytest.raises(ValueError):
+        admin.set_display(settings, "alice1", "   ")     # empty rejected
+
+
 def test_add_user_requires_multi_tenant(tmp_path, monkeypatch):
     monkeypatch.setenv("DEPLOYMENT_MODE", "single_user")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))

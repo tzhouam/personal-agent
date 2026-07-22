@@ -169,6 +169,15 @@ class UserRegistry:
         u["status"] = status
         self._save(data)
 
+    def set_display(self, uid: str, display: str) -> None:
+        """Set a user's human display name (metadata only — never identity)."""
+        data = self._load()
+        u = next((x for x in data["users"] if x["uid"] == uid), None)
+        if u is None:
+            raise KeyError(uid)
+        u["display"] = str(display)
+        self._save(data)
+
     def remove_user(self, uid: str) -> None:
         """Drop the user's record + channel bindings (called **last** in the
         deletion protocol, after jobs/creds are already revoked)."""
