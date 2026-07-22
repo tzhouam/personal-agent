@@ -42,6 +42,15 @@ def _dispatch_task(settings, args, token):
              force_resume=bool(args.get("approved_task_id")))
 
 
+def _dispatch_build_website(settings, args, token):
+    """Self-serve on-demand website build (provision → enrich → publish). Runs
+    under the tenant's own Settings; notifies the user on completion/failure."""
+    from assistant.agent.tasks.build_website import build_website
+    token.check()
+    build_website(settings, overwrite=bool(args.get("overwrite")),
+                  cancel_check=token.check)
+
+
 def _dispatch_evolve(settings, args, token):
     """Weekly per-user personal-lessons pass (§12b layer 1)."""
     from assistant.agent.tasks.evolve import evolve
@@ -85,6 +94,7 @@ def build_dispatch() -> Dispatch:
         "run": _dispatch_run,
         "run_phase": _dispatch_run_phase,
         "task": _dispatch_task,
+        "build_website": _dispatch_build_website,
         "evolve": _dispatch_evolve,
         "global_evolve": _dispatch_global_evolve,
         "self_improve": _dispatch_self_improve,

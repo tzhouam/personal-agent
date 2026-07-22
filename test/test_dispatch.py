@@ -14,7 +14,7 @@ import pytest
 
 from assistant.agent.dispatch import build_dispatch
 
-KINDS = {"run", "run_phase", "task", "evolve", "global_evolve", "self_improve"}
+KINDS = {"run", "run_phase", "task", "build_website", "evolve", "global_evolve", "self_improve"}
 
 
 class _Token:
