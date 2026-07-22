@@ -109,6 +109,19 @@ def test_find_and_validate_github_token():
     assert looks_like_github_token(real) == real
 
 
+def test_context_reports_github_connected(settings):
+    # conftest `settings` has github_user="tester" — the status line must say
+    # connected, so the model never claims failure from the masked history token.
+    from assistant.agent.chat.agent import build_context
+    ctx = build_context(settings)
+    assert "Connected ✓ as tester" in ctx and "SECURITY MASK" in ctx
+
+
+def test_context_reports_github_not_connected(mt_settings):
+    from assistant.agent.chat.agent import build_context
+    assert "## GitHub\nNot connected" in build_context(mt_settings)
+
+
 def test_bind_github_token_uses_raw_message_not_llm_echo():
     from assistant.agent.chat.agent import _bind_github_token
     real = "ghp_" + "Z" * 36

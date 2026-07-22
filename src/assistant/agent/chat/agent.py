@@ -106,6 +106,15 @@ emit set_reminder — the agent messages WeChat by itself at that time. When the
 something RECURRING ("every workday…", "each morning…", possibly gated on a real-world
 condition like a weather alert), emit create_routine, not set_reminder.
 
+GitHub / personal website: when the owner pastes a GitHub token (github_pat_… or ghp_…) or asks
+to connect GitHub, emit connect_github — do NOT copy the token into the action, code reads it
+from their message. When they ask to build or publish their site, emit build_personal_website. A
+token that appears as "github_pat_…" or "ghp_…" in the conversation history is a SECURITY MASK
+meaning it was received and saved — it does NOT mean the token was incomplete or truncated. To
+say whether GitHub is connected, read the "## GitHub" context line ONLY; never infer failure
+from a masked token, and never tell the owner their token "带省略号/不完整/没连上" when that line
+says connected.
+
 Finance: when the owner mentions money spent/earned ("午饭花了45", "发工资了", or a payment
 receipt/bill screenshot), emit log_transaction with the amount, kind, and a sensible category.
 ALWAYS extract the transaction time when it is visible anywhere — receipts show a payment
@@ -225,6 +234,18 @@ def build_context(settings: Settings) -> str:
     profile_store = ProfileStore(settings.profile_dir)
     if profile_store.exists():
         parts.append("## Owner profile\n" + render_summary(profile_store.load()))
+
+    # GitHub connection status — the ground truth for "连上了吗?". Without this the
+    # model reads the security-MASKED token in history (github_pat_…) and wrongly
+    # tells the owner their token was incomplete / the connect failed.
+    if settings.github_user and settings.github_token:
+        parts.append(f"## GitHub\nConnected ✓ as {settings.github_user}. A token shown as "
+                     "'github_pat_…' / 'ghp_…' in the history is a SECURITY MASK (received & "
+                     "saved) — NOT an incomplete token. If asked, GitHub IS connected; the "
+                     "owner can now ask to build their personal website.")
+    else:
+        parts.append("## GitHub\nNot connected. The owner can paste a full GitHub token to "
+                     "connect, then ask to build their personal website.")
 
     # context budget: the full todo list once hit 18KB of a 23KB context —
     # show the top of the urgency ranking, summarize the rest
