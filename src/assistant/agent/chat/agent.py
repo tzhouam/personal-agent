@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from assistant.agent.actions import RETRIEVAL_ACTIONS, execute, looks_failed, prompt_block, run_action
+from assistant.platform.secrets import find_github_token
 from assistant.platform.config import Settings
 from assistant.platform.llm import LLM
 from assistant.agent.profile_store import ProfileStore, render_summary
@@ -337,6 +338,22 @@ def build_context(settings: Settings) -> str:
     return "\n\n".join(parts)
 
 
+def _bind_github_token(actions: list, text: str) -> list:
+    """For any `connect_github` action, replace the model's `token` param with
+    the real token extracted DETERMINISTICALLY from the owner's raw message. The
+    model is an unreliable carrier for a 90-char secret — on a retry it echoes
+    the masked `github_pat_…KFh` from history (which then crashes the HTTP
+    header on the non-ASCII `…`). If the raw message holds no token, the param
+    is cleared so the handler asks the owner to paste it."""
+    if not actions:
+        return actions
+    token = find_github_token(text)
+    for a in actions:
+        if isinstance(a, dict) and a.get("type") == "connect_github":
+            a["token"] = token
+    return actions
+
+
 def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
                 history: list[dict] | None = None,
                 image_paths: list[str] | None = None) -> TurnResult:
@@ -460,7 +477,7 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
     if not isinstance(result, dict):
         return _finish("(assistant error: unparseable model response)", "fail")
     reply = str(result.get("reply", "")).strip()
-    actions = result.get("actions") or []
+    actions = _bind_github_token(result.get("actions") or [], text)
     self_check = result.get("self_check")
     model_feedback = result.get("prev_feedback")
     outcomes = execute(actions, settings)
@@ -481,7 +498,7 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
                 system=system, max_tokens=6000, role="chat")
             if isinstance(retry, dict):
                 reply = str(retry.get("reply", "")).strip()
-                actions = retry.get("actions") or []
+                actions = _bind_github_token(retry.get("actions") or [], text)
                 self_check = retry.get("self_check") or self_check
                 model_feedback = retry.get("prev_feedback") or model_feedback
                 outcomes = execute(actions, settings)

@@ -31,3 +31,31 @@ def mask_secrets(text):
     if not text:
         return text
     return _TOKEN_RE.sub(_mask_one, str(text))
+
+
+# Token *finder* — deliberately more permissive than the masker (allows longer
+# tails) so a real, full token pasted in chat is extracted verbatim.
+_FIND_RE = re.compile(r"github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{36,}")
+
+
+def find_github_token(text) -> str:
+    """The first full GitHub token in `text`, or ''. Also retries with spaces and
+    newlines stripped, so a paste that wrapped mid-token still resolves. This is
+    the RELIABLE source of a token — never trust an LLM to echo a 90-char secret
+    (on a retry it emits the masked `github_pat_…KFh` from history)."""
+    raw = str(text or "")
+    for candidate in (raw, raw.replace(" ", "").replace("\n", "").replace("\t", "")):
+        match = _FIND_RE.search(candidate)
+        if match:
+            return match.group(0)
+    return ""
+
+
+def looks_like_github_token(value) -> str | None:
+    """Return the token if `value` is a syntactically valid, ASCII GitHub token,
+    else None. Rejects a masked/partial token (the `…` fails `isascii`), so it
+    never reaches an HTTP header (which would crash on the non-ASCII char)."""
+    value = str(value or "").strip()
+    if value and value.isascii() and _FIND_RE.fullmatch(value):
+        return value
+    return None
