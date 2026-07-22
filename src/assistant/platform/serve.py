@@ -44,6 +44,7 @@ from assistant.platform.identity import Unauthorized, onboarding_candidate, reso
 from assistant.platform.llm import LLM
 from assistant.platform.locks import _path_lock
 from assistant.platform.registry import UserRegistry
+from assistant.platform.secrets import mask_secrets
 
 log = logging.getLogger("assistant")
 
@@ -214,8 +215,12 @@ class SessionStore:
                 recent = self._within(self._all(session_id), self.retention_days * 24)
                 if recent:
                     self._finalize_prev(session_id, recent[-1], prev_verdict)
+            # Mask credential-shaped substrings before they touch disk: a pasted
+            # token (e.g. a connect_github turn) must never persist in the
+            # forever-retained history, and an LLM reply must not echo one back.
             turn = {"ts": datetime.now(timezone.utc).isoformat(),
-                    "owner": owner[:2000], "assistant": assistant[:2000]}
+                    "owner": mask_secrets(owner)[:2000],
+                    "assistant": mask_secrets(assistant)[:2000]}
             if outcome:
                 turn["outcome"] = outcome
             if repaired:

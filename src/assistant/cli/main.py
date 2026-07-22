@@ -33,6 +33,8 @@ def _dispatch_admin(settings: Settings, args) -> int:
             print(admin.list_invites(settings))
         elif args.admin_cmd == "bind-channel":
             print(admin.bind_channel(settings, args.uid, args.channel, args.external_id))
+        elif args.admin_cmd == "schedule":
+            print(admin.set_schedule(settings, args.uid, args.schedule))
         elif args.admin_cmd == "set-bridge-token":
             print(admin.set_bridge_token(settings, args.token))
         elif args.admin_cmd == "migrate-single-user":
@@ -173,6 +175,10 @@ def main() -> None:
     bc.add_argument("uid")
     bc.add_argument("channel", choices=["weixin", "email"])
     bc.add_argument("external_id", help="weixin accountId or email mailbox address")
+    sc = admin_sub.add_parser("schedule", help="set a user's automated-run cadence "
+                                              "(daily = scheduled; on_demand = self-serve only)")
+    sc.add_argument("uid")
+    sc.add_argument("schedule", choices=["daily", "on_demand"])
     st = admin_sub.add_parser("set-bridge-token", help="store the bridge token hash")
     st.add_argument("token")
     mig = admin_sub.add_parser("migrate-single-user",

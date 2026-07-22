@@ -49,6 +49,14 @@ def bind_channel(settings: Settings, uid: str, channel: str, external_id: str) -
     return f"bound {channel}:{external_id} → {uid}"
 
 
+def set_schedule(settings: Settings, uid: str, schedule: str) -> str:
+    """Set a user's automated-run cadence: `daily` (swept into the daily/weekly
+    fan-out) or `on_demand` (no scheduled runs — self-serve only)."""
+    _require_multi_tenant(settings)
+    UserRegistry(settings.data_dir).set_schedule(uid, schedule)
+    return f"{uid} schedule set to {schedule}"
+
+
 def set_bridge_token(settings: Settings, token: str) -> str:
     """Store the hash of the (single) bridge↔daemon token; the bridge keeps the
     plaintext (§A.6). Refuses an empty token — an empty token is never valid."""
@@ -103,7 +111,8 @@ def list_users(settings: Settings) -> str:
     out = []
     for u in rows:
         chans = ", ".join(f"{c['channel']}:{c['id']}" for c in u.get("channels", [])) or "—"
-        out.append(f"{u['uid']:<20} {u.get('status','?'):<9} {chans}")
+        sched = u.get("schedule", "on_demand")
+        out.append(f"{u['uid']:<20} {u.get('status','?'):<9} {sched:<10} {chans}")
     return "\n".join(out)
 
 

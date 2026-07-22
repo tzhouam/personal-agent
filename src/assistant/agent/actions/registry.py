@@ -8,7 +8,7 @@ directly.
 """
 
 from assistant.agent.actions.base import Action, validate
-from assistant.agent.actions.handlers import _add_health_need, _add_todo, _approve_task, _create_workflow, _retire_workflow, _run_workflow, _show_workflow, _update_workflow, _cancel_reminder, _cancel_routine, _create_routine, _done_health_need, _done_reading, _done_todo, _execute_task, _finance_summary, _health_summary, _learn_preference, _list_preferences, _list_reading, _list_reminders, _list_routines, _list_todos, _list_transactions, _log_exercise, _log_meal, _log_transaction, _log_weight, _plan_task, _query_health, _query_transactions, _reboot, _recategorize_transaction, _run_phase, _retire_preference, _run_status, _self_evolve, _set_health_profile, _set_reminder, _show_profile, _trigger_run, _unrelated_reading, _void_transaction, _web_search
+from assistant.agent.actions.handlers import _add_health_need, _add_todo, _approve_task, _build_personal_website, _connect_github, _create_workflow, _retire_workflow, _run_workflow, _show_workflow, _update_workflow, _cancel_reminder, _cancel_routine, _create_routine, _done_health_need, _done_reading, _done_todo, _execute_task, _finance_summary, _health_summary, _learn_preference, _list_preferences, _list_reading, _list_reminders, _list_routines, _list_todos, _list_transactions, _log_exercise, _log_meal, _log_transaction, _log_weight, _plan_task, _query_health, _query_transactions, _reboot, _recategorize_transaction, _run_phase, _retire_preference, _run_status, _self_evolve, _set_health_profile, _set_reminder, _show_profile, _trigger_run, _unrelated_reading, _void_transaction, _web_search
 from assistant.platform.config import Settings
 
 ACTIONS: dict[str, Action] = {a.name: a for a in [
@@ -94,6 +94,35 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         # website publishes to the public site; the other phases are internal
         # (resume's own push already sits behind `approve-resume`)
         risky=lambda p: str(p.get("phase", "")).strip().lower() == "website",
+    ),
+    Action(
+        name="connect_github",
+        description="store the owner's GitHub token (pasted in chat) after "
+                    "validating it — prerequisite for building their website",
+        handler=_connect_github,
+        params={"token": {"required": True,
+                          "desc": "the GitHub token the owner pasted (ghp_… / github_pat_…)"}},
+        llm=True,
+        prompt_example='{"type": "connect_github", "token": "ghp_…"}   # owner pasted a '
+                       'GitHub token / said "connect my github" — the raw token is scrubbed '
+                       'from history automatically',
+        slash="connect",
+    ),
+    Action(
+        name="build_personal_website",
+        description="build & publish the owner's personal website (<login>.github.io) "
+                    "from their GitHub activity — needs connect_github first",
+        handler=_build_personal_website,
+        params={"confirm": {"required": False,
+                            "desc": "truthy / 'overwrite' — replace an existing non-empty site"}},
+        llm=True,
+        prompt_example='{"type": "build_personal_website"}   # owner said "build/make my '
+                       'website from my github"; add "confirm": "overwrite" only when they '
+                       'explicitly agree to replace an existing site',
+        slash="buildsite",
+        # publishes to a public site — a background task must never do this
+        # autonomously; only a live owner request in chat may.
+        risky=True,
     ),
     Action(
         name="reboot",

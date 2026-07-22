@@ -1,8 +1,10 @@
 """Daily-pipeline fan-out scheduler for N users (doc/DESIGN_MULTI_USER.md §12).
 
 Replaces the single 07:00 cron that ran one owner's `assistant run`. In
-`multi_tenant` it iterates `registry.active()` and **enqueues one `run` job per
-user** on the durable queue; the worker pool (§6) drains them with per-user
+`multi_tenant` it iterates `registry.scheduled()` (active users whose
+`schedule` is `daily` — self-serve `on_demand` tenants are skipped) and
+**enqueues one `run` job per user** on the durable queue; the worker pool (§6)
+drains them with per-user
 `run.lock`/`state.json` isolation and a bounded concurrency cap, so the pool size
 is the natural stagger and one user's broken collector can't stall another's.
 
@@ -23,7 +25,7 @@ log = logging.getLogger("assistant")
 
 
 def enqueue_daily_runs(settings: Settings, day: str | None = None) -> list[str]:
-    """Enqueue the daily `run` for every active user; return the uids enqueued.
+    """Enqueue the daily `run` for every scheduled (`daily`) user; return the uids enqueued.
 
     `settings` is the **deployment-root** Settings (its `data_dir` is the root, so
     the registry and shared queue resolve correctly). A uid already queued/running
@@ -34,20 +36,21 @@ def enqueue_daily_runs(settings: Settings, day: str | None = None) -> list[str]:
     day = day or datetime.now().strftime("%Y-%m-%d")
     reg = UserRegistry(settings.data_dir)
     queue = JobQueue(settings.shared_dir)
+    scheduled = reg.scheduled()
     enqueued: list[str] = []
-    for uid in reg.active():
+    for uid in scheduled:
         if queue.enqueue(uid, "run", {}, dedupe_key=f"{uid}:run:{day}") is not None:
             enqueued.append(uid)
     if enqueued:  # ticked every poll cycle — only fresh enqueues are news
-        log.info("scheduler: enqueued daily run for %d/%d active users on %s",
-                 len(enqueued), len(reg.active()), day)
+        log.info("scheduler: enqueued daily run for %d/%d scheduled users on %s",
+                 len(enqueued), len(scheduled), day)
     return enqueued
 
 
 def enqueue_weekly_jobs(settings: Settings, week: str | None = None) -> list[str]:
     """Enqueue the weekly self-evolution set (§12b); returns the enqueued labels.
 
-    Per **active** user: a `run_phase:consolidate` (profile editorial pass) and
+    Per **scheduled** (`daily`) user: a `run_phase:consolidate` (profile editorial pass) and
     an `evolve` (personal lessons from their own chats/tasks). Once per
     deployment: a `global_evolve` (cross-user shared lessons) and a
     `self_improve` (code/workflow PR harness) under `GLOBAL_UID`. Everything is
@@ -59,7 +62,7 @@ def enqueue_weekly_jobs(settings: Settings, week: str | None = None) -> list[str
     reg = UserRegistry(settings.data_dir)
     queue = JobQueue(settings.shared_dir)
     enqueued: list[str] = []
-    for uid in reg.active():
+    for uid in reg.scheduled():
         if queue.enqueue(uid, "run_phase", {"phase": "consolidate"},
                          dedupe_key=f"{uid}:consolidate:{week}") is not None:
             enqueued.append(f"{uid}:consolidate")

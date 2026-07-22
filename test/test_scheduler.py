@@ -1,4 +1,4 @@
-"""Daily fan-out scheduler — one deduped `run` per active user (multi-user §12)."""
+"""Daily fan-out scheduler — one deduped `run` per scheduled (`daily`) user (multi-user §12)."""
 import pytest
 
 from assistant.platform.config import Settings
@@ -9,21 +9,25 @@ from assistant.platform.scheduler import enqueue_daily_runs
 
 @pytest.fixture
 def root(tmp_path, monkeypatch):
-    """The deployment-root Settings + a registry with two active + one disabled user."""
+    """The deployment-root Settings + a registry with two scheduled (`daily`)
+    users, one disabled, and one active-but-`on_demand` (self-serve) user — the
+    fan-out sweeps only the `daily` two."""
     monkeypatch.setenv("DEPLOYMENT_MODE", "multi_tenant")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     reg = UserRegistry(tmp_path)
-    reg.add_user("alice1")
-    reg.add_user("bob123")
+    reg.add_user("alice1", schedule="daily")
+    reg.add_user("bob123", schedule="daily")
     reg.add_user("carol1")
     reg.set_status("carol1", "disabled")
+    reg.add_user("dave12")                  # active but on_demand → never scheduled
     return Settings(_env_file=None), tmp_path
 
 
-def test_fan_out_enqueues_one_run_per_active_user(root):
+def test_fan_out_enqueues_one_run_per_scheduled_user(root):
     settings, data_dir = root
     enqueued = enqueue_daily_runs(settings, day="2026-07-15")
-    assert sorted(enqueued) == ["alice1", "bob123"]     # disabled carol skipped
+    # disabled carol AND on_demand dave both skipped — only daily users run
+    assert sorted(enqueued) == ["alice1", "bob123"]
     q = JobQueue(settings.shared_dir)
     assert q.counts() == {"queued": 2}
     assert (data_dir / "shared" / "jobs.db").exists()   # one queue under the root

@@ -74,13 +74,18 @@ def _unrelated_reading(settings: Settings, p: dict) -> str:
 
 # ── run control ──────────────────────────────────────────────────────
 
-def _enqueue(settings: Settings, kind: str, args: dict, dedupe_key: str | None = None):
+def _enqueue(settings: Settings, kind: str, args: dict, dedupe_key: str | None = None,
+             dedupe_scope: str = "all"):
     """Enqueue a background job on the durable queue for **this** user (the
     handler already holds the authenticated `settings.uid` — a job never names
-    another user). Returns the job id, or None if a duplicate was deduped. Only
-    used in `multi_tenant`; single_user keeps the legacy detached-CLI path (§6)."""
+    another user). Returns the job id, or None if a duplicate was deduped.
+    `dedupe_scope="active"` dedupes only against in-flight (queued/running) jobs,
+    so a re-runnable kind (e.g. `build_website`) is allowed again once the prior
+    one finished. Only used in `multi_tenant`; single_user keeps the legacy
+    detached-CLI path (§6)."""
     from assistant.platform.jobs import JobQueue
-    return JobQueue(settings.shared_dir).enqueue(settings.uid, kind, args, dedupe_key)
+    return JobQueue(settings.shared_dir).enqueue(settings.uid, kind, args, dedupe_key,
+                                                 dedupe_scope=dedupe_scope)
 
 
 def _trigger_run(settings: Settings, p: dict) -> str:
@@ -168,6 +173,83 @@ def _run_phase(settings: Settings, p: dict) -> str:
                      stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
     return (f"phase '{phase}' started in the background — I'll have the results "
             "on the website/next digest, or ask me in a few minutes")
+
+
+# ── self-serve website (connect GitHub → build & publish) ────────────
+
+def _classic_scope_gap(scopes: str) -> str:
+    """For a CLASSIC PAT, GitHub returns granted scopes in `x-oauth-scopes`;
+    return a warning fragment if neither `repo` nor `public_repo` is present
+    (creating/pushing the site needs one). A fine-grained token sends no scopes
+    header (per-repo permissions) — we can't inspect it, so accept it and let any
+    real gap surface at publish time."""
+    if not scopes.strip():
+        return ""
+    granted = {s.strip() for s in scopes.split(",")}
+    return "" if ({"repo", "public_repo"} & granted) else "the 'repo' scope"
+
+
+def _connect_github(settings: Settings, p: dict) -> str:
+    """Validate a GitHub token pasted in chat, store it in this tenant's
+    `config.env`, and report the resolved login. The raw token is scrubbed from
+    the persisted history by the SessionStore masker; this handler never echoes
+    it back."""
+    import httpx
+
+    from assistant.platform.user_config import update_user_config
+
+    token = str(p.get("token", "")).strip()
+    if not token:
+        return "no token found — paste your GitHub token (ghp_… or github_pat_…)."
+    try:
+        resp = httpx.get("https://api.github.com/user",
+                         headers={"Authorization": f"Bearer {token}",
+                                  "Accept": "application/vnd.github+json",
+                                  "X-GitHub-Api-Version": "2022-11-28"},
+                         timeout=20)
+    except Exception as exc:
+        return f"couldn't reach GitHub to validate that token: {exc}"
+    if resp.status_code == 401:
+        return "GitHub rejected that token (401) — check it's valid and not expired."
+    if resp.status_code != 200:
+        return f"GitHub rejected that token ({resp.status_code})."
+    login = resp.json().get("login", "")
+    update_user_config(settings.data_dir, {"GITHUB_TOKEN": token, "GITHUB_USER": login})
+    gap = _classic_scope_gap(resp.headers.get("x-oauth-scopes", ""))
+    tail = (f" ⚠️ that token is missing {gap} — creating/pushing your site may fail; "
+            "a classic PAT with 'repo' scope works best." if gap else "")
+    return (f"connected as {login}. Say “build my site” and I'll publish "
+            f"{login}.github.io from your GitHub activity.{tail}")
+
+
+def _build_personal_website(settings: Settings, p: dict) -> str:
+    """Enqueue the on-demand website build after a synchronous pre-flight:
+    require a connected token, and guard against clobbering an existing
+    non-empty `<login>.github.io` (the reply asks the user to confirm
+    'overwrite'). The build itself runs on the durable per-user queue."""
+    from assistant.agent.tasks.build_website import site_repo_status
+
+    if settings.deployment_mode != "multi_tenant":
+        return "the self-serve website build is a multi_tenant feature."
+    try:
+        st = site_repo_status(settings)
+    except Exception as exc:
+        return f"couldn't check your GitHub site repo: {exc}"
+    state = st.get("state")
+    if state == "missing_token":
+        return "send me your GitHub token first — paste your ghp_… (or github_pat_…) token here."
+    if state == "no_login":
+        return "GitHub isn't fully connected — paste your token again and I'll resolve your login."
+    confirm = str(p.get("confirm", "")).strip().lower() in ("1", "true", "yes", "y", "overwrite")
+    if state == "nonempty" and not confirm:
+        return (f"you already have a site at {st['url']} — reply “overwrite” and I'll "
+                "replace it with a fresh one built from your GitHub activity.")
+    job = _enqueue(settings, "build_website", {"overwrite": confirm},
+                   dedupe_key=f"{settings.uid}:build_website", dedupe_scope="active")
+    if job is None:
+        return "a website build is already running for you — I'll message you when it's live."
+    return (f"building your site now (enrich + publish, ~a few minutes). It'll be live "
+            f"at {st['url']} — I'll message you when it's done.")
 
 
 # ── profile ──────────────────────────────────────────────────────────
