@@ -11,7 +11,7 @@ import yaml
 from assistant.platform import admin
 from assistant.platform.config import Settings
 from assistant.platform.identity import onboarding_candidate
-from assistant.platform.onboarding import InviteStore, handle, provision_user
+from assistant.platform.onboarding import InviteStore, _extract_name, handle, provision_user
 from assistant.platform.registry import UserRegistry
 from assistant.platform.serve import make_server
 
@@ -102,6 +102,38 @@ def test_handle_full_flow(tmp_path):
     # a now-bound account is no longer an onboarding candidate
     assert onboarding_candidate("t", {"account_id": "wx-1"}, base,
                                 UserRegistry(base.data_dir)) is None
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("可以叫我spencer", "spencer"),
+    ("可以叫我 Spencer", "Spencer"),
+    ("叫我小明", "小明"),
+    ("我叫张三", "张三"),
+    ("我是老王", "老王"),
+    ("你可以称呼我：阿强", "阿强"),
+    ("call me Spencer", "Spencer"),
+    ("You can call me Bob", "Bob"),
+    ("my name is Alice", "Alice"),
+    ("I'm Dave", "Dave"),
+    ("Spencer", "Spencer"),          # plain name untouched
+    ("小明", "小明"),
+    ('"Nina"', "Nina"),              # wrapping quotes stripped
+    ("Imani", "Imani"),              # real name that merely starts with 'i' letters
+])
+def test_extract_name_strips_natural_language_leadins(reply, expected):
+    assert _extract_name(reply) == expected
+
+
+def test_handle_extracts_name_from_conversational_reply(tmp_path):
+    """Regression: a reply like '可以叫我spencer' must provision display 'spencer',
+    not the whole phrase (onboarding.py name-capture bug)."""
+    base = _base(tmp_path)
+    code = InviteStore(base.shared_dir).create()
+    handle("wx-9", code, base)
+    welcome = handle("wx-9", "可以叫我spencer", base)
+    assert "欢迎，spencer！" in welcome
+    uid = UserRegistry(base.data_dir).by_channel("weixin", "wx-9")
+    assert UserRegistry(base.data_dir).get(uid)["display"] == "spencer"
 
 
 def test_handle_bounds_bad_code_attempts(tmp_path):

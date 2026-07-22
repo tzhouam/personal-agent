@@ -269,6 +269,33 @@ _ASK_CODE = "你好！请发送邀请码开始使用 👋"
 _BAD_CODE = "邀请码无效或已过期，请检查后重发 🙏"
 _ASK_NAME = "邀请码有效 ✅ 请回复你想让我怎么称呼你（昵称）"
 
+# Natural-language lead-ins people prefix to a name when asked "怎么称呼你" —
+# stripped so "可以叫我spencer" / "call me Spencer" yield "spencer", not the whole
+# phrase. Matched case-insensitively, longest-first; a plain "Spencer" is left as
+# is, and an unmatched reply falls back to the raw text (deterministic — no LLM).
+_NAME_LEADINS = (
+    "你可以称呼我", "你可以叫我", "可以称呼我", "可以叫我", "我的名字是", "我的名字叫",
+    "请你称呼我", "请你叫我", "请称呼我", "请叫我", "就叫我", "称呼我", "名字叫", "名字是",
+    "我叫做", "我叫", "我就是", "我是", "叫我",
+    "you can just call me", "you can call me", "just call me", "please call me",
+    "call me", "my name is", "my name's", "the name is", "the name's", "i am", "i'm",
+)
+
+
+def _extract_name(text: str) -> str:
+    """Pull the intended display name out of a natural-language reply (e.g.
+    'call me Spencer' / '可以叫我 Spencer' → 'Spencer'), falling back to the raw
+    text when no lead-in matches. Deterministic so onboarding stays LLM-free."""
+    raw = str(text or "").strip()
+    candidate, low = raw, raw.lower()
+    for lead in sorted(_NAME_LEADINS, key=len, reverse=True):
+        if low.startswith(lead):
+            candidate = raw[len(lead):]
+            break
+    # drop a separator right after the lead-in and any wrapping quotes/punctuation
+    candidate = candidate.strip(" \t：:，,。.、'\"“”‘’!！?？")
+    return (candidate or raw)[:_MAX_NAME].strip()
+
 
 def handle(account_id: str, text: str, base_settings: Settings) -> str:
     """Run one onboarding turn for an unknown `account_id` and return the reply.
@@ -286,7 +313,7 @@ def handle(account_id: str, text: str, base_settings: Settings) -> str:
     text = str(text or "").strip()
 
     if session.get("state") == "awaiting_name":
-        name = text[:_MAX_NAME].strip()
+        name = _extract_name(text)
         if not name:
             return _ASK_NAME
         try:
