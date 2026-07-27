@@ -275,6 +275,25 @@ def build_context(settings: Settings) -> str:
         except Exception:  # context is best-effort; a bad store must not kill chat
             log.exception("context: %s failed", action)
 
+    # Reminders that never reached the owner. Ground truth, like the GitHub
+    # block above: the failing channel cannot carry its own failure notice, so
+    # without this the model assures the owner a push went out (2026-07-24 —
+    # the owner missed an interview and was told the reminder had been sent).
+    try:
+        from assistant.platform.notify import ReminderStore
+
+        undelivered = ReminderStore(settings.data_dir).failed()
+        if undelivered:
+            parts.append("## Delivery failures (WeChat push did NOT reach the owner)\n"
+                         + "\n".join(f"[{r['id']}] due {r['due_at']} — {r['message']} "
+                                     f"(gave up: {r.get('last_error', 'unknown')})"
+                                     for r in undelivered[-5:])
+                         + "\nSay these were NOT delivered. Never claim a reminder was "
+                           "pushed when it is listed here; deliver the content in this "
+                           "reply instead and tell the owner the push channel is broken.")
+    except Exception:
+        log.exception("context: reminder failures failed")
+
     try:  # saved workflows: the ids run_workflow needs (only when any exist)
         from assistant.agent.workflow_store import WorkflowStore
 

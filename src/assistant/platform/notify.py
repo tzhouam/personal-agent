@@ -68,10 +68,36 @@ def send_wechat(settings: Settings, text: str) -> str:
 
 _RELATIVE = re.compile(r"^\+?(\d+)\s*(m|min|minutes?|h|hours?|d|days?)$", re.IGNORECASE)
 
+# How many poll cycles a due reminder may fail to send before it is
+# dead-lettered rather than retried forever (~60s apart).
+_MAX_DELIVERY_ATTEMPTS = 3
+
+
+def _record_failure_metric(settings: Settings) -> None:
+    """Record one `reminder/failed` row through the registered metrics sink so a
+    give-up reaches the digest health footer. Best-effort and agent-free: the
+    sink is the agent-supplied implementation (`agent/observability.py`), absent
+    in a bare platform process, in which case this is a no-op."""
+    from assistant.platform.llm import get_default_metrics_sink
+
+    sink = get_default_metrics_sink()
+    if sink is None:
+        return
+    try:
+        sink(settings, datetime.now().strftime("reminder-%Y%m%d"), "reminder",
+             {"failed": 1})
+    except Exception:  # metrics must never break delivery
+        log.debug("reminder failure metric not recorded", exc_info=True)
+
 
 def parse_when(when: str, now: datetime | None = None) -> datetime | None:
     """'+30m' / '+2h' / '+1d', 'HH:MM' (today, or tomorrow if past),
-    'YYYY-MM-DD HH:MM' — None if unparseable."""
+    'YYYY-MM-DD HH:MM', or full ISO-8601 — None if unparseable.
+
+    ISO-8601 is accepted because that is what the chat model naturally emits for
+    an absolute time ('2026-07-24T20:55:00+08:00'); rejecting it cost a repair
+    round on every such reminder. An offset-aware value is converted to system
+    local time and stored naive, since reminders fire against the system clock."""
     now = now or datetime.now()
     when = str(when).strip()
     match = _RELATIVE.match(when)
@@ -79,6 +105,11 @@ def parse_when(when: str, now: datetime | None = None) -> datetime | None:
         amount = int(match.group(1))
         unit = match.group(2)[0].lower()
         return now + timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[unit]: amount})
+    try:
+        parsed = datetime.fromisoformat(when)
+        return (parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo else parsed)
+    except ValueError:
+        pass
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
         try:
             return datetime.strptime(when, fmt)
@@ -148,7 +179,15 @@ class ReminderStore:
         ledger pattern): due reminders are marked sent under the write lock
         BEFORE sending, so a concurrent cancel or second poll cycle can never
         double-send; a failed send un-claims under the lock, so the next cycle
-        retries. Returns what was actually delivered."""
+        retries. Returns what was actually delivered.
+
+        Retries are bounded: each failure bumps `attempts` and records
+        `last_error`, and at `_MAX_DELIVERY_ATTEMPTS` the reminder is
+        dead-lettered (`sent_at = "failed"`) instead of un-claimed. Unbounded
+        retry is how one broken send path produced 752 identical failures in a
+        day (2026-07-24) while the owner saw nothing — so a give-up also logs at
+        ERROR, records a `reminder/failed` metric, and leaves the record visible
+        to `failed()`, which the chat context reads."""
         from assistant.platform.locks import _path_lock
 
         now = now or datetime.now()
@@ -167,11 +206,34 @@ class ReminderStore:
             if status == "sent":
                 delivered.append(r)
                 continue
-            log.warning("reminder %s delivery failed: %s", r["id"], status)
-            with _path_lock(self._lock_file):  # release the claim → retried
+            attempts, gave_up = 0, False
+            with _path_lock(self._lock_file):
                 data = self._load()
                 for row in data["reminders"]:
-                    if row["id"] == r["id"] and row.get("sent_at") == stamp:
-                        row["sent_at"] = None
+                    if row["id"] != r["id"] or row.get("sent_at") != stamp:
+                        continue
+                    attempts = int(row.get("attempts") or 0) + 1
+                    row["attempts"] = attempts
+                    row["last_error"] = str(status)[:200]
+                    # give up → dead-letter; otherwise un-claim so the next
+                    # poll cycle retries
+                    row["sent_at"] = ("failed" if attempts >= _MAX_DELIVERY_ATTEMPTS
+                                      else None)
+                    gave_up = row["sent_at"] == "failed"
                 self._save(data)
+            if gave_up:
+                log.error("reminder %s gave up after %d attempts: %s",
+                          r["id"], _MAX_DELIVERY_ATTEMPTS, status)
+                _record_failure_metric(settings)
+            else:
+                log.warning("reminder %s delivery failed (attempt %d/%d): %s",
+                            r["id"], attempts, _MAX_DELIVERY_ATTEMPTS, status)
         return delivered
+
+    def failed(self) -> list[dict]:
+        """Reminders that exhausted their delivery attempts and were never sent.
+
+        The owner cannot be told over the channel that just failed, so this is
+        the record the chat context reads to state the truth on the next turn
+        instead of asserting a delivery that never happened."""
+        return [r for r in self._load()["reminders"] if r.get("sent_at") == "failed"]
