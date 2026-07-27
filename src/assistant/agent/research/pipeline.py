@@ -168,8 +168,17 @@ def _gather_feed_items(settings: Settings, health: dict) -> list[dict]:
     """Fetch every configured feed source (≤15 items each), tagging items with
     their source name, language, and a url-hashed `seen_id`. A failing source is
     recorded as FAILED in `health` (surfaced in the email footer) and skipped, so
-    one broken scraper never kills the sweep."""
+    one broken scraper never kills the sweep.
+
+    A *missing* sources file is recorded as a FAILED row of its own rather than
+    passing silently: `load_sources` degrades to `[]` for an absent file, so a
+    misresolved `sources_file` looked exactly like "no news today" — three days
+    of empty industry/中文 sections (2026-07-22→24) raised nothing anywhere.
+    Health values are prefixed `ok:`/`FAILED` so the run can count them."""
     items = []
+    if not settings.sources_file.exists():
+        health["sources"] = f"FAILED: sources file missing ({settings.sources_file})"
+        return items
     for source in feeds.load_sources(settings.sources_file):
         name = source.get("name", source.get("url", "?"))
         try:
@@ -181,7 +190,7 @@ def _gather_feed_items(settings: Settings, health: dict) -> list[dict]:
                 item["lang"] = source.get("lang", "en")
                 item["seen_id"] = "feed-" + hashlib.sha1(item["url"].encode()).hexdigest()[:16]
                 items.append(item)
-            health[name] = f"{len(fetched)} items"
+            health[name] = f"ok: {len(fetched)} items"
         except Exception as exc:
             health[name] = f"FAILED: {type(exc).__name__}"  # surfaced in the email footer
     return items

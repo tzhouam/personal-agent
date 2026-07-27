@@ -54,3 +54,15 @@ def test_parse_atom():
     assert items[0]["title"] == "Post One"
     assert items[0]["url"] == "https://example.com/p1"
     assert "world" in items[0]["summary"] and "<b>" not in items[0]["summary"]
+
+
+def test_missing_sources_file_is_reported_not_silent(settings):
+    """`load_sources` degrades to [] for an absent file, so a misresolved
+    `sources_file` looked exactly like a quiet news day — three days of empty
+    industry/中文 sections (2026-07-22→24) raised nothing anywhere."""
+    from assistant.agent.research.pipeline import _gather_feed_items
+
+    settings.sources_file = settings.data_dir / "nope" / "sources.yaml"
+    health = {}
+    assert _gather_feed_items(settings, health) == []
+    assert health["sources"].startswith("FAILED: sources file missing")
