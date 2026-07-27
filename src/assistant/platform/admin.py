@@ -49,6 +49,15 @@ def bind_channel(settings: Settings, uid: str, channel: str, external_id: str) -
     return f"bound {channel}:{external_id} → {uid}"
 
 
+def unbind_channel(settings: Settings, uid: str, channel: str, external_id: str) -> str:
+    """Drop one channel identity from a user, leaving their other bindings —
+    e.g. the dead accountId a gateway host migration leaves behind."""
+    _require_multi_tenant(settings)
+    removed = UserRegistry(settings.data_dir).unbind_channel(uid, channel, external_id)
+    return (f"unbound {channel}:{external_id} from {uid}" if removed
+            else f"{uid} has no {channel} binding {external_id!r}")
+
+
 def set_schedule(settings: Settings, uid: str, schedule: str) -> str:
     """Set a user's automated-run cadence: `daily` (swept into the daily/weekly
     fan-out) or `on_demand` (no scheduled runs — self-serve only)."""

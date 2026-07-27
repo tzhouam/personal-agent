@@ -149,6 +149,27 @@ class UserRegistry:
             chans.append({"channel": channel, "id": ext})
         self._save(data)
 
+    def unbind_channel(self, uid: str, channel: str, external_id: str) -> bool:
+        """Drop one `(channel, external_id)` binding from `uid`; True if it was
+        there. The precise counterpart to `bind_channel` — a host migration
+        leaves the old accountId bound alongside the live one, and dropping it
+        must not disturb the bindings that still route (which is what
+        `clear_channels` would do)."""
+        ext = str(external_id).strip()
+        if channel == "email":
+            ext = ext.lower()
+        data = self._load()
+        u = next((x for x in data["users"] if x["uid"] == uid), None)
+        if u is None:
+            raise KeyError(uid)
+        kept = [c for c in u.get("channels", [])
+                if not (c["channel"] == channel and str(c["id"]) == ext)]
+        if len(kept) == len(u.get("channels", [])):
+            return False
+        u["channels"] = kept
+        self._save(data)
+        return True
+
     def clear_channels(self, uid: str) -> None:
         """Drop **all** of a user's channel bindings — the credential-revocation
         step of the deletion protocol (§14), so nothing can re-authenticate to

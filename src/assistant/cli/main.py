@@ -33,6 +33,8 @@ def _dispatch_admin(settings: Settings, args) -> int:
             print(admin.list_invites(settings))
         elif args.admin_cmd == "bind-channel":
             print(admin.bind_channel(settings, args.uid, args.channel, args.external_id))
+        elif args.admin_cmd == "unbind-channel":
+            print(admin.unbind_channel(settings, args.uid, args.channel, args.external_id))
         elif args.admin_cmd == "schedule":
             print(admin.set_schedule(settings, args.uid, args.schedule))
         elif args.admin_cmd == "set-display":
@@ -177,6 +179,12 @@ def main() -> None:
     bc.add_argument("uid")
     bc.add_argument("channel", choices=["weixin", "email"])
     bc.add_argument("external_id", help="weixin accountId or email mailbox address")
+    ubc = admin_sub.add_parser("unbind-channel",
+                               help="drop one channel id from a user (e.g. a dead accountId "
+                                    "left behind by a gateway host migration)")
+    ubc.add_argument("uid")
+    ubc.add_argument("channel", choices=["weixin", "email"])
+    ubc.add_argument("external_id", help="weixin accountId or email mailbox address")
     sc = admin_sub.add_parser("schedule", help="set a user's automated-run cadence "
                                               "(daily = scheduled; on_demand = self-serve only)")
     sc.add_argument("uid")

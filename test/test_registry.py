@@ -114,3 +114,22 @@ def test_atomic_save_leaves_no_partial_file(reg, tmp_path):
     assert reg2.verify_bridge_token("t") is True
     # no leftover temp file
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_unbind_channel_drops_one_binding_only(reg):
+    """A gateway host migration leaves the old accountId bound alongside the
+    live one; dropping it must not disturb the bindings that still route."""
+    reg.add_user("alice1")
+    reg.bind_channel("alice1", "weixin", "dead-acct")
+    reg.bind_channel("alice1", "weixin", "live-acct")
+    reg.bind_channel("alice1", "email", "Alice@Example.com")
+
+    assert reg.unbind_channel("alice1", "weixin", "dead-acct") is True
+    assert reg.by_channel("weixin", "dead-acct") is None
+    assert reg.by_channel("weixin", "live-acct") == "alice1"      # still routes
+    assert reg.by_channel("email", "alice@example.com") == "alice1"
+
+    assert reg.unbind_channel("alice1", "weixin", "dead-acct") is False  # idempotent
+    assert reg.unbind_channel("alice1", "email", "ALICE@example.com") is True  # normalized
+    with pytest.raises(KeyError):
+        reg.unbind_channel("ghost1", "weixin", "x")
