@@ -37,6 +37,13 @@ def _digest(out: dict) -> dict:
             "suppressed": out.get("digest", {}).get("suppressed_seen", 0)}
 
 
+def _count_sources(out: dict, prefixes: tuple[str, ...]) -> int:
+    """How many `source_health` rows start with one of `prefixes` — the feed
+    rows are the ones tagged `ok:` or `FAILED`, everything else is a note."""
+    return sum(1 for v in out.get("research", {}).get("source_health", {}).values()
+               if str(v).startswith(prefixes))
+
+
 EXTRACTORS = {
     "collect": _collect,
     "profile": lambda out: {"ops_applied": len(out.get("profile_ops", []))},
@@ -48,9 +55,12 @@ EXTRACTORS = {
         "papers": len(out.get("research", {}).get("papers", [])),
         "paper_quota": out.get("research", {}).get("paper_quota", 0),
         "industry": len(out.get("research", {}).get("industry", [])),
-        "sources_ok": sum(1 for v in out.get("research", {}).get("source_health", {}).values()
-                          if str(v).startswith("ok")),
-        "sources_total": len(out.get("research", {}).get("source_health", {}))},
+        # Only the `ok:`/`FAILED` rows are sources — `source_health` also carries
+        # free-text notes (arxiv candidate counts, the paper quota explanation)
+        # that must not be counted as either. Before this, every value was
+        # free text, so `sources_ok` was structurally stuck at 0.
+        "sources_ok": _count_sources(out, ("ok:",)),
+        "sources_total": _count_sources(out, ("ok:", "FAILED"))},
     "website": lambda out: {
         "pushed": 1 if out.get("website", {}).get("status") in ("pushed", "no_change") else 0},
     "deliver": lambda out: {"email_sent": 1 if out.get("email_sent") else 0},
@@ -112,6 +122,12 @@ def build_health(events, profile_dir, days: int = 7) -> list[tuple[str, str]]:
     red = sum(_series(rows, "digest", "red"))
     suppressed = sum(_series(rows, "digest", "suppressed"))
     lines.append(("digest reds / suppressed", f"{int(red)} / {int(suppressed)}"))
+
+    # a reminder that exhausted its delivery attempts never reached the owner —
+    # the one failure class the agent cannot announce over its own channel
+    undelivered = sum(_series(rows, "reminder", "failed"))
+    if undelivered:
+        lines.append(("⚠ reminders undelivered", str(int(undelivered))))
 
     # red action rate — SRE alerting precision proxy: of github-sourced todos
     # created 7..30 days ago, how many did the owner (or the monitor, on the

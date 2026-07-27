@@ -24,8 +24,12 @@ def test_extractors_cover_all_phases():
         "digest": {"sections": {"red": [{}], "yellow": [], "white": [{}, {}]},
                    "suppressed_seen": 4},
         "todos": {"open_count": 7, "added": ["t1"], "closed": [{}]},
+        # production shape: feed rows are tagged ok:/FAILED, the rest are notes
         "research": {"papers": [{}, {}], "industry": [{}],
-                     "source_health": {"a": "ok", "b": "ok (3 items)", "c": "error"}},
+                     "source_health": {"OpenAI Blog": "ok: 15 items",
+                                       "机器之心": "FAILED: HTTPStatusError",
+                                       "arxiv": "39 candidates from 5 queries",
+                                       "paper quota": "paper quota 10→2: …"}},
         "website": {"status": "pushed"},
         "email_sent": True,
         "curated": {"decayed": [{}]},
@@ -35,8 +39,10 @@ def test_extractors_cover_all_phases():
     assert EXTRACTORS["profile"](out) == {"ops_applied": 2}
     assert EXTRACTORS["digest"](out) == {"red": 1, "yellow": 0, "white": 2, "suppressed": 4}
     assert EXTRACTORS["todos"](out) == {"wip": 7, "added": 1, "auto_closed": 1}
+    # only the ok:/FAILED rows count as sources — the free-text arxiv and quota
+    # notes used to inflate `sources_total` while `sources_ok` sat at 0 forever
     assert EXTRACTORS["research"](out) == {"papers": 2, "paper_quota": 0, "industry": 1,
-                                           "sources_ok": 2, "sources_total": 3}
+                                           "sources_ok": 1, "sources_total": 2}
     assert EXTRACTORS["website"](out) == {"pushed": 1}
     assert EXTRACTORS["deliver"](out) == {"email_sent": 1}
     assert EXTRACTORS["curate"](out) == {"decayed": 1}
