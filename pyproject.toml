@@ -12,6 +12,9 @@ dependencies = [
     "PyYAML>=6.0",
     "tenacity>=8.2",
     "qrcode[pil]>=7.4",
+    # AES-GCM for the website's encrypted private pages + the WeCom callback
+    # crypto — undeclared until 2026-07-27, which broke a fresh-venv deploy.
+    "cryptography>=42",
 ]
 
 [project.scripts]
