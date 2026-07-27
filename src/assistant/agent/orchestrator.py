@@ -12,7 +12,7 @@ import fcntl
 import json
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from langgraph.graph import END, START, StateGraph
 
@@ -39,6 +39,38 @@ log = logging.getLogger("assistant")
 
 _PHASES = ["collect", "profile", "resume", "digest", "todos", "research",
            "website", "deliver", "curate"]
+
+# A resumed run rehydrates artifacts from `runs/<run_id>/`; past this age the
+# artifacts describe a different week, so a fresh run is the honest choice.
+_RESUME_MAX_AGE_DAYS = 2
+
+
+def _resumable(run_id: str, today: date | None = None) -> bool:
+    """Whether `run_id` (``run-YYYYMMDD-HHMMSS``) is recent enough to resume.
+
+    A stuck run used to be re-entered forever: one tenant's 2026-07-17 run was
+    resumed at `deliver` on every scheduled run for days, failing instantly each
+    time and never advancing. Beyond `_RESUME_MAX_AGE_DAYS` the persisted
+    artifacts are stale anyway, so a fresh run is both more useful and more
+    honest. An id in an unrecognized format stays resumable — refusing would
+    silently discard work."""
+    try:
+        stamp = datetime.strptime(run_id.split("-")[1], "%Y%m%d").date()
+    except (IndexError, ValueError):
+        return True
+    return (today or date.today()) - stamp <= timedelta(days=_RESUME_MAX_AGE_DAYS)
+
+
+def seen_key(notification: dict) -> str:
+    """Seen-store key for a GitHub notification: id + the reason it was sent.
+
+    The key deliberately excludes `updated_at`. Keying on it meant every new
+    comment minted a new key, so an active thread was never suppressed and
+    resurfaced as 🔴 every single day (2026-07-20→27: 84 of 165 threads
+    repeated, one on seven consecutive days, 4 items suppressed all week).
+    Including `reason` keeps the one repeat worth showing — an escalation such
+    as subscribed → review_requested is genuinely new information."""
+    return f"gh-notif-{notification.get('id')}-{notification.get('reason', '')}"
 
 
 class Deps:
@@ -161,17 +193,15 @@ def build_graph(deps: Deps):
     def node_digest(state: AssistantState) -> dict:
         """Phase 4: build the ranked GitHub-notification digest from unseen items.
 
-        Notifications are keyed by `gh-notif-<id>-<updated_at>` and filtered
-        against the seen-store so only fresh ones reach the LLM ranker
-        (`build_digest`, sorting into red/yellow/white). Records the count of
-        already-seen items suppressed. On failure it degrades to an empty
-        digest. Returns the digest and advances to `todos`."""
+        Notifications are keyed by `seen_key` (id + reason) and filtered against
+        the seen-store so only fresh ones reach the LLM ranker (`build_digest`,
+        sorting into red/yellow/white). Records the count of already-seen items
+        suppressed. On failure it degrades to an empty digest. Returns the
+        digest and advances to `todos`."""
         notifications = state.get("notifications", [])
         unseen_ids = set(deps.events.filter_unseen(
-            [f"gh-notif-{n['id']}-{n.get('updated_at', '')}" for n in notifications]
-        ))
-        fresh = [n for n in notifications
-                 if f"gh-notif-{n['id']}-{n.get('updated_at', '')}" in unseen_ids]
+            [seen_key(n) for n in notifications]))
+        fresh = [n for n in notifications if seen_key(n) in unseen_ids]
         try:
             digest = build_digest(deps.llm, deps.profile.load(), fresh,
                                   state.get("observations", []))
@@ -226,11 +256,16 @@ def build_graph(deps: Deps):
         `run_research` returns ranked papers plus industry/Chinese feed items;
         each paper is upserted into the persistent reading list (deduped by
         `seen_id`) so the backlog carries across runs. On failure it degrades to
-        empty results. Returns the research payload and the current open reading
-        items, and advances to `website`."""
+        empty results. A source that reports FAILED in `source_health` also
+        becomes a run error, so a dead feed (or a missing sources file) shows up
+        in the digest's error list instead of just looking like a quiet news
+        day. Returns the research payload and the current open reading items,
+        and advances to `website`."""
         try:
             research = run_research(deps.llm, deps.profile.load(), deps.events, settings)
-            errors = []
+            errors = [f"research/{name}: {note}"
+                      for name, note in research.get("source_health", {}).items()
+                      if str(note).startswith("FAILED")]
         except Exception as exc:
             log.exception("research pipeline failed")
             research = {"papers": [], "industry": [], "chinese": [],
@@ -342,7 +377,7 @@ def build_graph(deps: Deps):
                 log.info("wechat announce: %s", note)
             # only mark items seen once actually delivered
             deps.events.mark_seen(
-                [f"gh-notif-{i['id']}-{i.get('updated_at', '')}"
+                [seen_key(i)   # same key builder as node_digest — must stay in lockstep
                  for section in digest.get("sections", {}).values() for i in section]
                 + research.get("seen_ids", []),
                 context=f"digest {run_date}",
@@ -477,10 +512,14 @@ def run(settings: Settings, dry_run: bool = False, resume: bool = False,
 
     prev = load_state(settings.state_file)
 
-    if resume and prev and prev.get("phase") not in (None, "done") and prev.get("run_id"):
+    if (resume and prev and prev.get("phase") not in (None, "done")
+            and prev.get("run_id") and _resumable(prev["run_id"])):
         run_id, start_phase = prev["run_id"], prev["phase"]
         log.info("resuming run %s at phase %s", run_id, start_phase)
     else:
+        if resume and prev and prev.get("run_id") and prev.get("phase") not in (None, "done"):
+            log.warning("run %s is stale (>%d days) — starting fresh instead of resuming",
+                        prev["run_id"], _RESUME_MAX_AGE_DAYS)
         run_id = datetime.now().strftime("run-%Y%m%d-%H%M%S")
         start_phase = "collect"
 

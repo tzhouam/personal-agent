@@ -119,3 +119,58 @@ def test_run_streams_phases_and_cancels_at_boundaries(settings, monkeypatch):
     with pytest.raises(Cancelled):
         orchestrator.run(settings, cancel_check=check)
     assert seen["n"] == 3                             # checked at each boundary
+
+
+def test_seen_key_ignores_updated_at_but_tracks_reason():
+    """The seen key must survive a new comment (which bumps `updated_at`) or the
+    same thread resurfaces as 🔴 every day — 84 of 165 threads repeated over
+    2026-07-20→27, one on seven consecutive days. A changed `reason` is a
+    genuine escalation and does re-surface."""
+    from assistant.agent.orchestrator import seen_key
+
+    monday = {"id": "24782330193", "reason": "mention",
+              "updated_at": "2026-07-26T22:34:23Z"}
+    commented = {**monday, "updated_at": "2026-07-27T09:00:00Z"}
+    escalated = {**commented, "reason": "review_requested"}
+
+    assert seen_key(monday) == seen_key(commented)   # suppressed tomorrow
+    assert seen_key(escalated) != seen_key(monday)   # escalation re-surfaces
+    # digest section items carry the same fields, so marking seen stays in lockstep
+    assert seen_key({**monday, "summary": "…", "todo": "…"}) == seen_key(monday)
+
+
+def test_stale_runs_are_not_resumed():
+    """A run stuck at a phase was re-entered forever: one tenant's 07-17 run was
+    resumed at `deliver` on every scheduled run for days, failing each time."""
+    from datetime import date
+
+    from assistant.agent.orchestrator import _resumable
+
+    today = date(2026, 7, 27)
+    assert _resumable("run-20260727-070037", today)      # today
+    assert _resumable("run-20260725-070039", today)      # within the window
+    assert not _resumable("run-20260717-070103", today)  # the stuck one
+    assert _resumable("custom-run-id", today)            # unknown format → keep work
+
+
+def test_run_starts_fresh_when_the_saved_run_is_stale(settings, monkeypatch):
+    """`run(resume=True)` on a stale state.json mints a new run id instead of
+    re-entering the old one."""
+    from assistant.agent import orchestrator
+    from assistant.agent.state import persist_state
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    persist_state(settings.state_file, run_id="run-20260101-070000", phase="deliver")
+
+    started = {}
+
+    class FakeGraph:
+        def stream(self, initial, stream_mode=None):
+            started["run_id"] = initial["run_id"]
+            started["phase"] = initial["phase"]
+            yield {**initial, "phase": "done"}
+
+    monkeypatch.setattr(orchestrator, "build_graph", lambda deps: FakeGraph())
+    assert orchestrator.run(settings, resume=True) == 0
+    assert started["run_id"] != "run-20260101-070000"
+    assert started["phase"] == "collect"
