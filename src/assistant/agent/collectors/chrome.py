@@ -47,6 +47,14 @@ class ChromeCollector:
         self.allowlist = settings.chrome_allowlist
         self.denylist = settings.chrome_denylist
 
+    def _history_readable(self) -> bool:
+        """Whether the configured History file exists and we may stat it — any
+        OSError (absent, permission denied, dead symlink) means "no history"."""
+        try:
+            return self.history_path.exists()
+        except OSError:
+            return False
+
     def collect(self, since: datetime) -> list[dict]:
         """Return visit Observations from history since `since`, privacy-tiered.
 
@@ -54,11 +62,14 @@ class ChromeCollector:
         lock on the live file, then reads the most recent 2000 visits. Denylisted
         visits are dropped; allowlisted domains yield full `visit` observations
         (title + URL, deduped by URL); every other domain is collapsed into one
-        `domain_visits` count observation (top 25). A missing History file makes
-        the collector a no-op — it degrades, never crashes.
+        `domain_visits` count observation (top 25). A History file that is
+        missing *or unreadable* makes the collector a no-op — it degrades, never
+        crashes. `Path.exists()` re-raises `PermissionError` (unlike ENOENT), so
+        a path under another user's home turned this guard into an error on
+        every single run until the OSError was caught here.
         """
-        if not self.history_path.exists():
-            return []  # no Chrome on this machine — collector is a no-op
+        if not self._history_readable():
+            return []  # no readable Chrome history here — collector is a no-op
 
         # The DB is locked while Chrome runs — always query a copy.
         with tempfile.NamedTemporaryFile(suffix=".sqlite") as tmp:

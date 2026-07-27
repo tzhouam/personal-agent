@@ -111,3 +111,18 @@ def test_chrome_privacy_tiers(settings):
 
 def test_chrome_missing_file_is_noop(settings):
     assert ChromeCollector(settings).collect(datetime.now(timezone.utc)) == []
+
+
+def test_chrome_unreadable_file_is_noop(settings, tmp_path):
+    """An unreadable path (another user's home) must degrade like a missing one:
+    `Path.exists()` raises PermissionError instead of returning False, which
+    turned the collector into a per-run error on the live deployment."""
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "History").write_bytes(b"")
+    blocked.chmod(0o000)
+    try:
+        settings.chrome_history_path = blocked / "History"
+        assert ChromeCollector(settings).collect(datetime.now(timezone.utc)) == []
+    finally:
+        blocked.chmod(0o755)
