@@ -12,7 +12,7 @@ from typing import Annotated
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]  # src/assistant/config.py → repo root
+_REPO_ROOT = Path(__file__).resolve().parents[3]  # src/assistant/platform/config.py → repo root
 
 # The implicit owner in single-user mode. In multi_tenant there is no default —
 # a missing uid is rejected (doc/DESIGN_MULTI_USER.md §6.1).
