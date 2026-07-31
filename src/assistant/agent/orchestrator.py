@@ -433,6 +433,18 @@ def build_graph(deps: Deps):
                                        {"chat_turns_pruned": pruned["turns"]})
         except Exception:
             log.exception("session pruning failed")
+        try:  # Track D: outbox retention (open failures are never pruned)
+            from assistant.platform.delivery import OutboxDB
+
+            db = OutboxDB(settings.data_dir)
+            try:
+                dropped = db.prune()
+                if dropped:
+                    log.info("outbox pruned: %d settled rows", dropped)
+            finally:
+                db.close()
+        except Exception:
+            log.exception("outbox pruning failed")
         try:  # staged chat images (email/wechat/base64) expire with chat history
             cutoff = time.time() - settings.chat_history_max_age_hours * 3600
             media_dir = settings.data_dir / "media"

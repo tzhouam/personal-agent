@@ -17,7 +17,7 @@ condition doesn't hold — "check at 07:30" means one check, not polling).
 import calendar
 import re
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -111,9 +111,15 @@ class RoutineStore:
         return yaml.safe_load(self.path.read_text()) or {"next_id": 1, "routines": []}
 
     def _save(self, data: dict) -> None:
-        """Write the routines structure back, creating the data dir if needed."""
+        """Atomically replace the routines file (tmp + os.replace, 0600) —
+        a crash mid-write must not corrupt the store (Track D §4)."""
+        import os as _os
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        _os.chmod(tmp, 0o600)
+        _os.replace(tmp, self.path)
 
     @locked_transaction
     def add(self, task: str, time: str, days: str = "daily",
@@ -193,6 +199,18 @@ class RoutineStore:
         self._save(data)
 
     @locked_transaction
+    def due_now(self, now: datetime | None = None) -> list[dict]:
+        """Read-only due predicate — EXACTLY claim_due's selection, without
+        the mutation, so the fire path can persist ledger intent BEFORE the
+        YAML shadow (Track D §4 ledger-first ordering)."""
+        now = now or datetime.now()
+        today = now.date().isoformat()
+        return [r for r in self._load()["routines"]
+                if not r.get("cancelled")
+                and day_matches(r["days"], now.date())
+                and r["time"] <= now.strftime("%H:%M")
+                and r.get("last_checked") != today]
+
     def claim_due(self, now: datetime | None = None) -> list[dict]:
         """Atomically select the due routines and mark them checked — one
         locked load→mark→save, so a concurrent poller can't double-fire them
@@ -237,20 +255,121 @@ def check_condition(settings: Settings, condition: str) -> tuple[bool, str]:
 
 
 def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
-    """Run every due routine: gate on its condition, execute the task through
-    the chat agent (full action set), push the result to WeChat. Returns
+    """Run every due routine through the Track D occurrence ledger (design
+    §4): claim (SQLite, token-fenced) → shadow `last_checked` (the old-code
+    guard, written AFTER the ledger claim so a crash window is recordable) →
+    condition check (still `claimed` — a crash here re-claims, it never
+    becomes execution_unknown) → `executing` → TASK → `executed` with output
+    persisted BEFORE delivery → `delivered`/retry. Cycle start recovers stale
+    state: `executing` from a dead process goes `execution_unknown` (side
+    effects may have started — never rerun, surfaced to the owner);
+    executed-but-undelivered output retries DELIVERY ONLY. Returns
     [{id, fired, note}] for logging."""
     from assistant.agent.chat.agent import handle_message
+    from assistant.platform.delivery import OutboxDB
     from assistant.platform.notify import send_wechat
 
     store = RoutineStore(settings.data_dir)
+    now = now or datetime.now()
+    outbox = OutboxDB(settings.data_dir)
     outcomes = []
-    for routine in store.claim_due(now):  # atomic select+mark (one locked write)
+    try:
+        # Recovery first: stale executing → execution_unknown (surfaced);
+        # stale CLAIMED rows are RESUMED (pre-side-effects by definition — a
+        # crash between claim and execution must not strand the occurrence);
+        # executed-but-undelivered output retries DELIVERY ONLY.
+        for row in outbox.routine_recover():
+            if row["state"] == "claimed":
+                routine = next((r for r in store.active()
+                                if r["id"] == row["routine_id"]), None)
+                token = outbox.routine_claim(row["routine_id"],
+                                             row["occurrence"])
+                if token is None:
+                    continue
+                if routine is None:   # cancelled/retired while in flight
+                    outbox.routine_transition(row["routine_id"],
+                                              row["occurrence"], token,
+                                              "cancelled",
+                                              from_states=("claimed",))
+                    continue
+                outcomes.extend(_run_one(settings, outbox, routine,
+                                         row["occurrence"], token,
+                                         handle_message, send_wechat))
+                continue
+            status = send_wechat(
+                settings, f"🔁 [{row['routine_id']}] "
+                + (row["output"] or f"(routine task failed: {row['error']})"))
+            if status == "sent":
+                outbox.routine_delivered(row["routine_id"], row["occurrence"],
+                                         row["claim_token"])
+                outcomes.append({"id": row["routine_id"], "fired": True,
+                                 "note": "delivered on retry"})
+            else:
+                outbox.routine_delivery_failed(row["routine_id"],
+                                               row["occurrence"],
+                                               row["claim_token"], status)
+        outcomes.extend(_fire_new(settings, store, outbox, now,
+                                  handle_message, send_wechat))
+    finally:
+        outbox.close()
+    return outcomes
+
+
+def _fire_new(settings: Settings, store: "RoutineStore", outbox, now,
+              handle_message, send_wechat) -> list[dict]:
+    """The new-occurrence path of `fire_due` (recovery handled by the caller).
+    LEDGER-FIRST (design §4): mint every due occurrence as a `claimed` ledger
+    row BEFORE the YAML `last_checked` shadow — intent persists before any
+    attempt, so a crash anywhere after leaves a recoverable row, never a
+    silently skipped occurrence (a crash between ledger and shadow can only
+    DOUBLE-claim next cycle, which routine_claim absorbs idempotently)."""
+    from assistant.platform.locks import user_write_lock
+
+    outcomes = []
+    with user_write_lock(settings):
+        # due-read → ledger claim → YAML shadow under ONE user write lock:
+        # a cancel (chat executor holds the same lock) can no longer slip
+        # between the read and the shadow and still see its routine run
+        due = store.due_now(now)           # read-only due predicate
+        claims = {}
+        for routine in due:
+            occurrence = f"{now.date().isoformat()} {routine['time']}"
+            token = outbox.routine_claim(routine["id"], occurrence)
+            if token:
+                claims[routine["id"]] = (routine, occurrence, token)
+        store.claim_due(now)               # YAML shadow (old-code guard)
+    for routine, occurrence, token in claims.values():
+        outcomes.extend(_run_one(settings, outbox, routine, occurrence, token,
+                                 handle_message, send_wechat))
+    return outcomes
+
+
+def _run_one(settings: Settings, outbox, routine: dict, occurrence: str,
+             token: str, handle_message, send_wechat) -> list[dict]:
+    """Drive ONE claimed occurrence through condition → execution → delivery.
+    Cancellation is revalidated against the CURRENT store row first — a
+    cancel that landed after the claim closes the occurrence instead of
+    running a routine the owner just cancelled."""
+    outcomes = []
+    current = next((r for r in RoutineStore(settings.data_dir).active()
+                    if r["id"] == routine["id"]), None)
+    if current is None:
+        outbox.routine_transition(routine["id"], occurrence, token,
+                                  "cancelled", from_states=("claimed",))
+        return outcomes
+    routine = current
+    if True:
         holds, why = check_condition(settings, routine.get("condition", ""))
         if not holds:
+            outbox.routine_transition(routine["id"], occurrence, token,
+                                      "condition_false", error=why,
+                                      from_states=("claimed",))
             log.info("routine %s: condition not met (%s)", routine["id"], why)
             outcomes.append({"id": routine["id"], "fired": False, "note": why})
-            continue
+            return outcomes
+        if not outbox.routine_transition(routine["id"], occurrence, token,
+                                         "executing", from_states=("claimed",)):
+            return outcomes   # displaced by a newer claimant (token CAS)
         if routine.get("workflow"):
             # workflow-bound routine: deterministic dispatch through the saved
             # workflow's pre-planned task record — no chat-model interpretation
@@ -259,14 +378,27 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
             try:
                 note = run_action("run_workflow", {"id": routine["workflow"]},
                                   settings)
+                settled = outbox.routine_transition(
+                    routine["id"], occurrence, token, "executed", output=note,
+                    from_states=("executing",))
             except Exception as exc:
                 log.exception("routine %s workflow dispatch failed", routine["id"])
                 note = f"workflow dispatch failed: {exc}"
+                settled = outbox.routine_transition(
+                    routine["id"], occurrence, token, "execution_failed",
+                    error=str(exc), from_states=("executing",))
+            if not settled:      # fenced out by a newer claimant: never send
+                return outcomes
             status = send_wechat(settings, f"🔁 [{routine['id']}] {note}"[:800])
+            if status == "sent":
+                outbox.routine_delivered(routine["id"], occurrence, token)
+            else:
+                outbox.routine_delivery_failed(routine["id"], occurrence,
+                                               token, status)
             log.info("routine %s workflow %s: %s", routine["id"],
                      routine["workflow"], status)
             outcomes.append({"id": routine["id"], "fired": True, "note": note})
-            continue
+            return outcomes
         # frame the task as immediate execution — without this the chat agent
         # pattern-matches recurring tasks to plan_task and replies with a PLAN
         # (and a junk todo) instead of doing the work
@@ -276,14 +408,27 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
                   + routine["task"]
                   + (f"\n[Condition already verified true: {why}]" if why else ""))
         try:
-            reply = handle_message(framed, settings)
+            reply = handle_message(framed, settings, internal=True)
+            settled = outbox.routine_transition(
+                routine["id"], occurrence, token, "executed", output=reply,
+                from_states=("executing",))
         except Exception as exc:  # one broken routine must not block the rest
             log.exception("routine %s task failed", routine["id"])
             reply = f"(routine task failed: {exc})"
+            settled = outbox.routine_transition(
+                routine["id"], occurrence, token, "execution_failed",
+                error=str(exc), from_states=("executing",))
+        if not settled:          # fenced out by a newer claimant: never send
+            return outcomes
         prefix = f"🔁 [{routine['id']}] "
         if why:
             prefix += f"({why}) "
         status = send_wechat(settings, prefix + reply)
+        if status == "sent":
+            outbox.routine_delivered(routine["id"], occurrence, token)
+        else:   # output is persisted — the next cycle retries DELIVERY only
+            outbox.routine_delivery_failed(routine["id"], occurrence,
+                                           token, status)
         log.info("routine %s fired: %s", routine["id"], status)
         outcomes.append({"id": routine["id"], "fired": True, "note": status})
     return outcomes
