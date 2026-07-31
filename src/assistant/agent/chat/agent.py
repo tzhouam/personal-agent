@@ -10,7 +10,7 @@ from what the code actually did, not from what the LLM claims it did.
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -39,6 +39,9 @@ class TurnResult:
     repaired: bool = False     # an action failed and was fixed on retry
     self_reported: bool = False   # label came from the model's self_check
     prev_verdict: str | None = None   # satisfied | dissatisfied | None
+    surfaced_failure_ids: list = field(default_factory=list)
+    #   D5 receipts: failure ids embedded in `reply`; the send site that
+    #   observes transport success reports them via delivery.mark_surfaced
 
 
 # Image-only owner-message sentinels: module constants so the describe-
@@ -288,24 +291,22 @@ def build_context(settings: Settings) -> str:
         except Exception:  # context is best-effort; a bad store must not kill chat
             log.exception("context: %s failed", action)
 
-    # Reminders that never reached the owner. Ground truth, like the GitHub
-    # block above: the failing channel cannot carry its own failure notice, so
-    # without this the model assures the owner a push went out (2026-07-24 —
-    # the owner missed an interview and was told the reminder had been sent).
+    # Delivery failures (Track D §5): the owner-facing notice is PREPENDED to
+    # the reply in code (never model-dependent) — this context block gives
+    # the model the same facts so it can answer questions about them and
+    # never claims a listed delivery happened.
     try:
-        from assistant.platform.notify import ReminderStore
+        from assistant.platform import delivery
 
-        undelivered = ReminderStore(settings.data_dir).failed()
-        if undelivered:
-            parts.append("## Delivery failures (WeChat push did NOT reach the owner)\n"
-                         + "\n".join(f"[{r['id']}] due {r['due_at']} — {r['message']} "
-                                     f"(gave up: {r.get('last_error', 'unknown')})"
-                                     for r in undelivered[-5:])
-                         + "\nSay these were NOT delivered. Never claim a reminder was "
-                           "pushed when it is listed here; deliver the content in this "
-                           "reply instead and tell the owner the push channel is broken.")
+        failures = delivery.open_failures(settings)
+        if failures:
+            parts.append("## Delivery failures (these did NOT reach the owner)\n"
+                         + "\n".join(f"[{f['id']}] {f['summary']}"
+                                     for f in failures[:5])
+                         + "\nNever claim any of these was delivered; the "
+                           "owner can clear one with acknowledge_failure.")
     except Exception:
-        log.exception("context: reminder failures failed")
+        log.exception("context: delivery failures failed")
 
     try:  # saved workflows: the ids run_workflow needs (only when any exist)
         from assistant.agent.workflow_store import WorkflowStore
@@ -443,6 +444,20 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
             extra = f" …+{len(rejected) - 5}" if len(rejected) > 5 else ""
             reply = ((reply + "\n\n") if reply else "") + \
                 "⚠ 有图片未能使用: " + "; ".join(rejected[:5]) + extra
+        # D5: the delivery-failure surface is PREPENDED in code (≤512B,
+        # indivisible — always lands in chunk part 1), never model-dependent;
+        # the ids ride the TurnResult so the send site can report receipts.
+        surfaced_ids: list = []
+        try:
+            from assistant.platform import delivery
+
+            failures = delivery.open_failures(settings)
+            block = delivery.render_failure_block(failures)
+            if block:
+                surfaced_ids = [f["id"] for f in failures[:3]]
+                reply = block + ("\n\n" + reply if reply else "")
+        except Exception:
+            log.exception("failure surface failed")
         verdict = owner_verdict(text, model_feedback) if history else None
         try:
             from assistant.agent.events_store import EventsStore
@@ -460,7 +475,8 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
             events.close()
         except Exception:
             log.exception("chat metrics failed")
-        return TurnResult(reply, label, repaired, self_reported, verdict)
+        return TurnResult(reply, label, repaired, self_reported, verdict,
+                          surfaced_ids)
 
     ctx_part = f"## Context\n{build_context(settings)}\n\n"
     attach: list[str] = []

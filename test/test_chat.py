@@ -331,7 +331,7 @@ def test_context_states_undelivered_reminders(settings):
     ctx = build_context(settings)
     assert "## Delivery failures" in ctx
     assert "11:00 MiniMax 面试" in ctx
-    assert "No such file" in ctx
+    assert "dfremm1" in ctx        # D5 typed id the ack action accepts
 
 
 def test_context_omits_delivery_failures_when_all_is_well(settings):

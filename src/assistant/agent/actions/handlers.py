@@ -1050,3 +1050,14 @@ def _self_evolve(settings: Settings, p: dict) -> str:
                 f"({len(result['proposed'])} proposal(s) were duplicates or empty)")
     return "learned:\n" + "\n".join(f"[{l['id']}] {l['rule']}"
                                     for l in result["learned"])
+
+
+def _acknowledge_failure(settings: Settings, p: dict) -> str:
+    """Clear one delivery failure from the D5 surface (知道了) — the row is
+    kept for audit, never deleted."""
+    from assistant.platform import delivery
+
+    fid = str(p.get("id", "")).strip()
+    if delivery.acknowledge(settings, fid):
+        return f"cleared delivery failure {fid}"
+    return f"no open delivery failure {fid!r} (already cleared, or wrong id?)"

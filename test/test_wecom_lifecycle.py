@@ -698,6 +698,7 @@ def test_concurrent_request_cap(settings, monkeypatch):
         try:
             extra = socket.create_connection(("127.0.0.1", port), timeout=5)
             extra.settimeout(2)
+            extra.sendall(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
             refused = extra.recv(64) == b""
             extra.close()
             return refused
@@ -710,7 +711,7 @@ def test_concurrent_request_cap(settings, monkeypatch):
         for c in holders:
             c.close()
     # slots free once the disconnected threads exit — observable via service
-    assert _wait_until(lambda: b"400" in _raw_status(port, "")), \
+    assert _wait_until(lambda: b"400" in _raw_status(port, ""), timeout=25), \
         "service did not resume after slots freed"
 
 
@@ -926,6 +927,10 @@ def test_concurrent_cap_is_process_wide_across_rotation(settings, monkeypatch):
         try:
             extra = socket.create_connection(("127.0.0.1", port2), timeout=5)
             extra.settimeout(2)
+            # send a COMPLETE (bad) request: an accepted-but-idle probe would
+            # pin a slot for the full 20s handler timeout and flake the
+            # service-resumed assertion under load
+            extra.sendall(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
             refused = extra.recv(64) == b""
             extra.close()
             return refused
@@ -937,7 +942,7 @@ def test_concurrent_cap_is_process_wide_across_rotation(settings, monkeypatch):
     finally:
         for c in holders:
             c.close()
-    assert _wait_until(lambda: b"400" in _raw_status(port2, "")), \
+    assert _wait_until(lambda: b"400" in _raw_status(port2, ""), timeout=25), \
         "service did not resume on the new generation"
 
 

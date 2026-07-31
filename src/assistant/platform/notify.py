@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -211,9 +211,16 @@ class ReminderStore:
         return yaml.safe_load(self.path.read_text()) or {"next_id": 1, "reminders": []}
 
     def _save(self, data: dict) -> None:
-        """Write the reminders structure back, creating the data dir if needed."""
+        """Atomically replace the reminders file (tmp + os.replace, 0600) —
+        the old bare write_text could leave corrupt YAML on a crash mid-write
+        (Track D design §3)."""
+        import os as _os
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        _os.chmod(tmp, 0o600)
+        _os.replace(tmp, self.path)
 
     @locked_transaction
     def add(self, message: str, due_at: datetime) -> dict:
@@ -239,71 +246,136 @@ class ReminderStore:
         for r in data["reminders"]:
             if r["id"] == reminder_id and not r.get("sent_at"):
                 r["sent_at"] = "cancelled"
+                r["claim_token"] = None   # invalidate any in-flight claimant
                 self._save(data)
                 return True
         return False
 
+    def _lease_seconds(self, settings: Settings) -> int:
+        """A claim is stale past this: covers exactly ONE send (per-row
+        claiming), sized against the 90s openclaw send timeout."""
+        return max(2 * int(getattr(settings, "chat_poll_seconds", 60) or 60),
+                   2 * 90)
+
     def deliver_due(self, settings: Settings, now: datetime | None = None,
                     send=send_wechat) -> list[dict]:
-        """Send every due, unsent reminder — claim-then-send (the deliver-phase
-        ledger pattern): due reminders are marked sent under the write lock
-        BEFORE sending, so a concurrent cancel or second poll cycle can never
-        double-send; a failed send un-claims under the lock, so the next cycle
-        retries. Returns what was actually delivered.
+        """Send every due, unsent reminder — per-row claim IMMEDIATELY before
+        its own send (Track D design §3; the old batch claim persisted
+        `sent_at` BEFORE sending, recording deliveries that never happened
+        when the process died mid-send, and one lease could not cover a
+        serial batch). Each claim writes {claimed_at, claim_token} (a fencing
+        token); `sent_at` lands only AFTER the send returns, and only when —
+        under the lock — the token still matches, `sent_at` is still empty,
+        and the row wasn't cancelled (cancel clears the token). A stale claim
+        (claimed_at past the lease, no sent_at) re-offers: duplicate over
+        loss, declared. Bounded retries then dead-letter
+        (`sent_at="failed"`, `failed_at` stamped) — visible to `failed()` and
+        the D5 surface; unbounded retry once produced 752 identical failures
+        in a day (2026-07-24) while the owner saw nothing."""
+        import uuid as _uuid
 
-        Retries are bounded: each failure bumps `attempts` and records
-        `last_error`, and at `_MAX_DELIVERY_ATTEMPTS` the reminder is
-        dead-lettered (`sent_at = "failed"`) instead of un-claimed. Unbounded
-        retry is how one broken send path produced 752 identical failures in a
-        day (2026-07-24) while the owner saw nothing — so a give-up also logs at
-        ERROR, records a `reminder/failed` metric, and leaves the record visible
-        to `failed()`, which the chat context reads."""
         from assistant.platform.locks import _path_lock
 
         now = now or datetime.now()
         stamp = now.strftime("%Y-%m-%d %H:%M")
-        with _path_lock(self._lock_file):     # claim: mark before sending
-            data = self._load()
-            claimed = [r for r in data["reminders"]
-                       if not r.get("sent_at") and r["due_at"] <= stamp]
-            for r in claimed:
-                r["sent_at"] = stamp
-            if claimed:
-                self._save(data)
+        lease = timedelta(seconds=self._lease_seconds(settings))
         delivered = []
-        for r in claimed:                     # send outside the lock
-            status = send(settings, f"⏰ Reminder: {r['message']}")
-            if status == "sent":
-                delivered.append(r)
-                continue
-            attempts, gave_up = 0, False
-            with _path_lock(self._lock_file):
+        attempted: set = set()   # one attempt per row per CYCLE (poison bound)
+        while True:
+            token = _uuid.uuid4().hex
+            with _path_lock(self._lock_file):   # claim exactly ONE row
+                data = self._load()
+                target = None
+                for r in data["reminders"]:
+                    if r["id"] in attempted:
+                        continue
+                    if r.get("sent_at") or r["due_at"] > stamp:
+                        continue
+                    claimed_at = r.get("claimed_at")
+                    if claimed_at and r.get("claim_token"):
+                        try:
+                            fresh = (datetime.now() -
+                                     datetime.strptime(claimed_at,
+                                                       "%Y-%m-%d %H:%M:%S")) < lease
+                        except ValueError:
+                            fresh = False
+                        if fresh:
+                            continue            # someone's send is in flight
+                    target = r
+                    r["claimed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    r["claim_token"] = token
+                    break
+                if target is None:
+                    return delivered
+                attempted.add(target["id"])
+                self._save(data)
+            status = send(settings, f"⏰ Reminder: {target['message']}")
+            gave_up, attempts = False, 0
+            with _path_lock(self._lock_file):   # finalize: CAS on the token
                 data = self._load()
                 for row in data["reminders"]:
-                    if row["id"] != r["id"] or row.get("sent_at") != stamp:
+                    if row["id"] != target["id"]:
                         continue
-                    attempts = int(row.get("attempts") or 0) + 1
-                    row["attempts"] = attempts
-                    row["last_error"] = str(status)[:200]
-                    # give up → dead-letter; otherwise un-claim so the next
-                    # poll cycle retries
-                    row["sent_at"] = ("failed" if attempts >= _MAX_DELIVERY_ATTEMPTS
-                                      else None)
-                    gave_up = row["sent_at"] == "failed"
+                    if row.get("claim_token") != token or row.get("sent_at"):
+                        break   # displaced by reclaim, or cancelled — the
+                        #         newer claimant owns the outcome
+                    if status == "sent":
+                        row["sent_at"] = stamp
+                        row["claim_token"] = None
+                        delivered.append(row)
+                    else:
+                        attempts = int(row.get("attempts") or 0) + 1
+                        row["attempts"] = attempts
+                        row["last_error"] = str(status)[:200]
+                        row["claim_token"] = None
+                        row["claimed_at"] = None
+                        if attempts >= _MAX_DELIVERY_ATTEMPTS:
+                            row["sent_at"] = "failed"
+                            row["failed_at"] = datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S")
+                            gave_up = True
+                    break
                 self._save(data)
-            if gave_up:
-                log.error("reminder %s gave up after %d attempts: %s",
-                          r["id"], _MAX_DELIVERY_ATTEMPTS, status)
-                _record_failure_metric(settings)
-            else:
-                log.warning("reminder %s delivery failed (attempt %d/%d): %s",
-                            r["id"], attempts, _MAX_DELIVERY_ATTEMPTS, status)
-        return delivered
+            if status != "sent":
+                if gave_up:
+                    log.error("reminder %s gave up after %d attempts: %s",
+                              target["id"], _MAX_DELIVERY_ATTEMPTS, status)
+                    _record_failure_metric(settings)
+                else:
+                    log.warning("reminder %s delivery failed (attempt %d/%d): %s",
+                                target["id"], attempts, _MAX_DELIVERY_ATTEMPTS,
+                                status)
+
 
     def failed(self) -> list[dict]:
         """Reminders that exhausted their delivery attempts and were never sent.
 
         The owner cannot be told over the channel that just failed, so this is
-        the record the chat context reads to state the truth on the next turn
-        instead of asserting a delivery that never happened."""
+        the record the D5 failure surface reads to state the truth on the next
+        turn instead of asserting a delivery that never happened."""
         return [r for r in self._load()["reminders"] if r.get("sent_at") == "failed"]
+
+    @locked_transaction
+    def mark_surfaced(self, reminder_id: str) -> None:
+        """D5 receipt: a reply carrying this failed reminder's notice was
+        transport-accepted — start (once) its 48h expiry clock."""
+        data = self._load()
+        for r in data["reminders"]:
+            if r["id"] == reminder_id and r.get("sent_at") == "failed" \
+                    and not r.get("surfaced_at"):
+                r["surfaced_at"] = datetime.now(timezone.utc).isoformat()
+                self._save(data)
+                return
+
+    @locked_transaction
+    def acknowledge_failed(self, reminder_id: str) -> bool:
+        """The owner's 知道了 for one failed reminder — clears it from the
+        surface; the row is kept (audit), never deleted."""
+        data = self._load()
+        for r in data["reminders"]:
+            if r["id"] == reminder_id and r.get("sent_at") == "failed" \
+                    and not r.get("acked_at"):
+                r["acked_at"] = datetime.now(timezone.utc).isoformat()
+                self._save(data)
+                return True
+        return False

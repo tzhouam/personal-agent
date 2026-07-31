@@ -54,47 +54,96 @@ class EmailChannel:
 
     def _save_uid(self, uid: int) -> None:
         """Advance the processed-mail watermark to ``uid``, preserving other
-        state keys."""
+        state keys. Atomic tmp+replace (Track D §2: a crash mid-write must
+        not corrupt the rollback shadow old code resumes from)."""
+        import os as _os
+
         state = self._load_state()
         state["email_last_uid"] = uid
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.state_file.write_text(json.dumps(state))
+        tmp = self.state_file.with_name(self.state_file.name + ".tmp")
+        tmp.write_text(json.dumps(state))
+        _os.replace(tmp, self.state_file)
 
-    # ── polling ──────────────────────────────────────────────────────
+    # ── polling (Track D §2: the (UIDVALIDITY, UID) ledger) ──────────
     def poll(self) -> list[dict]:
-        """Fetch new owner messages since the last watermark, newest UIDs only.
-        On first ever run it seeds the watermark to the inbox tail and returns
-        nothing so history is never replayed; otherwise it returns parsed owner
-        messages and advances the watermark past everything seen. The IMAP
-        connection is always logged out, even on error."""
+        """Discover new mail into the outbox ledger and return this cycle's
+        WORK, ascending by UID with head-of-line discipline (the caller stops
+        at the first message that stays nonterminal):
+
+        - `pending` rows come back as parsed message dicts carrying
+          ``uidvalidity``/``uid`` — the caller drives begin_turn →
+          finish_turn → send → ack via this channel's ledger methods.
+        - `processed` rows (a turn already ran; its reply is the outbox)
+          come back as ``{"kind": "email_outbox_retry", …}`` — the caller
+          retries THE SEND ONLY. The old scalar watermark advanced before
+          processing, so one failed turn silently dropped the owner's mail
+          forever (audit F3); the watermark survives only as the rollback
+          shadow, advanced to the settled frontier AFTER ledger commits.
+
+        First ever run imports the legacy watermark (or seeds to the inbox
+        tail) so history is never replayed; a UIDVALIDITY change re-baselines
+        with a visible system note (old-epoch rows are retained)."""
         if not self.enabled:
             return []
+        from assistant.platform.delivery import OutboxDB
+
         conn = imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port)
         try:
             conn.login(self.settings.smtp_user, self.settings.smtp_password)
             conn.select("INBOX", readonly=True)
+            try:
+                uidvalidity = int((conn.response("UIDVALIDITY")[1] or [b"0"])[0])
+            except (TypeError, ValueError, IndexError):
+                uidvalidity = 0
             _, data = conn.uid("search", None, "ALL")
-            uids = [int(u) for u in data[0].split()]
-            if not uids:
-                return []
-            last = self._load_state().get("email_last_uid")
-            if last is None:  # first start: don't replay inbox history
-                self._save_uid(max(uids))
-                return []
-            fresh = [u for u in uids if u > last]
-            if not fresh:
-                return []
-            self._save_uid(max(uids))
-
-            messages = []
-            for uid in fresh:
-                _, fetched = conn.uid("fetch", str(uid), "(RFC822)")
-                if not fetched or not isinstance(fetched[0], tuple):
-                    continue
-                msg = self._parse(fetched[0][1])
-                if msg:
+            uids = sorted(int(u) for u in data[0].split())
+            outbox = OutboxDB(self.settings.data_dir)
+            try:
+                baseline = self._ensure_baseline(outbox, uidvalidity, uids)
+                known = {u for (u,) in outbox.conn.execute(
+                    "SELECT uid FROM email_ledger WHERE uidvalidity=?",
+                    (uidvalidity,))}
+                for uid in uids:
+                    if uid <= baseline or uid in known:
+                        continue
+                    msg = self._fetch_parse(conn, uid)
+                    if msg is None:
+                        outbox.email_discover(uidvalidity, uid, ignored=True)
+                    else:
+                        outbox.email_discover(
+                            uidvalidity, uid,
+                            summary=f"{msg.get('sender', '?')}: "
+                                    f"{msg.get('subject', '')[:80]}")
+                messages: list[dict] = []
+                for item in outbox.email_due(uidvalidity):
+                    if item["state"] == "processed":
+                        messages.append({
+                            "channel": self.name, "kind": "email_outbox_retry",
+                            "text": "[outbox retry]", "sender": "",
+                            "subject": "[assistant] chat",
+                            "uidvalidity": uidvalidity, "uid": item["uid"],
+                            "reply": item["reply"] or "",
+                            "surfaced_ids": item["surfaced_ids"]})
+                        continue
+                    msg = self._fetch_parse(conn, item["uid"])
+                    if msg is None:   # content unreadable now → settle it
+                        outbox.conn.execute(
+                            "UPDATE email_ledger SET state='ignored', updated_at=?"
+                            " WHERE uidvalidity=? AND uid=? AND state='pending'",
+                            (datetime.now(timezone.utc).isoformat(),
+                             uidvalidity, item["uid"]))
+                        outbox.conn.commit()
+                        continue
+                    msg["uidvalidity"] = uidvalidity
+                    msg["uid"] = item["uid"]
                     messages.append(msg)
-            return messages
+                frontier = outbox.email_settled_frontier(uidvalidity, baseline)
+                if frontier > int(self._load_state().get("email_last_uid") or 0):
+                    self._save_uid(frontier)   # rollback shadow, ledger-first
+                return messages
+            finally:
+                outbox.close()
         finally:
             try:
                 conn.logout()
@@ -126,6 +175,99 @@ class EmailChannel:
         return {"channel": self.name, "text": text[:4000], "subject": subject,
                 "sender": sender, "images": images,
                 "rejected_images": rejected}
+
+    def _fetch_parse(self, conn, uid: int):
+        """Fetch one UID and parse it; None when unreadable or not an owner
+        chat message."""
+        try:
+            _, fetched = conn.uid("fetch", str(uid), "(RFC822)")
+            if not fetched or not isinstance(fetched[0], tuple):
+                return None
+            return self._parse(fetched[0][1])
+        except Exception:
+            log.exception("email fetch failed for uid %s", uid)
+            return None
+
+    def _ensure_baseline(self, outbox, uidvalidity: int, uids: list[int]) -> int:
+        """The epoch baseline UID (mail at or below it is settled history).
+        First use imports the legacy watermark paired with the CURRENT
+        UIDVALIDITY; an unnoticed pre-import mailbox reset (highest UID below
+        the watermark) re-baselines to the tail with a visible system note;
+        a later UIDVALIDITY change re-baselines the new epoch (old-epoch
+        rows retained) and says so."""
+        stored_uv = outbox.get_meta("email_uidvalidity")
+        tail = max(uids) if uids else 0
+        if stored_uv is None:
+            legacy = self._load_state().get("email_last_uid")
+            if legacy is None:
+                baseline = tail          # first start: never replay history
+            elif tail < int(legacy):     # mailbox was reset before cutover
+                baseline = tail
+                outbox.add_system_note(
+                    "邮箱状态在切换前被重置过 — 旧水位不可信，已按当前邮箱"
+                    "末尾重新基线（期间的邮件可能被跳过）")
+            else:
+                baseline = int(legacy)
+            outbox.set_meta("email_uidvalidity", str(uidvalidity))
+            outbox.set_meta("email_baseline_uid", str(baseline))
+            return baseline
+        if int(stored_uv) != uidvalidity:
+            outbox.set_meta("email_uidvalidity", str(uidvalidity))
+            outbox.set_meta("email_baseline_uid", str(tail))
+            outbox.add_system_note(
+                "邮箱 UIDVALIDITY 变化（邮箱被重建/迁移）— 已重新基线，"
+                "重置窗口内的邮件可能未被处理")
+            return tail
+        return int(outbox.get_meta("email_baseline_uid") or 0)
+
+    # ── ledger transitions the poll-loop caller drives ───────────────
+    def begin_turn(self, message: dict) -> str | None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            return db.email_begin_turn(message["uidvalidity"], message["uid"])
+        finally:
+            db.close()
+
+    def finish_turn(self, message: dict, token: str, reply: str,
+                    surfaced_ids: list[str]) -> None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            db.email_finish_turn(message["uidvalidity"], message["uid"], token,
+                                 reply, surfaced_ids or [])
+        finally:
+            db.close()
+
+    def turn_failed(self, message: dict, token: str, error: str) -> None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            db.email_turn_failed(message["uidvalidity"], message["uid"], token,
+                                 error)
+        finally:
+            db.close()
+
+    def ack(self, message: dict) -> None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            db.email_ack(message["uidvalidity"], message["uid"])
+        finally:
+            db.close()
+
+    def send_failed(self, message: dict, error: str) -> None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            db.email_send_failed(message["uidvalidity"], message["uid"], error)
+        finally:
+            db.close()
 
     def send(self, text: str, in_reply_to: dict | None = None) -> None:
         """Email ``text`` back to the owner as HTML (each line a paragraph),

@@ -798,8 +798,29 @@ def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
     for message in messages:
         log.info("email message for %s from %s: %.80s", user.uid,
                  message.get("sender", "?"), message["text"])
+        skey = f"{user.uid}:email:{message.get('sender', '')}"
+        if "uid" in message:   # ledger-tracked (Track D §2)
+            history = store.history(skey)
+            message["_history"] = history
+            prev_ref = history[-1] if history else None
+
+            def _append(m, turn, _s=skey, _p=prev_ref):
+                store.append(_s, m["text"], turn.reply, outcome=turn.outcome,
+                             repaired=turn.repaired,
+                             self_reported=turn.self_reported,
+                             prev_verdict=turn.prev_verdict, prev_ref=_p)
+
+            try:
+                settled = _process_email_ledger(email, message, user,
+                                                make_llm(user), services,
+                                                _append)
+            except Exception:
+                log.exception("email ledger processing failed for %s", user.uid)
+                settled = False
+            if not settled:
+                break   # head-of-line: retry next cycle
+            continue
         try:
-            skey = f"{user.uid}:email:{message.get('sender', '')}"
             turn = services.handle_turn(message["text"], user, make_llm(user),
                                         history=store.history(skey),
                                         image_paths=message.get("images"),
@@ -873,6 +894,48 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
             log.exception("routine firing failed for %s", uid)
 
 
+def _process_email_ledger(channel, message, settings, llm, services,
+                          append_session) -> bool:
+    """Drive one ledger-tracked email message through its transitions (Track
+    D §2). Returns True when the row settled (continue to younger mail) —
+    False means it stayed nonterminal (head-of-line: stop this channel's
+    batch, retry next cycle)."""
+    from assistant.platform import delivery
+
+    if message.get("kind") == "email_outbox_retry":
+        try:   # the turn already ran once: retry THE SEND ONLY
+            channel.send(message["reply"], in_reply_to=message)
+        except Exception as exc:
+            channel.send_failed(message, str(exc))
+            return False
+        channel.ack(message)
+        delivery.mark_surfaced(settings, message.get("surfaced_ids") or [])
+        return True
+    token = channel.begin_turn(message)
+    if token is None:
+        return True   # raced/settled elsewhere
+    try:
+        turn = services.handle_turn(message["text"], settings, llm,
+                                    history=message.pop("_history", None),
+                                    image_paths=message.get("images"),
+                                    rejected_images=message.get("rejected_images"))
+    except Exception as exc:
+        log.exception("email turn failed")
+        channel.turn_failed(message, token, str(exc))
+        return False
+    ids = getattr(turn, "surfaced_failure_ids", []) or []
+    channel.finish_turn(message, token, turn.reply, ids)
+    append_session(message, turn)
+    try:
+        channel.send(turn.reply, in_reply_to=message)
+    except Exception as exc:
+        channel.send_failed(message, str(exc))
+        return False
+    channel.ack(message)
+    delivery.mark_surfaced(settings, ids)
+    return True
+
+
 def _chat_poll_loop(settings_factory, sessions: SessionStore,
                     stop: threading.Event, llm_factory=None, services=None,
                     heartbeat: dict | None = None) -> None:
@@ -921,8 +984,31 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                         continue
                     log.info("%s message from %s: %.80s", channel.name,
                              message.get("sender", "?"), message["text"])
+                    session = f"{channel.name}:{message.get('sender', '')}"
+                    if "uid" in message:   # ledger-tracked email (Track D §2)
+                        history = sessions.history(session)
+                        message["_history"] = history
+                        prev_ref = history[-1] if history else None
+
+                        def _append(m, turn, _s=session, _p=prev_ref):
+                            sessions.append(_s, m["text"], turn.reply,
+                                            outcome=turn.outcome,
+                                            repaired=turn.repaired,
+                                            self_reported=turn.self_reported,
+                                            prev_verdict=turn.prev_verdict,
+                                            prev_ref=_p)
+
+                        try:
+                            settled = _process_email_ledger(
+                                channel, message, settings,
+                                make_llm(settings), services, _append)
+                        except Exception:
+                            log.exception("email ledger processing failed")
+                            settled = False
+                        if not settled:
+                            break   # head-of-line: retry next cycle
+                        continue
                     try:
-                        session = f"{channel.name}:{message.get('sender', '')}"
                         turn = services.handle_turn(
                             message["text"], settings, make_llm(settings),
                             history=sessions.history(session),
@@ -934,6 +1020,11 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                                         self_reported=turn.self_reported,
                                         prev_verdict=turn.prev_verdict)
                         channel.send(reply, in_reply_to=message)
+                        from assistant.platform import delivery as _delivery
+
+                        _delivery.mark_surfaced(
+                            settings,
+                            getattr(turn, "surfaced_failure_ids", []) or [])
                         log.info("replied via %s (%d chars)", channel.name, len(reply))
                     except Exception:
                         log.exception("failed to answer %s message", channel.name)

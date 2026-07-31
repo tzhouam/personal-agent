@@ -110,7 +110,7 @@ def run_listener(settings: Settings, once: bool = False) -> int:
         return 1
 
     log.info("chat listener started — poll every %ds", settings.chat_poll_seconds)
-    token = _listener_active.set(True)
+    _cap_token = _listener_active.set(True)
     try:
         while True:
             if not once:  # hot-reload: fresh credentials/config each sweep —
@@ -136,20 +136,46 @@ def run_listener(settings: Settings, once: bool = False) -> int:
                         except Exception:
                             log.exception("unsupported-media ack failed")
                         continue
+                    if message.get("kind") == "email_outbox_retry":
+                        try:   # Track D: retry the persisted reply only
+                            channel.send(message["reply"], in_reply_to=message)
+                            channel.ack(message)
+                        except Exception as exc:
+                            channel.send_failed(message, str(exc))
+                            break
+                        continue
                     log.info("%s message from %s: %.80s", channel.name,
                              message.get("sender", "?"), message["text"])
+                    token = (channel.begin_turn(message)
+                             if "uid" in message else None)
+                    if "uid" in message and token is None:
+                        continue
                     try:
                         reply = handle_message(
                             message["text"], settings, llm,
                             image_paths=message.get("images"),
                             rejected_images=message.get("rejected_images"))
+                    except Exception as exc:
+                        log.exception("failed to answer %s message", channel.name)
+                        if token:
+                            channel.turn_failed(message, token, str(exc))
+                            break
+                        continue
+                    if token:
+                        channel.finish_turn(message, token, reply, [])
+                    try:
                         channel.send(reply, in_reply_to=message)
+                        if token:
+                            channel.ack(message)
                         log.info("replied via %s (%d chars)",
                                  channel.name, len(reply))
-                    except Exception:
+                    except Exception as exc:
                         log.exception("failed to answer %s message", channel.name)
+                        if token:
+                            channel.send_failed(message, str(exc))
+                            break
             if once:
                 return 0
             time.sleep(settings.chat_poll_seconds)
     finally:
-        _listener_active.reset(token)
+        _listener_active.reset(_cap_token)
