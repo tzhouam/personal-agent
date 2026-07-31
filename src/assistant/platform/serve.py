@@ -6,7 +6,11 @@ Loopback-only HTTP (stdlib, zero new deps):
     POST /actions/<name>  {<params>}                                   → {"result"}
     POST /run             {"resume": true?}                            → {"result"}
     GET  /status                                                       → {"status"}
-    GET  /healthz                                                      → {"ok"}
+    GET  /healthz                     → {"ok"}  (pure liveness — restart tooling)
+    GET  /readyz                      → 200/503 {"ready", detail fields} (readiness:
+                                        503 when the poll thread died/stalled, a
+                                        channel that should serve isn't, or the
+                                        health probe failed — point monitors here)
 
 Design invariants (doc/DESIGN_SERVICE_LAYER.md):
 - ``Settings()``/``LLM()`` are rebuilt **per request**, so a `.env` edit (new
@@ -49,6 +53,10 @@ from assistant.platform.secrets import mask_secrets
 log = logging.getLogger("assistant")
 
 _MAX_BODY = 12 * 1024 * 1024  # base64 image attachments ride in /chat bodies
+_STALE_FLOOR_SECONDS = 600    # /readyz heartbeat-staleness floor (tests shrink
+#                               it). Deliberately generous: a poll cycle
+#                               legitimately spans multi-minute LLM turns; the
+#                               floor flags a WEDGED loop, not a busy one.
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024  # per-image cap (multi_tenant, §A.4) —
                                     # matches the bridge's encodeBase64Capped
 
@@ -70,6 +78,18 @@ class ServeServices:
     fire_due: Callable         # (settings) -> None     (conditional routines)
     acquire_pid_lock: Callable # (settings) -> bool     (shared inbox pid lock)
     worker_dispatch: dict      # kind -> handler (platform.dispatch.Dispatch)
+    teardown_channels: Callable = staticmethod(lambda: None)
+    #                            () -> None  (daemon-shutdown hook: close any
+    #                            process-lifetime channel state, e.g. the WeCom
+    #                            callback server, without serve importing it)
+    startup_channels: Callable = staticmethod(lambda: None)
+    #                            () -> None  (daemon-startup hook: un-latch
+    #                            channel state a previous shutdown latched, so
+    #                            sequential run_serve lifecycles in one
+    #                            process work)
+    channel_health: Callable = staticmethod(lambda: {})
+    #                            () -> dict  (extra /healthz fields — channel
+    #                            liveness the platform can't see itself)
 
 
 _default_services: "Callable[[], ServeServices] | None" = None
@@ -302,7 +322,11 @@ class SessionStore:
         `unknown.json` shards (ts-less legacy turns, treated as expired), and
         now-empty session dirs. Returns counts for the curate log/metrics."""
         self._ensure_migrated()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.retention_days)).date().isoformat()
+        # LOCAL date, matching how shards are named (`_local_day`): a UTC-date
+        # cutoff let a boundary shard survive for the first UTC-offset hours
+        # of every day (found on an Asia/+8 box just after local midnight).
+        cutoff = (datetime.now(timezone.utc).astimezone()
+                  - timedelta(days=self.retention_days)).date().isoformat()
         removed_turns = removed_files = 0
         for sdir in list(self.dir.iterdir()) if self.dir.exists() else []:
             if not sdir.is_dir():
@@ -424,13 +448,88 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             return data if isinstance(data, dict) else {}
 
         def do_GET(self):
-            """Route GETs: `/healthz` (the only unauthenticated route) and, behind
+            """Route GETs: `/healthz` and `/readyz` (the only unauthenticated
+            routes — liveness and readiness probes) and, behind
             per-user resolution, `/status` → that user's run-status; anything else
             is a 404. In `multi_tenant`, `/status` needs `account_id` in the query
             string (a GET has no body) or it's a 401 — no route bypasses
             `resolve_uid` except `/healthz` (§A.2)."""
             if urlsplit(self.path).path == "/healthz":
+                # LIVENESS, contract unchanged: exactly {"ok": true} while the
+                # daemon is up — the restart tooling (`_healthz`) keys on this,
+                # and a degraded channel must not trigger restart loops. All
+                # degradation detail lives on /readyz.
                 return self._send(200, {"ok": True})
+            if urlsplit(self.path).path == "/readyz":
+                # multi_tenant keeps its route invariant (only /healthz is
+                # unauthenticated there): readiness carries channel state, so
+                # it is bridge-token-gated in that mode; single_user (a
+                # loopback daemon on the owner's own machine) keeps it open.
+                boot = settings_factory()
+                if boot.deployment_mode == "multi_tenant" and (
+                        not boot.serve_token
+                        or self._bearer() != boot.serve_token):
+                    # no configured token in multi_tenant = no access (same
+                    # fail-closed stance as every resolve_uid route)
+                    return self._send(401, {"error": "unauthorized"})
+                # READINESS: 200 only when the proactive machinery is actually
+                # working — 503 when the poll thread died or stalled, a channel
+                # that should be serving isn't, or the health probe itself
+                # failed (fail CLOSED: an unobservable channel is not a ready
+                # channel). The 2026-07 WeCom-rebind outage kept /healthz green
+                # while every poll cycle failed; monitors point HERE.
+                # Unauthenticated like /healthz.
+                try:
+                    fields: dict = {}
+                    probe_ok = True
+                    try:
+                        fields.update(services.channel_health() or {})
+                    except Exception:
+                        probe_ok = False
+                        log.exception("channel health probe failed")
+                    poller = getattr(self.server, "chat_poller", None)
+                    fields["poller_alive"] = poller.is_alive() if poller else None
+                    # Progress, not just liveness: the heartbeat is stamped
+                    # once per COMPLETED cycle (monotonic clock). Standard
+                    # readiness semantics: NOT ready until the first cycle
+                    # completes — a wedged or forever-erroring first cycle is
+                    # 503 from the very first probe, and staleness thereafter
+                    # is measured from the last completed cycle.
+                    hb = getattr(self.server, "poll_heartbeat", None)
+                    stale = None
+                    first_cycle_done = None
+                    if hb is not None:
+                        first_cycle_done = hb.get("ts") is not None
+                        if first_cycle_done:
+                            limit = max(3 * settings_factory().chat_poll_seconds,
+                                        _STALE_FLOOR_SECONDS)
+                            stale = (time.monotonic() - hb["ts"]) > limit
+                    failures = (hb or {}).get("failures", 0)
+                    fields["poll_cycle_stale"] = stale
+                    fields["first_cycle_done"] = first_cycle_done
+                    fields["consecutive_cycle_failures"] = failures
+                    fields["health_probe_ok"] = probe_ok
+                    fields["channel_startup_ok"] = getattr(
+                        self.server, "channel_startup_ok", True)
+                    # Fail CLOSED: no live poll thread (including "none was
+                    # ever attached" — a bare HTTP server is not a ready
+                    # daemon), an incomplete first cycle, a stale cycle,
+                    # ≥3 consecutive failed cycles (the machinery is NOT
+                    # working even if a long-ago cycle once succeeded), a
+                    # failed startup hook, or any channel/probe failure.
+                    degraded = (not probe_ok
+                                or fields["poller_alive"] is not True
+                                or first_cycle_done is not True
+                                or failures >= 3
+                                or stale is True
+                                or any(v is False for k, v in fields.items()
+                                       if k.endswith("_ok")))
+                    return self._send(503 if degraded else 200,
+                                      {"ready": not degraded, **fields})
+                except Exception:
+                    log.exception("readiness probe failed")
+                    return self._send(503, {"ready": False,
+                                            "error": "readiness probe failed"})
             if urlsplit(self.path).path == "/qr":
                 # Deployment-global operator route (NOT per-user): serve the
                 # current always-on login QR. Gated on the serve token directly —
@@ -719,7 +818,8 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
 
 
 def _chat_poll_loop(settings_factory, sessions: SessionStore,
-                    stop: threading.Event, llm_factory=None, services=None) -> None:
+                    stop: threading.Event, llm_factory=None, services=None,
+                    heartbeat: dict | None = None) -> None:
     """Email (+WeCom) chat polling, absorbed from the standalone listener.
     Everything is rebuilt each cycle so `.env` edits apply within one poll.
 
@@ -740,6 +840,9 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                              "routines/daily-runs for active users")
                     first = False
                 _tick_tenants(settings, llm_factory=make_llm, services=services)
+                if heartbeat is not None:
+                    heartbeat["ts"] = time.monotonic()
+                    heartbeat["failures"] = 0
                 stop.wait(settings.chat_poll_seconds)
                 continue
             channels = services.build_channels(settings, log_wecom=first)
@@ -779,9 +882,14 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                 services.fire_due(settings)
             except Exception:
                 log.exception("routine firing failed")
+            if heartbeat is not None:  # this cycle ran to completion
+                heartbeat["ts"] = time.monotonic()
+                heartbeat["failures"] = 0
             stop.wait(settings.chat_poll_seconds)
         except Exception:  # the poll thread must never die
             log.exception("chat poll cycle failed")
+            if heartbeat is not None:
+                heartbeat["failures"] = heartbeat.get("failures", 0) + 1
             stop.wait(60)
 
 
@@ -803,61 +911,95 @@ def run_serve(settings: Settings, services=None) -> int:
 
     server = make_server(services=services)
 
-    # Always-on login-QR refresher (deployment-global): keep a freshly-rendered
-    # WeChat login QR available at loopback GET /qr so an invitee can scan any
-    # time. Off when login_qr_refresh is disabled.
+    # Everything after the listener exists runs under one try/finally: a
+    # failure while starting the QR refresher, poll thread, or worker pool
+    # must not leak the loopback listener, threads, or the callback server.
     qr = None
-    if settings.login_qr_refresh:
-        from assistant.platform.login_qr import LoginQRRefresher
-
-        qr = LoginQRRefresher(settings).start()
-        server.qr_refresher = qr
-        log.info("serve: login-QR refresher started (always-on) → GET /qr")
-
-    stop = threading.Event()
-    poller = threading.Thread(
-        target=_chat_poll_loop,
-        args=(Settings, server.sessions, stop),
-        kwargs={"services": services},
-        name="chat-poll", daemon=True)
-    poller.start()
-
-    # multi_tenant background jobs run on the durable in-process queue instead of
-    # detached CLIs (§6); the pool recovers orphaned jobs on start. single_user
-    # keeps the legacy detached-Popen path, so no pool is needed there. The
-    # kind→handler dispatch comes from the injected services (agent-owned) so
-    # this platform module never imports agent code.
     pool = None
-    if settings.deployment_mode == "multi_tenant":
-        from assistant.platform.jobs import JobQueue
-        from assistant.platform.worker import WorkerPool
+    poller = None
+    stop = threading.Event()
+    try:
+        # Always-on login-QR refresher (deployment-global): keep a freshly-
+        # rendered WeChat login QR available at loopback GET /qr so an invitee
+        # can scan any time. Off when login_qr_refresh is disabled.
+        if settings.login_qr_refresh:
+            from assistant.platform.login_qr import LoginQRRefresher
 
-        pool = WorkerPool(JobQueue(settings.shared_dir),
-                          dispatch=services.worker_dispatch,
-                          max_workers=settings.job_workers).start()
-        log.info("serve: job worker pool started (%d workers)", settings.job_workers)
+            qr = LoginQRRefresher(settings).start()
+            server.qr_refresher = qr
+            log.info("serve: login-QR refresher started (always-on) → GET /qr")
 
-    def _shutdown(signum, frame):
-        """Signal handler: log the signal and trigger a graceful shutdown."""
-        log.info("serve: signal %d — shutting down", signum)
+        try:
+            services.startup_channels()  # un-latch state a prior shutdown closed
+        except Exception:
+            log.exception("serve: channel startup hook failed")
+            server.channel_startup_ok = False   # /readyz degrades
+        heartbeat = {"ts": None, "failures": 0}   # per-COMPLETED-cycle stamp
+        #                                           + consecutive-failure count
+        poller = threading.Thread(
+            target=_chat_poll_loop,
+            args=(Settings, server.sessions, stop),
+            kwargs={"services": services, "heartbeat": heartbeat},
+            name="chat-poll", daemon=True)
+        poller.start()
+        server.chat_poller = poller       # /readyz reports liveness…
+        server.poll_heartbeat = heartbeat  # …and progress
+
+        # multi_tenant background jobs run on the durable in-process queue
+        # instead of detached CLIs (§6); the pool recovers orphaned jobs on
+        # start. single_user keeps the legacy detached-Popen path, so no pool
+        # is needed there. The kind→handler dispatch comes from the injected
+        # services (agent-owned) so this platform module never imports agent
+        # code.
+        if settings.deployment_mode == "multi_tenant":
+            from assistant.platform.jobs import JobQueue
+            from assistant.platform.worker import WorkerPool
+
+            pool = WorkerPool(JobQueue(settings.shared_dir),
+                              dispatch=services.worker_dispatch,
+                              max_workers=settings.job_workers)
+            pool.start()   # instance retained first: a partial start is still
+            #                stoppable by the cleanup path
+            log.info("serve: job worker pool started (%d workers)",
+                     settings.job_workers)
+
+        def _shutdown(signum, frame):
+            """Signal handler: log the signal and trigger a graceful shutdown."""
+            log.info("serve: signal %d — shutting down", signum)
+            stop.set()
+            if qr is not None:
+                qr.stop()
+            if pool is not None:
+                pool.stop()
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
+
+        log.info("serve: listening on 127.0.0.1:%d (chat poll every %ds)",
+                 server.server_address[1], settings.chat_poll_seconds)
+        server.serve_forever()
+    finally:
+        # Every cleanup step is independently guarded: one failing step must
+        # never skip the rest (a raising qr.stop() abandoning the listener
+        # socket would be its own leak bug).
         stop.set()
-        if qr is not None:
-            qr.stop()
-        if pool is not None:
-            pool.stop()
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    log.info("serve: listening on 127.0.0.1:%d (chat poll every %ds)",
-             server.server_address[1], settings.chat_poll_seconds)
-    server.serve_forever()
-    stop.set()
-    if qr is not None:
-        qr.stop()
-    if pool is not None:
-        pool.stop()
+        for label, action in (
+                ("qr refresher stop", lambda: qr.stop() if qr else None),
+                ("worker pool stop", lambda: pool.stop() if pool else None),
+                # Bounded, best-effort orderly stop: join the poller so a
+                # normal cycle can't race the channel teardown; join only a
+                # STARTED thread (join on an unstarted one raises). A poller
+                # stuck in a slow LLM call may outlive the timeout — the
+                # teardown latch makes any late re-acquire a no-op.
+                ("poller join", lambda: poller.join(timeout=10)
+                 if poller is not None and poller.ident is not None else None),
+                ("channel teardown", services.teardown_channels),
+                ("listener close", server.server_close)):
+            try:
+                action()
+            except Exception:
+                log.exception("serve: cleanup step failed: %s", label)
     return 0
 
 
