@@ -73,7 +73,7 @@ def test_connect_github_warns_on_missing_repo_scope(mt_settings, monkeypatch):
 def test_connect_github_accepts_finegrained_without_scope_header(mt_settings, monkeypatch):
     # fine-grained tokens send NO x-oauth-scopes header → accept, no warning
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp(200, {"login": "octo"}, {}))
-    msg = run_action("connect_github", {"token": "github_pat_" + "c" * 60}, mt_settings)
+    msg = run_action("connect_github", {"token": "github_pat_" + "c" * 82}, mt_settings)
     assert "connected as octo" in msg and "missing" not in msg
 
 
@@ -98,12 +98,26 @@ def test_connect_github_rejects_masked_token_without_crashing(mt_settings, monke
 
 def test_find_and_validate_github_token():
     from assistant.platform.secrets import find_github_token, looks_like_github_token
-    real = "github_pat_11AT4MNKI03po409CESWrQ_QZpnRzich1PBxAhxldWUZkCAkkdMj27FRpZi2IVGjsd4OHZM"
+    real = "github_pat_" + "11AT4MNKI03po409CESWrQ_QZpnRzich1PBxAhxldWUZkCAkkdMj27FRpZi2IVGjsd4OHZM".ljust(82, "z")
     assert find_github_token(f"here you go: {real} thanks") == real
     assert find_github_token("ghp_" + "A" * 36) == "ghp_" + "A" * 36
-    # a token that wrapped with a stray space still resolves
-    assert find_github_token("github_pat_ " + "B" * 40) == "github_pat_" + "B" * 40
+    # a token that wrapped with a stray space still resolves (realistic
+    # length — the finder is length-bounded so glued prose can't be swallowed)
+    assert find_github_token("github_pat_ " + "B" * 82) == "github_pat_" + "B" * 82
     assert find_github_token("no token here") == ""
+    # F19: wrapped token + trailing prose is AMBIGUOUS once whitespace is
+    # stripped ("thanksalot" is token-charset) → refuse, never corrupt
+    assert find_github_token("github_pat_ " + "B" * 82 + " thanks a lot") == ""
+    # …but a token properly delimited by a newline IS extracted by pass 1
+    assert find_github_token("ghp_" + "A" * 36 + "\nplease connect") \
+        == "ghp_" + "A" * 36
+    # a WRAPPED token followed by newline prose is the ambiguous case
+    assert find_github_token("ghp_ " + "A" * 36 + "\nplease") == ""
+    # wrapped across lines with no prose still resolves
+    assert find_github_token("github_pat_" + "B" * 40 + "\n" + "B" * 42) \
+        == "github_pat_" + "B" * 82
+    # a short ghp_ substring inside prose is not a token
+    assert find_github_token("the ghp_ prefix format") == ""
     # masked form is rejected by the validator (non-ASCII '…')
     assert looks_like_github_token("github_pat_…KFh") is None
     assert looks_like_github_token(real) == real

@@ -33,21 +33,45 @@ def mask_secrets(text):
     return _TOKEN_RE.sub(_mask_one, str(text))
 
 
-# Token *finder* — deliberately more permissive than the masker (allows longer
-# tails) so a real, full token pasted in chat is extracted verbatim.
-_FIND_RE = re.compile(r"github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{36,}")
+# Token *finder*. Classic tokens have a FIXED length (gh[pousr]_ + exactly 36
+# base62 chars — verify against GitHub's token-formats docs when they evolve);
+# fine-grained github_pat_ has a documented shape of 82 chars of [A-Za-z0-9_]
+# after the prefix. Bounded quantifiers + boundary guards, because the old
+# open-ended `{20,}`/`{36,}` finder happily swallowed glued prose: stripping
+# whitespace from "github_pat_XXX… thanks a lot" produced a "token" ending in
+# `thanksalot`, GitHub 401'd, and the owner was told to check their token
+# (2026-07 audit finding F19). A format GitHub changes degrades to an honest
+# "no token found — paste it on a line by itself", never a corrupted
+# credential.
+_CLASSIC_LEN = 36
+_FINE_LEN = 82
+_FIND_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])(?:github_pat_[A-Za-z0-9_]{{{_FINE_LEN}}}"
+    rf"|gh[pousr]_[A-Za-z0-9]{{{_CLASSIC_LEN}}})(?![A-Za-z0-9_])")
+# The wrapped-paste recovery pass strips whitespace, where boundary guards
+# can't distinguish token from glued prose — so it demands the ENTIRE
+# stripped text be one token, nothing else.
+_FULL_RE = re.compile(
+    rf"(?:github_pat_[A-Za-z0-9_]{{{_FINE_LEN}}}"
+    rf"|gh[pousr]_[A-Za-z0-9]{{{_CLASSIC_LEN}}})")
 
 
 def find_github_token(text) -> str:
-    """The first full GitHub token in `text`, or ''. Also retries with spaces and
-    newlines stripped, so a paste that wrapped mid-token still resolves. This is
-    the RELIABLE source of a token — never trust an LLM to echo a 90-char secret
-    (on a retry it emits the masked `github_pat_…KFh` from history)."""
+    """The first full GitHub token in `text`, or ''. Pass 1 finds a properly
+    delimited token in the raw text (prose around it is fine). Pass 2 handles
+    a paste that WRAPPED mid-token: whitespace is stripped, and the result
+    counts only when the entire stripped text is exactly one token — glued
+    prose is ambiguous and returns '' (the caller asks for a clean re-paste)
+    rather than risking a corrupted credential. This is the RELIABLE source
+    of a token — never trust an LLM to echo a 90-char secret (on a retry it
+    emits the masked `github_pat_…KFh` from history)."""
     raw = str(text or "")
-    for candidate in (raw, raw.replace(" ", "").replace("\n", "").replace("\t", "")):
-        match = _FIND_RE.search(candidate)
-        if match:
-            return match.group(0)
+    match = _FIND_RE.search(raw)
+    if match:
+        return match.group(0)
+    stripped = re.sub(r"\s+", "", raw)
+    if _FULL_RE.fullmatch(stripped):
+        return stripped
     return ""
 
 
