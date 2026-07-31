@@ -180,24 +180,45 @@ def test_food_photo_flow_native_multimodal(settings, tmp_path):
     assert rec["calories_kcal"] == 550.0 and rec["time_source"] == "stated"
 
 
-def test_crosslinks_join_the_stores(settings):
+def test_crosslinks_join_the_stores(settings, monkeypatch):
+    from datetime import date as _date
+
+    from assistant.agent import insights
     from assistant.agent.finance_store import FinanceStore
     from assistant.agent.insights import build_crosslinks
 
+    from datetime import timedelta as _td
+
+    # Anchor ~15 days back so every date is (a) inside ONE calendar month —
+    # seeding "yesterday" broke on the 1st of every month (found 08-01) —
+    # and (b) within health's rolling 31-day records window (real clock).
+    anchor = _date.today() - _td(days=15)
+    if anchor.day == 1:
+        anchor += _td(days=1)
+    d0, d1 = anchor.isoformat(), (anchor - _td(days=1)).isoformat()
+
+    class _FrozenDate(_date):
+        @classmethod
+        def today(cls):
+            return cls(anchor.year, anchor.month, anchor.day)
+
+    monkeypatch.setattr(insights, "date", _FrozenDate)
     finance = FinanceStore(settings.profile_dir)
     health = HealthStore(settings.profile_dir)
     # same event in both stores: lunch at 12:30, 45 CNY
-    _, fexp = finance.add("expense", 45, category="food", note="面点王", time="12:30")
-    _, hmeal = health.add("meal", description="牛肉面", time="12:30", calories_kcal=550)
+    _, fexp = finance.add("expense", 45, category="food", note="面点王",
+                          time="12:30", when=d0)
+    _, hmeal = health.add("meal", description="牛肉面", time="12:30",
+                          calories_kcal=550, when=d0)
     # food spend on a day with no meal logged
-    finance.add("expense", 88, category="food", note="晚饭", when=_day(-1))
+    finance.add("expense", 88, category="food", note="晚饭", when=d1)
     # health-category spend + an open need
-    finance.add("expense", 120, category="health", note="维生素D")
+    finance.add("expense", 120, category="health", note="维生素D", when=d0)
     health.add_need("维生素D")
 
     links = build_crosslinks(settings)
     assert "2 food purchases (133.0 CNY) vs 1 meals logged" in links
-    assert _day(-1) in links                      # spend-without-meal day flagged
+    assert d1 in links                            # spend-without-meal day flagged
     assert f"{hmeal['id']} 牛肉面 ↔ {fexp['id']} 45.0 CNY" in links  # date+time matched pair
     assert "health spending this month: 120.0 CNY" in links
     assert "open nutrient needs: 维生素D" in links

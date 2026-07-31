@@ -885,7 +885,9 @@ sessions.append(skey, noted, reply)
 
 ```python
 # EVERY non-health endpoint resolves a uid — /chat, /actions/<name>, /run, AND
-# /status (per-user status), plus any future route. Only /healthz is unauthenticated.
+# /status (per-user status), plus any future route. Only /healthz is unauthenticated
+# (and /readyz, the readiness probe, which in multi_tenant is bridge-token-gated —
+# it exposes channel state; single_user keeps it open on the loopback daemon).
 uid = resolve_uid(self.headers, body, registry, mode)      # was: settings_factory()
 settings = Settings.for_user(uid)
 result = run_action(name, body.get("params", {}), settings)    # /actions/<name>
