@@ -172,20 +172,32 @@ class WeComChannel:
         return self._token
 
     def send(self, text: str, in_reply_to: dict | None = None) -> None:
-        """Push ``text`` (capped at 2000 chars) to the owner as a WeCom text
-        message, or to everyone in the app when no owner userid is set.
-        ``in_reply_to`` is unused — WeChat has no reply threading. Raises on an
-        API error."""
-        resp = httpx.post(f"{_API}/message/send",
-                          params={"access_token": self._access_token()},
-                          json={"touser": self.settings.wecom_owner_userid or "@all",
-                                "msgtype": "text",
-                                "agentid": self.settings.wecom_agent_id,
-                                "text": {"content": text[:2000]}}, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("errcode"):
-            raise RuntimeError(f"wecom send: {data}")
+        """Push ``text`` to the message's sender (falling back to the owner
+        userid, then app-wide broadcast) as WeCom text messages. Long replies
+        are split into byte-bounded parts — WeCom's documented text limit is
+        2048 BYTES, so the old 2000-CHAR cap made a ~700-char Chinese reply
+        error out and lose the whole message (audit F10). Raises on an API
+        error (embedding how many parts made it)."""
+        from assistant.platform.notify import send_chunked
+
+        to = ((in_reply_to or {}).get("sender")
+              or self.settings.wecom_owner_userid or "@all")
+
+        def _one(part: str) -> None:
+            resp = httpx.post(f"{_API}/message/send",
+                              params={"access_token": self._access_token()},
+                              json={"touser": to,
+                                    "msgtype": "text",
+                                    "agentid": self.settings.wecom_agent_id,
+                                    "text": {"content": part}}, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("errcode"):
+                raise RuntimeError(f"wecom send: {data}")
+
+        report = send_chunked(_one, text, max_bytes=2048)
+        if report["error"] is not None:
+            raise RuntimeError(f"wecom send failed: {report['error']}")
 
     # ── receiving (callback server; needs a public tunnel to this port) ──
     def poll(self) -> list[dict]:
@@ -283,11 +295,22 @@ def _make_handler(holder: "_CallbackHolder", generation: int, crypto: "_MsgCrypt
                 root = ET.fromstring(xml_text)
                 sender = root.findtext("FromUserName", "")
                 text = (root.findtext("Content") or "").strip()
-                if text and (not owner or sender == owner):
+                msg_type = (root.findtext("MsgType") or "").strip()
+                authorized = not owner or sender == owner
+                if msg_type == "image" and authorized and sender:
+                    # v1: no media download — a deterministic queued event the
+                    # poll loop answers with a fixed reply (never send from
+                    # this handler: blocking here triggers WeCom retries).
+                    # `text` keeps the loop's log line total. Real media
+                    # intake is a Track D design item (audit F8).
+                    holder.enqueue(generation, principal, {
+                        "channel": "wecom", "kind": "unsupported_media",
+                        "text": "[图片]", "subject": "", "sender": sender})
+                elif text and authorized:
                     holder.enqueue(generation, principal, {
                         "channel": "wecom", "text": text[:4000],
                         "subject": "", "sender": sender})
-                elif text:
+                elif text or msg_type == "image":
                     log.warning("wecom message from non-owner %r ignored", sender)
                 self._reply(200)  # empty 200 = no passive reply; we push async
             except Exception as exc:

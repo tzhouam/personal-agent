@@ -211,6 +211,9 @@ class Settings(BaseSettings):
     # Deliver-phase WeChat announce (best-effort, OFF by default — enable only
     # after removing --announce from the OpenClaw cron job, or 07:00 pings twice)
     wechat_announce: bool = False
+    notify_max_bytes: int = 4000   # per-part UTF-8 budget for openclaw sends
+    #                                (conservative; verify against the
+    #                                gateway's real limit before raising)
     announce_channel: str = "openclaw-weixin"
     announce_account: str = ""     # gateway account id (…-im-bot)
     announce_to: str = ""          # owner's WeChat im id

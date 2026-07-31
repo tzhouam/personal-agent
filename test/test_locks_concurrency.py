@@ -93,7 +93,9 @@ def test_routine_claim_due_is_exactly_once_and_respects_cancel(settings):
     total, and a cancelled routine is never claimed."""
     store = RoutineStore(settings.data_dir)
     now = datetime.now().replace(hour=23, minute=59)
-    store.add("say hi", "00:00", days="daily")
+    # created YESTERDAY (F4: a routine already due at its creation instant
+    # waits for the next occurrence — so create it before today's occurrence)
+    store.add("say hi", "00:00", days="daily", now=now - timedelta(days=1))
     claims = []
 
     _run_threads([lambda: claims.extend(store.claim_due(now))] * 2)

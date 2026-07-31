@@ -217,7 +217,8 @@ class SessionStore:
 
     def append(self, session_id: str, owner: str, assistant: str,
                outcome: str | None = None, repaired: bool = False,
-               self_reported: bool = False, prev_verdict: str | None = None) -> None:
+               self_reported: bool = False, prev_verdict: str | None = None,
+               prev_ref: dict | None = None) -> None:
         """Record one owner/assistant exchange (each side capped at 2000 chars)
         into today's shard. Serialized under the per-user write lock; shard
         writes are atomic.
@@ -229,13 +230,22 @@ class SessionStore:
         acknowledgment confirms success, a code-observed fail is never upgraded.
         The previous turn may live in an EARLIER shard, so its shard is rewritten
         in place; a previous turn older than ``retention_days`` is never
-        relabeled."""
+        relabeled. ``prev_ref`` — the turn the caller's history read actually
+        ENDED with — pins the verdict to the turn the model judged; without
+        it, two concurrent turns each labeled whatever happened to be last at
+        append time, systematically mislabeling the wrong turn (audit F13).
+        Conflicts (two turns sharing one predecessor) resolve last-writer-
+        wins: verdicts are noisy labels consumed only in aggregate."""
         self._ensure_migrated()
         with _path_lock(self._lock_file):
             if prev_verdict in ("satisfied", "dissatisfied"):
-                recent = self._within(self._all(session_id), self.retention_days * 24)
-                if recent:
-                    self._finalize_prev(session_id, recent[-1], prev_verdict)
+                target = prev_ref
+                if target is None:
+                    recent = self._within(self._all(session_id),
+                                          self.retention_days * 24)
+                    target = recent[-1] if recent else None
+                if target:  # no-op if the referenced turn was pruned
+                    self._finalize_prev(session_id, target, prev_verdict)
             # Mask credential-shaped substrings before they touch disk: a pasted
             # token (e.g. a connect_github turn) must never persist in the
             # forever-retained history, and an LLM reply must not echo one back.
@@ -256,20 +266,29 @@ class SessionStore:
             self._enforce_max_turns(session_id)
 
     def _finalize_prev(self, session_id: str, prev: dict, prev_verdict: str) -> None:
-        """Apply the owner's verdict to the previous turn, rewriting the (possibly
-        earlier) shard that holds it — matched by its ts."""
-        was = prev.get("outcome")
-        final = ("fail" if prev_verdict == "dissatisfied"
-                 else ("success" if was != "fail" else was))
+        """Apply the owner's verdict to the previous turn, rewriting the
+        (possibly earlier) shard that holds it — matched by (ts, owner). The
+        transition reads the turn's CURRENT stored outcome, never the
+        caller's (possibly stale) reference: with concurrent verdicts on one
+        predecessor, deciding from a stale snapshot could leave e.g.
+        owner_verdict="satisfied" beside outcome="fail". The FIRST change
+        keeps the original label in outcome_initial; a code-observed fail is
+        never upgraded."""
         shard = self._sdir(session_id) / f"{self._local_day(prev.get('ts', ''))}.json"
         if not shard.exists():
             return
         data = self._read(shard)
         for t in data.get("turns", []):
             if t.get("ts") == prev.get("ts") and t.get("owner") == prev.get("owner"):
+                was = t.get("outcome")
+                initial = t.get("outcome_initial", was)
+                if prev_verdict == "dissatisfied":
+                    final = "fail"
+                else:  # satisfied confirms success unless CODE observed fail
+                    final = initial if initial == "fail" else "success"
                 t["owner_verdict"] = prev_verdict
                 if final and final != was:
-                    if was:
+                    if was and "outcome_initial" not in t:
                         t["outcome_initial"] = was
                     t["outcome"] = final
                 break
@@ -593,7 +612,7 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                             reply = handle(acct, str(body.get("text", "")), base,
                                            make_llm(base))
                             return self._send(200, {"reply": reply})
-                        except BrokenPipeError:
+                        except (BrokenPipeError, ConnectionResetError):
                             return None
                         except Exception:
                             log.exception("onboarding failed for %s", acct)
@@ -608,18 +627,21 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                     if not text and not images and not img_notes:
                         return self._send(400, {"error": "missing 'text'"})
                     skey = prefix + str(body.get("session", "") or "default")
+                    history = store.history(skey)
+                    prev_ref = history[-1] if history else None  # the turn the
+                    #             model will judge — captured BEFORE the turn
                     turn = services.handle_turn(text, settings, make_llm(settings),
-                                                history=store.history(skey),
+                                                history=history,
                                                 image_paths=images or None,
                                                 rejected_images=img_notes or None)
                     reply = turn.reply
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
                     store.append(skey, noted.strip(), reply, outcome=turn.outcome,
                                  repaired=turn.repaired, self_reported=turn.self_reported,
-                                 prev_verdict=turn.prev_verdict)
+                                 prev_verdict=turn.prev_verdict, prev_ref=prev_ref)
                     try:
                         return self._send(200, {"reply": reply})
-                    except BrokenPipeError:
+                    except (BrokenPipeError, ConnectionResetError):
                         # The bridge gave up waiting (its timeout) and already
                         # told the user "still computing" — a finished answer
                         # must never be dropped (2026-07-17 noon incident: an
@@ -661,7 +683,7 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                 log.exception("serve: %s failed", self.path)
                 try:
                     return self._send(500, {"error": str(exc)})
-                except BrokenPipeError:  # caller already gone (bridge timeout)
+                except (BrokenPipeError, ConnectionResetError):  # caller already gone (bridge timeout)
                     return None
 
     server = ThreadingHTTPServer(("127.0.0.1", boot.serve_port if port is None else port),
@@ -888,6 +910,15 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                     log.warning("%s poll failed: %s", channel.name, exc)
                     continue
                 for message in messages:
+                    if message.get("kind") == "unsupported_media":
+                        # deterministic fixed reply, no LLM (audit F8) —
+                        # targeted at the sender via in_reply_to, never @all
+                        try:
+                            channel.send("这个渠道暂时收不到图片，请用微信或"
+                                         "邮件发图片 🙏", in_reply_to=message)
+                        except Exception:
+                            log.exception("unsupported-media ack failed")
+                        continue
                     log.info("%s message from %s: %.80s", channel.name,
                              message.get("sender", "?"), message["text"])
                     try:

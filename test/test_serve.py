@@ -309,3 +309,69 @@ def test_session_reverse_migration(settings):
     assert n == 1 and not (store.dir / h).exists()   # shards folded back
     flat = json.loads((store.dir / f"{h}.json").read_text())
     assert [t["owner"] for t in flat["turns"]] == ["q1", "q2"]
+
+
+def test_build_promise_only_with_announce_channel(settings, monkeypatch):
+    """F22: no announce channel resolved → no 'I'll message you' promise;
+    with one → promise an ATTEMPT (announce is best-effort)."""
+    from assistant.agent.actions import handlers as handlers_mod
+    from assistant.agent.actions.registry import run_action
+
+    monkeypatch.setattr(settings, "deployment_mode", "multi_tenant")
+    monkeypatch.setattr(
+        "assistant.agent.tasks.build_website.site_repo_status",
+        lambda settings: {"state": "absent", "url": "https://octo.github.io"})
+    monkeypatch.setattr(handlers_mod, "_enqueue",
+                        lambda *a, **k: {"id": 1}, raising=False)
+
+    out = run_action("build_personal_website", {}, settings)
+    assert "message you when it's done" not in out
+    assert "check back" in out
+
+    monkeypatch.setattr(settings, "announce_account", "acc")
+    monkeypatch.setattr(settings, "announce_to", "owner-im")
+    out = run_action("build_personal_website", {}, settings)
+    assert "尝试给你发消息" in out
+
+
+def test_prev_verdict_binds_to_captured_predecessor(settings):
+    """F13: the verdict lands on the turn the history read ENDED with, not
+    whatever happens to be last at append time (concurrent-turn mislabeling)."""
+    from assistant.platform.serve import SessionStore
+
+    store = SessionStore(settings.data_dir)
+    store.append("s", "q1", "a1", outcome="success")
+    prev_ref = store.history("s")[-1]            # both threads captured q1
+    store.append("s", "q2", "a2", outcome="success")   # thread B lands first
+    # thread A's verdict about q1 must hit q1 even though q2 is now last
+    store.append("s", "不对，重说", "好的", outcome="neutral",
+                 prev_verdict="dissatisfied", prev_ref=prev_ref)
+    turns = store._all("s")
+    q1 = next(t for t in turns if t["owner"] == "q1")
+    q2 = next(t for t in turns if t["owner"] == "q2")
+    assert q1.get("owner_verdict") == "dissatisfied"
+    assert q1.get("outcome") == "fail"
+    assert "owner_verdict" not in q2             # the innocent turn untouched
+
+
+def test_conflicting_verdicts_stay_internally_consistent(settings):
+    """F13 round-2: opposing verdicts on one predecessor decide from the
+    CURRENT stored outcome — never satisfied-verdict + fail-outcome skew, and
+    a code-observed fail is never upgraded by a late satisfied."""
+    from assistant.platform.serve import SessionStore
+
+    store = SessionStore(settings.data_dir)
+    store.append("s", "q1", "a1", outcome="success")
+    ref = store.history("s")[-1]
+    store.append("s", "不对", "改", prev_verdict="dissatisfied", prev_ref=ref)
+    store.append("s", "谢谢", "客气", prev_verdict="satisfied", prev_ref=ref)
+    q1 = next(t for t in store._all("s") if t["owner"] == "q1")
+    assert q1["owner_verdict"] == "satisfied"
+    assert q1["outcome"] == "success"           # consistent pair, not fail
+    assert q1["outcome_initial"] == "success"   # first change preserved it
+
+    store.append("s2", "q2", "a2", outcome="fail")   # code-observed fail
+    ref2 = store.history("s2")[-1]
+    store.append("s2", "多谢", "🙏", prev_verdict="satisfied", prev_ref=ref2)
+    q2 = next(t for t in store._all("s2") if t["owner"] == "q2")
+    assert q2["outcome"] == "fail"              # never upgraded

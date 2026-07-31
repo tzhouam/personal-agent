@@ -84,10 +84,14 @@ class UserRegistry:
 
     def scheduled(self) -> list[str]:
         """uids of `active` users whose `schedule` is `daily` — what the daily
-        and weekly fan-outs iterate. A missing `schedule` counts as `on_demand`
-        (never scheduled), so only explicit opt-ins get automated runs."""
+        and weekly fan-outs iterate. A MISSING `schedule` counts as `daily`:
+        schedule-less records can only predate the opt-in field (current code
+        always writes one at creation), and those legacy users were all being
+        run daily — the earlier `on_demand` default silently dropped every
+        pre-existing tenant from the fan-out on deploy (audit F20). New users
+        still get an explicit `on_demand` written at creation."""
         return [u["uid"] for u in self._load()["users"]
-                if u.get("status") == "active" and u.get("schedule", "on_demand") == "daily"]
+                if u.get("status") == "active" and u.get("schedule", "daily") == "daily"]
 
     def users(self) -> list[dict]:
         """All user records (uid, display, status, channels) — the read API for

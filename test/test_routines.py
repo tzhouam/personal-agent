@@ -161,3 +161,37 @@ def test_create_routine_action_monthly(settings):
                      {"task": "交房租", "time": "09:00", "days": "monthly:1"},
                      settings)
     assert "rt1 created" in out and "monthly:1" in out
+
+
+def test_routine_created_after_its_time_waits_for_next_occurrence(settings):
+    """F4: 'every morning 07:30' created at 22:00 must not fire at 22:00 —
+    already-due-at-creation initializes last_checked=today; a routine created
+    BEFORE its time still fires the same day."""
+    from datetime import datetime
+
+    from assistant.agent.routines import RoutineStore
+
+    store = RoutineStore(settings.profile_dir)
+    evening = datetime(2026, 6, 10, 22, 0)
+    r1 = store.add("morning weather", "07:30", "daily", now=evening)
+    assert r1["last_checked"] == "2026-06-10"          # skips today
+    assert store.claim_due(now=evening) == []          # nothing fires now
+    next_morning = datetime(2026, 6, 11, 7, 30)
+    assert [x["id"] for x in store.claim_due(now=next_morning)] == [r1["id"]]
+
+    morning = datetime(2026, 6, 12, 6, 0)
+    r2 = store.add("standup ping", "09:00", "workdays", now=morning)
+    assert r2["last_checked"] is None                  # not yet due; fires today
+    at_nine = datetime(2026, 6, 12, 9, 0)
+    assert r2["id"] in [x["id"] for x in store.claim_due(now=at_nine)]
+
+    # created exactly within the scheduled minute counts as passed (the
+    # boundary is claim_due's own comparison)
+    r3 = store.add("noon check", "12:00", "daily",
+                   now=datetime(2026, 6, 12, 12, 0, 20))
+    assert r3["last_checked"] == "2026-06-12"
+
+    # weekly kind whose day doesn't match today stays unguarded
+    r4 = store.add("sunday review", "08:00", "sun",
+                   now=datetime(2026, 6, 10, 9, 0))   # a Wednesday
+    assert r4["last_checked"] is None

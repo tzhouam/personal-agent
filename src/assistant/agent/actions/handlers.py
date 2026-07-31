@@ -255,10 +255,20 @@ def _build_personal_website(settings: Settings, p: dict) -> str:
                 "replace it with a fresh one built from your GitHub activity.")
     job = _enqueue(settings, "build_website", {"overwrite": confirm},
                    dedupe_key=f"{settings.uid}:build_website", dedupe_scope="active")
+    # Promise an ATTEMPTED completion message only when an announce channel
+    # actually resolves for this user — self-serve tenants onboard with
+    # ANNOUNCE_* empty, and the old unconditional promise meant a FAILED
+    # build was communicated to no one (audit F22). Announce delivery is
+    # itself best-effort, so even with a channel the wording is "尝试".
+    can_notify = bool(settings.announce_account and settings.announce_to)
+    #            (send_wechat's own "disabled" condition, kept in lockstep)
+    tail = (" — 完成后我会尝试给你发消息。" if can_notify else
+            " (this deployment can't push you a completion message — check "
+            "back in a few minutes).")
     if job is None:
-        return "a website build is already running for you — I'll message you when it's live."
-    return (f"building your site now (enrich + publish, ~a few minutes). It'll be live "
-            f"at {st['url']} — I'll message you when it's done.")
+        return "a website build is already running for you" + tail
+    return (f"building your site now (enrich + publish, ~a few minutes). "
+            f"It'll be live at {st['url']}" + tail)
 
 
 # ── profile ──────────────────────────────────────────────────────────
@@ -312,6 +322,10 @@ def _set_reminder(settings: Settings, p: dict) -> str:
     """Schedule a one-shot WeChat reminder: parse `when` (+30m/+2h/HH:MM/
     'YYYY-MM-DD HH:MM') and store `message`. Returns the reminder id + fire time,
     or a format hint on an unparseable `when`."""
+    from assistant.agent.chat.service import listener_active
+    if listener_active():
+        return ("此模式（chat-listen）不支持定时提醒/例行任务 — 它没有投递循环，"
+                "请运行 `assistant serve`")
     from assistant.platform.notify import ReminderStore, parse_when
 
     due = parse_when(p.get("when", ""))
@@ -349,6 +363,10 @@ def _create_routine(settings: Settings, p: dict) -> str:
     on a free-text `condition` checked at fire time, optionally bound to a
     saved `workflow` (fired deterministically, no text interpretation).
     Returns the routine id + schedule, or a format hint on invalid input."""
+    from assistant.agent.chat.service import listener_active
+    if listener_active():
+        return ("此模式（chat-listen）不支持定时提醒/例行任务 — 它没有投递循环，"
+                "请运行 `assistant serve`")
     from assistant.agent.routines import RoutineStore
 
     if not str(p.get("task", "")).strip() and not str(p.get("workflow", "")).strip():

@@ -265,8 +265,12 @@ def test_routine_binding_fires_deterministically(settings, monkeypatch, sent):
     routine = RoutineStore(settings.data_dir).active()[0]
     assert routine["workflow"] == wf["id"] and "run workflow" in routine["task"]
 
-    from datetime import datetime
-    fired = fire_due(settings, now=datetime.now().replace(hour=23, minute=59))
+    from datetime import datetime, timedelta
+
+    # F4 guard: created-today-already-due waits for the NEXT occurrence, so
+    # fire on tomorrow's clock
+    fired = fire_due(settings, now=datetime.now().replace(hour=23, minute=59)
+                     + timedelta(days=1))
     assert fired and fired[0]["fired"] and wf["id"] in fired[0]["note"]
     assert len(spawns) == 1                                # dispatched, not chatted
     # retire cancels the bound routine
