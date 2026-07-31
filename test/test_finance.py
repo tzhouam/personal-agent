@@ -231,14 +231,20 @@ def test_similar_warning_on_same_day_amount(settings):
 
 
 def test_category_detail_drilldown(settings):
+    # a FIXED month, not "today's": category_detail is calendar-month scoped,
+    # so seeding "yesterday" breaks on the 1st of every month (found 08-01)
     store = FinanceStore(settings.profile_dir)
-    store.add("expense", 45, category="food", note="美团", time="12:10")
+    store.add("expense", 45, category="food", note="美团", time="12:10",
+              when="2026-06-10")
     store.add("expense", 55, category="food", note="美团", time="12:40",
-              when=_today(-1))
-    store.add("expense", 342, category="food", note="虎东白", time="20:34")
-    store.add("expense", 30, category="food", note="奶茶", time="22:30")
-    store.add("expense", 100, category="shopping", note="MUJI", time="15:00")
-    d = store.category_detail("food")
+              when="2026-06-09")
+    store.add("expense", 342, category="food", note="虎东白", time="20:34",
+              when="2026-06-10")
+    store.add("expense", 30, category="food", note="奶茶", time="22:30",
+              when="2026-06-10")
+    store.add("expense", 100, category="shopping", note="MUJI", time="15:00",
+              when="2026-06-10")
+    d = store.category_detail("food", month="2026-06")
     assert d["count"] == 4 and d["total"] == 472.0 and d["avg"] == 118.0
     assert d["max"]["amount"] == 342.0 and d["max"]["note"] == "虎东白"
     assert d["by_note"]["美团"] == {"total": 100.0, "count": 2}
