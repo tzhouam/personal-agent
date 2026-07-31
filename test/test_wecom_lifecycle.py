@@ -939,3 +939,37 @@ def test_concurrent_cap_is_process_wide_across_rotation(settings, monkeypatch):
             c.close()
     assert _wait_until(lambda: b"400" in _raw_status(port2, "")), \
         "service did not resume on the new generation"
+
+
+def test_image_callback_becomes_unsupported_media_event(settings, monkeypatch):
+    """F8: an owner's WeCom image message (MsgType=image, no Content) used to
+    fall through both branches — 200 OK, nothing else, the photo silently
+    ignored. It now queues a structured event the poll loop answers with a
+    fixed reply; non-owner images stay ignored."""
+    import httpx
+
+    port = _free_port()
+    _wecom_settings(settings, monkeypatch, port, owner="boss")
+    ch = wecom.WeComChannel(settings)
+    assert ch.start_callback_server() is True
+
+    def post_msg(inner_xml):
+        blob, sig, ts, nonce = _encrypt_callback(
+            settings.wecom_token, settings.wecom_aes_key,
+            settings.wecom_corp_id, inner_xml)
+        return httpx.post(
+            f"http://127.0.0.1:{port}/?msg_signature={sig}&timestamp={ts}&nonce={nonce}",
+            content=f"<xml><Encrypt>{blob}</Encrypt></xml>", timeout=5)
+
+    r = post_msg("<xml><FromUserName>boss</FromUserName>"
+                 "<MsgType>image</MsgType><PicUrl>http://x</PicUrl></xml>")
+    assert r.status_code == 200
+    events = ch.poll()
+    assert len(events) == 1
+    assert events[0]["kind"] == "unsupported_media"
+    assert events[0]["sender"] == "boss" and events[0]["text"] == "[图片]"
+
+    r = post_msg("<xml><FromUserName>stranger</FromUserName>"
+                 "<MsgType>image</MsgType></xml>")
+    assert r.status_code == 200
+    assert ch.poll() == []                       # non-owner image ignored

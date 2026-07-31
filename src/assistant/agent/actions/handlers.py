@@ -322,6 +322,10 @@ def _set_reminder(settings: Settings, p: dict) -> str:
     """Schedule a one-shot WeChat reminder: parse `when` (+30m/+2h/HH:MM/
     'YYYY-MM-DD HH:MM') and store `message`. Returns the reminder id + fire time,
     or a format hint on an unparseable `when`."""
+    from assistant.agent.chat.service import listener_active
+    if listener_active():
+        return ("此模式（chat-listen）不支持定时提醒/例行任务 — 它没有投递循环，"
+                "请运行 `assistant serve`")
     from assistant.platform.notify import ReminderStore, parse_when
 
     due = parse_when(p.get("when", ""))
@@ -359,6 +363,10 @@ def _create_routine(settings: Settings, p: dict) -> str:
     on a free-text `condition` checked at fire time, optionally bound to a
     saved `workflow` (fired deterministically, no text interpretation).
     Returns the routine id + schedule, or a format hint on invalid input."""
+    from assistant.agent.chat.service import listener_active
+    if listener_active():
+        return ("此模式（chat-listen）不支持定时提醒/例行任务 — 它没有投递循环，"
+                "请运行 `assistant serve`")
     from assistant.agent.routines import RoutineStore
 
     if not str(p.get("task", "")).strip() and not str(p.get("workflow", "")).strip():

@@ -4,6 +4,7 @@ Run with `assistant chat-listen` (foreground; nohup it for background use).
 A pid file prevents two listeners racing on the same inbox watermark.
 """
 
+import contextvars
 import logging
 import os
 import time
@@ -75,44 +76,74 @@ def _acquire_pid_lock(settings: Settings) -> bool:
     return True
 
 
+# True while the standalone listener is the host: scheduling actions
+# (set_reminder/create_routine) refuse under it — the listener runs no
+# delivery tick, so accepting them silently created reminders that would
+# NEVER fire (audit F15). A contextvar, not global state: explicit,
+# test-resettable, and scoped to the dispatching thread.
+_listener_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "chat_listener_active", default=False)
+
+
+def listener_active() -> bool:
+    """Is the current execution hosted by `assistant chat-listen`?"""
+    return _listener_active.get()
+
+
 def run_listener(settings: Settings, once: bool = False) -> int:
-    """Poll every enabled channel forever, answering each owner message via the
-    chat agent and replying on the same channel. ``once`` runs a single sweep
-    (and skips the pid lock) for testing. Returns a nonzero exit code when it
-    can't start — lock already held, or no channel configured. Per-channel and
-    per-message errors are logged and swallowed so one failure never stops the
-    loop."""
+    """DEPRECATED surface (prefer `assistant serve` — same channels plus
+    reminders/routines/HTTP): poll every enabled channel, answering each
+    owner message via the chat agent on the same channel. Scheduling actions
+    refuse under this host (no delivery tick here — accepting them created
+    reminders that never fired), and Settings/LLM/channels are rebuilt every
+    sweep so a `.env` edit takes effect without a restart (the listener used
+    to pin boot-time credentials forever). ``once`` runs a single sweep with
+    the GIVEN settings (and skips the pid lock) for testing. Returns nonzero
+    when it can't start."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log.warning("chat-listen is deprecated — `assistant serve` runs the same "
+                "channels plus reminders, routines, and the HTTP API")
     if not once and not _acquire_pid_lock(settings):
         return 1
-
-    llm = LLM(settings)
-    channels = build_channels(settings)
-    if not channels:
+    if not build_channels(settings, log_wecom=True):
         log.error("no chat channel configured (need SMTP creds or WeCom app)")
         return 1
 
-    log.info("chat listener started — channels: %s, poll every %ds",
-             ", ".join(c.name for c in channels), settings.chat_poll_seconds)
-    while True:
-        for channel in channels:
-            try:
-                messages = channel.poll()
-            except Exception as exc:
-                log.warning("%s poll failed: %s", channel.name, exc)
-                continue
-            for message in messages:
-                log.info("%s message from %s: %.80s", channel.name,
-                         message.get("sender", "?"), message["text"])
+    log.info("chat listener started — poll every %ds", settings.chat_poll_seconds)
+    token = _listener_active.set(True)
+    try:
+        while True:
+            if not once:  # hot-reload: fresh credentials/config each sweep
+                settings = Settings()
+            llm = LLM(settings)
+            for channel in build_channels(settings, log_wecom=False):
                 try:
-                    reply = handle_message(
-                        message["text"], settings, llm,
-                        image_paths=message.get("images"),
-                        rejected_images=message.get("rejected_images"))
-                    channel.send(reply, in_reply_to=message)
-                    log.info("replied via %s (%d chars)", channel.name, len(reply))
-                except Exception:
-                    log.exception("failed to answer %s message", channel.name)
-        if once:
-            return 0
-        time.sleep(settings.chat_poll_seconds)
+                    messages = channel.poll()
+                except Exception as exc:
+                    log.warning("%s poll failed: %s", channel.name, exc)
+                    continue
+                for message in messages:
+                    if message.get("kind") == "unsupported_media":
+                        try:  # deterministic fixed reply, no LLM (audit F8)
+                            channel.send("这个渠道暂时收不到图片，请用微信或"
+                                         "邮件发图片 🙏", in_reply_to=message)
+                        except Exception:
+                            log.exception("unsupported-media ack failed")
+                        continue
+                    log.info("%s message from %s: %.80s", channel.name,
+                             message.get("sender", "?"), message["text"])
+                    try:
+                        reply = handle_message(
+                            message["text"], settings, llm,
+                            image_paths=message.get("images"),
+                            rejected_images=message.get("rejected_images"))
+                        channel.send(reply, in_reply_to=message)
+                        log.info("replied via %s (%d chars)",
+                                 channel.name, len(reply))
+                    except Exception:
+                        log.exception("failed to answer %s message", channel.name)
+            if once:
+                return 0
+            time.sleep(settings.chat_poll_seconds)
+    finally:
+        _listener_active.reset(token)

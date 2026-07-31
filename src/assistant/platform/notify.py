@@ -26,6 +26,64 @@ from assistant.platform.locks import locked_transaction
 log = logging.getLogger("assistant")
 
 
+def split_message(text: str, max_bytes: int, hard_max_parts: int = 5) -> list[str]:
+    """Split ``text`` into UTF-8-byte-bounded parts on paragraph/sentence
+    boundaries (audit F10 — the old char-count caps silently truncated long
+    replies, and WeCom's limit is BYTES, so a ~700-char Chinese reply
+    exceeded 2048B, the API errored, and the whole reply was lost). Part
+    markers' own bytes are reserved inside the budget; cuts never split a
+    codepoint. Past ``hard_max_parts`` the final part ends with a visible
+    truncation marker."""
+    marker_reserve = len(f"({hard_max_parts}/{hard_max_parts}) ".encode())
+    budget = max(max_bytes - marker_reserve, 64)
+    parts: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining.encode()) <= budget:
+            parts.append(remaining)
+            break
+        # widest prefix under budget, codepoint-safe
+        cut = len(remaining)
+        while len(remaining[:cut].encode()) > budget:
+            cut -= max(1, (len(remaining[:cut].encode()) - budget) // 4)
+        # prefer a paragraph, then sentence-ish, then any boundary
+        window = remaining[:cut]
+        for sep in ("\n\n", "\n", "。", "！", "？", ". ", "; ", " "):
+            pos = window.rfind(sep)
+            if pos > cut // 3:
+                cut = pos + len(sep)
+                break
+        parts.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if len(parts) > hard_max_parts:
+        parts = parts[:hard_max_parts]
+        parts[-1] = parts[-1].rstrip() + "…(回复过长已截断)"
+    if len(parts) > 1:
+        parts = [f"({i + 1}/{len(parts)}) {p}" for i, p in enumerate(parts)]
+    return parts
+
+
+def send_chunked(send_one, text: str, max_bytes: int,
+                 hard_max_parts: int = 5) -> dict:
+    """Sequentially send ``text`` in byte-bounded parts via ``send_one(part)``
+    (which must RAISE on failure). Returns the SendReport contract:
+    ``{"parts_sent": delivered_count, "parts_total": produced_count,
+    "error": None | str}``. On the first failed part it stops — no
+    out-of-order tail; retry ownership stays with the calling surface, and a
+    retry duplicating already-sent parts is the accepted tradeoff (loss is
+    not)."""
+    parts = split_message(text, max_bytes, hard_max_parts)
+    sent = 0
+    for part in parts:
+        try:
+            send_one(part)
+        except Exception as exc:
+            return {"parts_sent": sent, "parts_total": len(parts),
+                    "error": f"{exc} (sent {sent}/{len(parts)})"}
+        sent += 1
+    return {"parts_sent": sent, "parts_total": len(parts), "error": None}
+
+
 def send_to_conversation(settings: Settings, account_id: str, target: str,
                          text: str) -> str:
     """Send ``text`` into one specific WeChat conversation on one gateway
@@ -39,20 +97,26 @@ def send_to_conversation(settings: Settings, account_id: str, target: str,
     # its own directory (e.g. /opt/node24/bin) first so any calling env works
     env = {**os.environ,
            "PATH": f"{Path(settings.openclaw_bin).parent}:{os.environ.get('PATH', '')}"}
-    try:
+
+    def _one(part: str) -> None:
         proc = subprocess.run(
             [settings.openclaw_bin, "message", "send",
              "--channel", settings.announce_channel,
              "--account", str(account_id),
              "--target", str(target),
-             "-m", text[:1000]],
+             "-m", part],
             capture_output=True, text=True, timeout=90, env=env)
-    except Exception as exc:
-        return f"failed: {exc}"
-    if proc.returncode == 0:
+        if proc.returncode != 0:
+            detail = (proc.stderr.strip() or proc.stdout.strip())[:200]
+            raise RuntimeError(f"rc={proc.returncode} {detail}")
+
+    # byte-bounded chunking replaces the silent text[:1000] cap (audit F10);
+    # callers compare the return with "sent" VERBATIM, so full success keeps
+    # that exact string and part detail rides only inside failure text
+    report = send_chunked(_one, text, settings.notify_max_bytes)
+    if report["error"] is None:
         return "sent"
-    detail = (proc.stderr.strip() or proc.stdout.strip())[:200]
-    return f"failed: rc={proc.returncode} {detail}"
+    return f"failed: {report['error']}"
 
 
 def send_wechat(settings: Settings, text: str) -> str:

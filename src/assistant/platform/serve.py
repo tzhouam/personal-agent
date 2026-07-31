@@ -901,6 +901,15 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                     log.warning("%s poll failed: %s", channel.name, exc)
                     continue
                 for message in messages:
+                    if message.get("kind") == "unsupported_media":
+                        # deterministic fixed reply, no LLM (audit F8) —
+                        # targeted at the sender via in_reply_to, never @all
+                        try:
+                            channel.send("这个渠道暂时收不到图片，请用微信或"
+                                         "邮件发图片 🙏", in_reply_to=message)
+                        except Exception:
+                            log.exception("unsupported-media ack failed")
+                        continue
                     log.info("%s message from %s: %.80s", channel.name,
                              message.get("sender", "?"), message["text"])
                     try:
