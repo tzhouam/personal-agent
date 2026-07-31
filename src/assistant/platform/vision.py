@@ -79,6 +79,7 @@ def describe_images(settings: Settings, paths: list[str]) -> list[str]:
 
     if usable:
         described = None
+        configured = bool(settings.vision_api_key and settings.vision_model)
         for backend in (_remote_describe,):
             try:
                 described = backend(settings, usable)
@@ -87,8 +88,13 @@ def describe_images(settings: Settings, paths: list[str]) -> list[str]:
             except Exception as exc:
                 log.warning("vision backend %s failed: %s", backend.__name__, exc)
         if not described:  # None (no backend) and [] (empty return) both fail
-            described = ["[image could not be analyzed: no vision backend "
-                         "available — see VISION_* in .env]"] * len(usable)
+            # A configured backend that ERRORED is a transient failure — do
+            # not tell the owner vision isn't set up (that message sent
+            # owners on pointless reconfiguration hunts).
+            described = [("[image analysis failed this time (backend error) "
+                          "— try again]") if configured else
+                         ("[image could not be analyzed: no vision backend "
+                          "available — see VISION_* in .env]")] * len(usable)
         # Cardinality guard: the contract holds even against a backend that
         # miscounts — short returns are padded, long ones trimmed.
         if len(described) < len(usable):

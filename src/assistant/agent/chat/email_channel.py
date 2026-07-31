@@ -120,11 +120,12 @@ class EmailChannel:
         text = bare[len(self.settings.chat_subject_prefix):].lstrip(":： ").strip()
         if body:
             text = f"{text}\n{body}".strip()
-        images = _image_attachments(msg, self.settings)
-        if not text and not images:
+        images, rejected = _image_attachments(msg, self.settings)
+        if not text and not images and not rejected:
             return None
         return {"channel": self.name, "text": text[:4000], "subject": subject,
-                "sender": sender, "images": images}
+                "sender": sender, "images": images,
+                "rejected_images": rejected}
 
     def send(self, text: str, in_reply_to: dict | None = None) -> None:
         """Email ``text`` back to the owner as HTML (each line a paragraph),
@@ -136,27 +137,50 @@ class EmailChannel:
         send_email(self.settings, subject, body)
 
 
-def _image_attachments(msg: email.message.Message, settings: Settings) -> list[str]:
+def _image_attachments(msg: email.message.Message,
+                       settings: Settings) -> tuple[list[str], list[str]]:
     """Save the mail's image attachments into `DATA_DIR/media/` and return
-    their paths (capped at `vision_max_images`), for the vision chain. Only
-    runs for owner mail — `_parse` rejects other senders before we get here."""
+    `(paths, rejection_notes)` for the vision chain. Only runs for owner
+    mail — `_parse` rejects other senders before we get here. Image-typed
+    parts that CANNOT be staged (unsupported suffix, empty, oversized, past
+    the cap) become bracketed notes instead of vanishing — a silently
+    dropped attachment reads to the owner as "the agent ignored my photo"."""
     from assistant.platform.vision import media_type_for
 
     paths: list[str] = []
+    rejected: list[str] = []
+
+    def _clip(name: str) -> str:
+        return name if len(name) <= 80 else name[:77] + "…"
+
     if not msg.is_multipart():
-        return paths
+        return paths, rejected
     media_dir = settings.data_dir / "media"
+    suffix_of = {"image/png": ".png", "image/jpeg": ".jpg",
+                 "image/gif": ".gif", "image/webp": ".webp"}
     for part in msg.walk():
-        if len(paths) >= settings.vision_max_images:
-            break
-        if not part.get_content_type().startswith("image/"):
+        ctype = part.get_content_type()
+        if not ctype.startswith("image/"):
             continue
-        name = part.get_filename() or "attachment.png"
-        suffix = Path(name).suffix.lower() or ".png"
-        if media_type_for(f"x{suffix}") is None:
+        name = part.get_filename() or "attachment"
+        if len(paths) >= settings.vision_max_images:
+            rejected.append(f"[image ignored (max {settings.vision_max_images} "
+                            f"per message): {_clip(Path(name).name)}]")
+            continue
+        # Validate by the declared MIME type, not the filename: an image/tiff
+        # named scan.png must not be staged as a PNG, and an extensionless
+        # JPEG must not default to .png. The suffix is derived FROM the type.
+        suffix = suffix_of.get(ctype)
+        if suffix is None:
+            rejected.append(f"[unsupported image type ({ctype[:40]}): "
+                            f"{_clip(Path(name).name)}]")
             continue
         payload = part.get_payload(decode=True) or b""
-        if not payload or len(payload) > 10 * 1024 * 1024:
+        if not payload:
+            rejected.append(f"[empty image attachment: {_clip(Path(name).name)}]")
+            continue
+        if len(payload) > 10 * 1024 * 1024:
+            rejected.append(f"[image too large to process: {_clip(Path(name).name)}]")
             continue
         media_dir.mkdir(parents=True, exist_ok=True)
         path = media_dir / (
@@ -164,7 +188,7 @@ def _image_attachments(msg: email.message.Message, settings: Settings) -> list[s
             f"{hashlib.sha1(payload).hexdigest()[:8]}{suffix}")
         path.write_bytes(payload)
         paths.append(str(path))
-    return paths
+    return paths, rejected
 
 
 def _text_body(msg: email.message.Message) -> str:

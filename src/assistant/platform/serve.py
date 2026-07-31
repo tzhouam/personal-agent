@@ -72,7 +72,8 @@ class ServeServices:
     Every callable is agent-owned; the platform only holds the contract."""
 
     run_action: Callable       # (name, params, settings) -> str
-    handle_turn: Callable      # (text, settings, llm, *, history, image_paths) -> turn
+    handle_turn: Callable      # (text, settings, llm, *, history, image_paths,
+    #                              rejected_images) -> turn
     build_channels: Callable   # (settings, *, log_wecom) -> list[channel]
     email_channel: Callable    # (settings) -> channel  (per-user email poller)
     fire_due: Callable         # (settings) -> None     (conditional routines)
@@ -603,13 +604,14 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             try:
                 if self.path == "/chat":
                     text = str(body.get("text", "")).strip()
-                    images = _staged_images(body, settings)
-                    if not text and not images:
+                    images, img_notes = _staged_images(body, settings)
+                    if not text and not images and not img_notes:
                         return self._send(400, {"error": "missing 'text'"})
                     skey = prefix + str(body.get("session", "") or "default")
                     turn = services.handle_turn(text, settings, make_llm(settings),
                                                 history=store.history(skey),
-                                                image_paths=images or None)
+                                                image_paths=images or None,
+                                                rejected_images=img_notes or None)
                     reply = turn.reply
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
                     store.append(skey, noted.strip(), reply, outcome=turn.outcome,
@@ -668,46 +670,71 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
     return server
 
 
-def _staged_images(body: dict, settings: Settings) -> list[str]:
-    """Image attachments from a /chat body, as verified local paths.
+def _staged_images(body: dict, settings: Settings) -> tuple[list[str], list[str]]:
+    """Image attachments from a /chat body → `(local_paths, rejection_notes)`.
 
-    Two forms, capped at `vision_max_images` total: `image_paths` (existing
-    local files — the OpenClaw bridge passes the gateway's staged media
-    straight through; trusted because the socket is loopback + bearer-token)
-    and `images` (`[{media_type, data(b64)}, …]`), which are decoded into
-    `DATA_DIR/media/` for the vision chain. Bad entries are skipped, never
-    fatal.
+    Two forms: `image_paths` (existing local files — the OpenClaw bridge
+    passes the gateway's staged media straight through; trusted because the
+    socket is loopback + bearer-token) and `images`
+    (`[{media_type, data(b64)}, …]`), decoded into `DATA_DIR/media/`.
+
+    Staging keeps only its TRUST duties (multi-tenant path refusal, byte
+    caps); validity (exists/type/size, the max-images cap) is judged once by
+    the chat arbiter, which receives everything. What staging must drop, it
+    reports as a bracketed note instead of vanishing — a silently discarded
+    attachment reads to the owner as "the agent ignored my photo".
 
     In `multi_tenant`, caller-supplied `image_paths` are **refused** — a
     filesystem path from the network is a traversal / cross-user-reference
     vector (§A.4); such deployments send image **bytes** only. `settings` is
     already the resolved user's, so decoded media lands under that user's
     `data_dir/media/`."""
-    from assistant.platform.vision import media_type_for
-
     out: list[str] = []
+    notes: list[str] = []
+    # Container shapes are enforced FIRST: iterating a non-list (a string
+    # body iterates per character) would amplify one malformed request into
+    # thousands of notes/allocations.
+    supplied_paths = body.get("image_paths") or []
+    if not isinstance(supplied_paths, list):
+        notes.append("[malformed image_paths payload ignored]")
+        supplied_paths = []
+    imgs = body.get("images") or []
+    if not isinstance(imgs, list):
+        notes.append("[malformed images payload ignored]")
+        imgs = []
+    if len(supplied_paths) > 16:
+        notes.append(f"[{len(supplied_paths) - 16} image path(s) ignored]")
+        supplied_paths = supplied_paths[:16]
+    if len(imgs) > 16:
+        notes.append(f"[{len(imgs) - 16} image entr(ies) ignored]")
+        imgs = imgs[:16]
     if settings.deployment_mode != "multi_tenant":
-        for p in body.get("image_paths") or []:
-            path = Path(str(p))
-            if path.is_file() and media_type_for(path):
-                out.append(str(path))
+        out.extend(str(Path(str(p))) for p in supplied_paths)
+    elif supplied_paths:
+        notes.append(f"[{len(supplied_paths)} image path(s) refused — this "
+                     "deployment accepts image bytes only]")
     suffix_of = {"image/png": ".png", "image/jpeg": ".jpg",
                  "image/gif": ".gif", "image/webp": ".webp"}
-    for img in body.get("images") or []:
+    for img in imgs:
         if not isinstance(img, dict):
+            notes.append("[malformed image entry ignored]")
             continue
         suffix = suffix_of.get(str(img.get("media_type", "")))
         if not suffix:
+            notes.append("[unsupported image media type: "
+                         f"{str(img.get('media_type', '?'))[:40]}]")
             continue
         try:
             data = base64.b64decode(str(img.get("data", "")), validate=True)
         except Exception:
+            notes.append("[image with invalid base64 data ignored]")
             continue
         # Defense in depth (§A.4): the bridge already caps per-image size, but in
         # multi_tenant the daemon must not rely on the caller — oversized blobs
         # are dropped here too. single_user keeps today's behavior (bounded by
         # _MAX_BODY anyway).
         if settings.deployment_mode == "multi_tenant" and len(data) > _MAX_IMAGE_BYTES:
+            notes.append("[image too large — over the per-image cap]")
             continue
         media_dir = settings.data_dir / "media"
         media_dir.mkdir(parents=True, exist_ok=True)
@@ -716,7 +743,7 @@ def _staged_images(body: dict, settings: Settings) -> list[str]:
             f"{hashlib.sha1(data).hexdigest()[:8]}{suffix}")
         path.write_bytes(data)
         out.append(str(path))
-    return out[:settings.vision_max_images]
+    return out, notes
 
 
 def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
@@ -753,7 +780,8 @@ def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
             skey = f"{user.uid}:email:{message.get('sender', '')}"
             turn = services.handle_turn(message["text"], user, make_llm(user),
                                         history=store.history(skey),
-                                        image_paths=message.get("images"))
+                                        image_paths=message.get("images"),
+                                        rejected_images=message.get("rejected_images"))
             reply = turn.reply
             store.append(skey, message["text"], reply, outcome=turn.outcome,
                          repaired=turn.repaired, self_reported=turn.self_reported,
@@ -864,10 +892,11 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                              message.get("sender", "?"), message["text"])
                     try:
                         session = f"{channel.name}:{message.get('sender', '')}"
-                        turn = services.handle_turn(message["text"], settings,
-                                                    make_llm(settings),
-                                                    history=sessions.history(session),
-                                                    image_paths=message.get("images"))
+                        turn = services.handle_turn(
+                            message["text"], settings, make_llm(settings),
+                            history=sessions.history(session),
+                            image_paths=message.get("images"),
+                            rejected_images=message.get("rejected_images"))
                         reply = turn.reply
                         sessions.append(session, message["text"], reply,
                                         outcome=turn.outcome, repaired=turn.repaired,

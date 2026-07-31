@@ -12,6 +12,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
 from assistant.agent.actions import RETRIEVAL_ACTIONS, execute, looks_failed, prompt_block, run_action
 from assistant.platform.secrets import find_github_token
@@ -38,6 +39,18 @@ class TurnResult:
     repaired: bool = False     # an action failed and was fixed on retry
     self_reported: bool = False   # label came from the model's self_check
     prev_verdict: str | None = None   # satisfied | dissatisfied | None
+
+
+# Image-only owner-message sentinels: module constants so the describe-
+# fallback can swap the attached-flavor text for the described-flavor one
+# without string surgery on arbitrary content.
+_IMG_ONLY_ATTACHED = ("(the owner sent the attached image(s) without text — "
+                      "react to what they show)")
+_IMG_ONLY_DESCRIBED = ("(the owner sent image(s) without text — the image "
+                       "descriptions above are their content; react to that)")
+_IMG_ONLY_NONE_USABLE = ("(the owner tried to send image(s) but NONE could "
+                         "be used — explain what went wrong from the "
+                         "rejection notes; do not pretend to see any image)")
 
 
 # Owner-side correction markers → deterministic "dissatisfied" verdict about
@@ -396,13 +409,17 @@ def _bind_github_token(actions: list, text: str) -> list:
 
 def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
                 history: list[dict] | None = None,
-                image_paths: list[str] | None = None) -> TurnResult:
+                image_paths: list[str] | None = None,
+                rejected_images: list[str] | None = None) -> TurnResult:
     """``history`` is optional prior exchanges for this session
     (``[{"owner": ..., "assistant": ...}, …]``, oldest first) — supplied by
     the serve daemon's session store so multi-turn references work.
     ``image_paths`` are local image files attached to this message; they are
     described by the vision chain (vision.py) and injected as context, so an
     image-only message (empty ``text``) still gets a real reply.
+    ``rejected_images`` are bracketed notes for attachments a CHANNEL had to
+    drop at staging (oversized email part, malformed base64) — folded into
+    this turn's own validation notes so nothing is silently discarded.
 
     Returns a `TurnResult` — the reply plus the turn's outcome label and the
     owner's verdict on the previous turn, which session-persisting callers
@@ -417,7 +434,15 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
         """Every exit path funnels through here: derive the previous-turn
         verdict, record the per-turn metrics row (best-effort — labeling can
         never break the reply), and build the result. Hard-failure exits are
-        measured too, which the old bare-string returns never were."""
+        measured too, which the old bare-string returns never were.
+
+        Rejected-image notes are appended HERE, in code, so they reach the
+        owner on every exit path — never dependent on the model choosing to
+        mention them (the same stance as the "✔" outcome lines)."""
+        if rejected:
+            extra = f" …+{len(rejected) - 5}" if len(rejected) > 5 else ""
+            reply = ((reply + "\n\n") if reply else "") + \
+                "⚠ 有图片未能使用: " + "; ".join(rejected[:5]) + extra
         verdict = owner_verdict(text, model_feedback) if history else None
         try:
             from assistant.agent.events_store import EventsStore
@@ -427,7 +452,7 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
                 "duration_s": round(time.monotonic() - turn_start, 2),
                 "prompt_chars": len(prompt), "actions": actions_n,
                 "repair_rounds": repair_rounds, "failures_left": failures_left,
-                "images": len(attach),
+                "images": images_submitted,
                 "success": int(label == "success"), "fail": int(label == "fail"),
                 "neutral": int(label == "neutral"), "repaired": int(repaired),
                 "prev_satisfied": int(verdict == "satisfied"),
@@ -437,27 +462,88 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
             log.exception("chat metrics failed")
         return TurnResult(reply, label, repaired, self_reported, verdict)
 
-    prompt = f"## Context\n{build_context(settings)}\n\n"
+    ctx_part = f"## Context\n{build_context(settings)}\n\n"
     attach: list[str] = []
-    if image_paths:
-        from assistant.platform.vision import describe_images, media_type_for, render_image_context
+    rejected: list[str] = [str(n)[:200] for n in (rejected_images or [])]
+    images_submitted = 0
+    image_part = ""
 
-        image_paths = image_paths[:settings.vision_max_images]
+    def _clip(name: str) -> str:
+        """Bound a filename for notes/replies — a hostile 4KB path must not
+        amplify into the prompt and owner notice."""
+        return name if len(name) <= 80 else name[:77] + "…"
+
+    def _rejected_block() -> str:
+        """Prompt-side view of the unusable images (the model sees them for
+        coherence; the OWNER-visible notice is appended in `_finish`)."""
+        if not rejected:
+            return ""
+        extra = (f"\n…and {len(rejected) - 5} more" if len(rejected) > 5 else "")
+        return ("## Images that could NOT be used\n"
+                + "\n".join(rejected[:5]) + extra + "\n\n")
+
+    if image_paths or rejected:
+        from assistant.platform.vision import (_MAX_IMAGE_BYTES, describe_images,
+                                               media_type_for,
+                                               render_image_context)
+
+        # ONE validation pass for BOTH model modes (exists, type, size — the
+        # native path used to base64 missing or oversized files straight into
+        # the request; the text-only path used to skip this entirely, so its
+        # owners never got the deterministic rejection notice). Metric
+        # definition: `images_submitted` = paths this turn RECEIVED,
+        # pre-validation and pre-cap.
+        images_submitted = len(image_paths or [])
+        valid: list[str] = []
+        for p in (image_paths or []):
+            path = Path(p)
+            try:
+                missing = not path.is_file()
+                too_big = (not missing
+                           and path.stat().st_size > _MAX_IMAGE_BYTES)
+            except OSError:
+                missing, too_big = True, False
+            if missing:
+                rejected.append(f"[image unavailable: {_clip(path.name)} not found]")
+            elif media_type_for(path) is None:
+                rejected.append(f"[unsupported image type: {_clip(path.name)}]")
+            elif too_big:
+                rejected.append(f"[image too large to process: {_clip(path.name)}]")
+            else:
+                valid.append(str(path))
+        # cap AFTER validation: an invalid path must not consume a slot a
+        # valid image needed
+        if len(valid) > settings.vision_max_images:
+            rejected.append(f"[{len(valid) - settings.vision_max_images} more "
+                            f"image(s) ignored (max {settings.vision_max_images})]")
+            valid = valid[:settings.vision_max_images]
         if settings.llm_supports_images:
-            # natively multimodal main LLM: attach the images to the call
-            # itself — no separate vision pass
-            attach = [p for p in image_paths if media_type_for(p)]
-            prompt += ("## Attached images\n(the owner's images are attached "
-                       "to this message — look at them directly)\n\n")
-        else:  # text-only main LLM: describe-then-reason via the vision chain
-            descriptions = describe_images(settings, image_paths)
-            prompt += render_image_context(descriptions) + "\n\n"
-        text = text.strip() or "(the owner sent the attached image(s) without text — react to what they show)"
+            # The "look at them directly" header appears ONLY when something
+            # is actually attached: claiming images that aren't there is the
+            # 2026-07-27 incident class (the model honestly answers that it
+            # can't see any image).
+            attach = valid
+            if attach:
+                image_part = ("## Attached images\n(the owner's images are "
+                              "attached to this message — look at them "
+                              "directly)\n\n")
+        elif valid:  # text-only main LLM: describe-then-reason on the
+            # already-validated set
+            image_part = render_image_context(
+                describe_images(settings, valid)) + "\n\n"
+        image_part += _rejected_block()
+        if not text.strip():
+            # image-only message: never claim usable images that don't exist
+            image_only = True
+            text = _IMG_ONLY_ATTACHED if valid else _IMG_ONLY_NONE_USABLE
+        else:
+            image_only = False
+    tail = ""
     if history:
         turns = "\n".join(f"Owner: {h.get('owner', '')}\nYou: {h.get('assistant', '')}"
                           for h in history[-10:])
-        prompt += f"## Recent conversation (oldest first)\n{turns}\n\n"
-    prompt += f"## Owner message\n{text.strip()[:4000]}"
+        tail += f"## Recent conversation (oldest first)\n{turns}\n\n"
+    tail += f"## Owner message\n{text.strip()[:4000]}"
     try:  # learned rules ride next to the owner message too — end-of-prompt
         # placement keeps them salient for long system prompts
         from assistant.agent.lessons_store import LessonsStore, shared_store
@@ -474,15 +560,31 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
             # single_user header stays byte-identical to the legacy prompt
             scope = (" (G* rules are shared across all users; personal L* rules "
                      "win on conflict)" if mt else "")
-            prompt += ("\n\n## Learned rules — apply to your reply AND to every "
-                       f"action's parameters{scope}\n"
-                       + "\n".join(f"- [{l['id']}] {l['rule']}" for l in rules))
+            tail += ("\n\n## Learned rules — apply to your reply AND to every "
+                     f"action's parameters{scope}\n"
+                     + "\n".join(f"- [{l['id']}] {l['rule']}" for l in rules))
     except Exception:
         log.exception("lessons prompt injection failed")
+    prompt = ctx_part + image_part + tail
     system = system_prompt(settings)
+
+    def _ask(p: str, **kw):
+        """Every chat-turn model call funnels through here so the attached
+        images ride along with the prompt that claims they are attached.
+
+        `prompt` carries a "look at them directly" header whenever the owner
+        sent images, but the follow-up calls (empty-reply retry, retrieval
+        compose, action review) used to pass only that text — so a perfectly
+        sighted model was asked about images it never received and honestly
+        answered that it could not load them (2026-07-27 incident). Attaching
+        them here means a new call site cannot reintroduce that skew."""
+        kw.setdefault("max_tokens", 6000)
+        if attach:
+            kw.setdefault("images", attach)
+        return llm.complete_json(p, system=system, role="chat", **kw)
+
     try:
-        result = llm.complete_json(prompt, system=system, max_tokens=6000, role="chat",
-                                   **({"images": attach} if attach else {}))
+        result = _ask(prompt)
     except Exception as exc:
         if attach:
             # The native image call failed. When a SEPARATE vision backend is
@@ -496,16 +598,28 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
 
             try:
                 if settings.vision_api_key and settings.vision_model:
+                    # Effective prompt + effective images for the REST of the
+                    # turn: recompose from parts (no string surgery) with the
+                    # descriptions in place of the attach header, and clear
+                    # `attach` — every later call (empty-reply retry,
+                    # retrieval compose, action review) then stays consistent
+                    # instead of re-attaching images to a call shape that
+                    # already failed. Routed through _ask: role="chat" kept
+                    # (the old fallback silently fell to the default model).
                     descriptions = describe_images(settings, attach)
-                    fallback_prompt = prompt.replace(
-                        "## Attached images\n(the owner's images are attached "
-                        "to this message — look at them directly)",
-                        render_image_context(descriptions))
-                    result = llm.complete_json(fallback_prompt, system=system,
-                                               max_tokens=6000)
+                    image_fallback = (render_image_context(descriptions)
+                                      + "\n\n" + _rejected_block())
+                    attach = []
+                    if image_only:
+                        # the owner-message sentinel said "attached — look at
+                        # them"; with descriptions substituted that would tell
+                        # the model to inspect images it doesn't have
+                        tail = tail.replace(_IMG_ONLY_ATTACHED,
+                                            _IMG_ONLY_DESCRIBED)
+                    prompt = ctx_part + image_fallback + tail
+                    result = _ask(prompt, images=None)
                 else:
-                    result = llm.complete_json(prompt, system=system, max_tokens=6000,
-                                               role="chat", images=attach)
+                    result = _ask(prompt)
             except Exception:
                 log.exception("image retry/fallback failed too")
                 return _finish("图片这次没能处理，请稍后重发一次 🙏 "
@@ -532,10 +646,9 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
     if not reply and not all_outcomes:
         log.warning("empty model reply with no actions — retrying once")
         try:
-            retry = llm.complete_json(
+            retry = _ask(
                 prompt + "\n\n(Your previous response was empty. Reply now with a "
-                "concrete answer, or emit the right action — as JSON.)",
-                system=system, max_tokens=6000, role="chat")
+                "concrete answer, or emit the right action — as JSON.)")
             if isinstance(retry, dict):
                 reply = str(retry.get("reply", "")).strip()
                 actions = _bind_github_token(retry.get("actions") or [], text)
@@ -560,20 +673,30 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
                  if a["type"] in RETRIEVAL_ACTIONS and not looks_failed(o)]
     if retrieved:
         data = "\n\n".join(f"### {a['type']} result\n{o}" for a, o in retrieved)
+        composed = False
         try:
-            comp = llm.complete_json(
+            comp = _ask(
                 f"{prompt}\n\n## Records you just retrieved from the profile\n{data}"
                 "\n\nAnswer the owner's message using these retrieved records and the "
                 "context above. Cite the specific records/totals; never say something "
                 "is missing that appears here; do NOT re-run the query. Respond with "
-                'ONLY JSON {"reply": "...", "actions": []}.',
-                system=system, max_tokens=6000, role="chat")
+                'ONLY JSON {"reply": "...", "actions": []}.')
             if isinstance(comp, dict) and str(comp.get("reply", "")).strip():
                 reply = str(comp["reply"]).strip()
+                composed = True
         except Exception:
             log.exception("retrieval compose failed")
-        drop = {o for _, o in retrieved}
-        all_outcomes = [o for o in all_outcomes if o not in drop]
+        # Drop the raw record dumps ONLY when a composed answer replaced them
+        # — a failed compose must keep them (degraded but truthful), not
+        # discard a successful retrieval. INDEX-based (all_outcomes[:n] is
+        # positionally `outcomes`): dropping by string value — or even by
+        # id(), which interning can alias — would remove an identical
+        # non-retrieval outcome too.
+        if composed:
+            drop_idx = {i for i, (a, o) in enumerate(zip(wf, outcomes))
+                        if a["type"] in RETRIEVAL_ACTIONS and not looks_failed(o)}
+            all_outcomes = [o for i, o in enumerate(all_outcomes)
+                            if i not in drop_idx]
 
     # Review-and-retry: when an action outcome reports a failure (bad params,
     # wrong id, unknown action), show the model exactly what it emitted and
@@ -595,7 +718,7 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
                     "succeeded or were rejected as duplicates. You may also "
                     "revise the reply.")
         try:
-            fix = llm.complete_json(review, system=system, max_tokens=6000, role="chat")
+            fix = _ask(review)
         except Exception:
             log.exception("action-review LLM call failed")
             break
@@ -625,8 +748,10 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
 
 def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                    history: list[dict] | None = None,
-                   image_paths: list[str] | None = None) -> str:
+                   image_paths: list[str] | None = None,
+                   rejected_images: list[str] | None = None) -> str:
     """Back-compat string facade over `handle_turn` for callers that only
     need the reply (CLI ask, routines, the legacy channel service)."""
     return handle_turn(text, settings, llm, history=history,
-                       image_paths=image_paths).reply
+                       image_paths=image_paths,
+                       rejected_images=rejected_images).reply
