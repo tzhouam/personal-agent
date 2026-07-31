@@ -448,8 +448,9 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             return data if isinstance(data, dict) else {}
 
         def do_GET(self):
-            """Route GETs: `/healthz` and `/readyz` (the only unauthenticated
-            routes — liveness and readiness probes) and, behind
+            """Route GETs: `/healthz` (always unauthenticated liveness),
+            `/readyz` (readiness — open in single_user, bridge-token-gated
+            fail-closed in multi_tenant) and, behind
             per-user resolution, `/status` → that user's run-status; anything else
             is a 404. In `multi_tenant`, `/status` needs `account_id` in the query
             string (a GET has no body) or it's a 401 — no route bypasses
@@ -461,10 +462,10 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                 # degradation detail lives on /readyz.
                 return self._send(200, {"ok": True})
             if urlsplit(self.path).path == "/readyz":
-                # multi_tenant keeps its route invariant (only /healthz is
-                # unauthenticated there): readiness carries channel state, so
-                # it is bridge-token-gated in that mode; single_user (a
-                # loopback daemon on the owner's own machine) keeps it open.
+                # multi_tenant route invariant: /healthz alone stays
+                # unauthenticated there; /readyz carries channel state, so it
+                # is bridge-token-gated fail-closed in that mode; single_user
+                # (a loopback daemon on the owner's machine) keeps it open.
                 boot = settings_factory()
                 if boot.deployment_mode == "multi_tenant" and (
                         not boot.serve_token
@@ -478,7 +479,12 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                 # failed (fail CLOSED: an unobservable channel is not a ready
                 # channel). The 2026-07 WeCom-rebind outage kept /healthz green
                 # while every poll cycle failed; monitors point HERE.
-                # Unauthenticated like /healthz.
+                # CONTRACT (stated narrowly): readiness proves the poll
+                # machinery is alive, cycling, and its channels are bound —
+                # per-subsystem failures that cycles deliberately swallow
+                # (one channel's poll error, one message's failure) surface
+                # in logs/metrics, not here; deepening that is follow-up
+                # work, not a hidden promise.
                 try:
                     fields: dict = {}
                     probe_ok = True

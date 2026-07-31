@@ -63,8 +63,12 @@ def _auth(tok=BRIDGE):
 def test_healthz_open_but_everything_else_needs_the_bridge_token(mt_server):
     base, _, _ = mt_server
     assert httpx.get(f"{base}/healthz").json() == {"ok": True}
-    # /readyz carries channel state → bridge-token-gated in multi_tenant
+    # /readyz carries channel state → bridge-token-gated in multi_tenant:
+    # no token → 401; wrong token → 401; valid token → real readiness
+    # (200 or 503 — this bare test server has no poll thread, so 503)
     assert httpx.get(f"{base}/readyz").status_code == 401
+    assert httpx.get(f"{base}/readyz",
+                     headers={"Authorization": "Bearer wrong"}).status_code == 401
     # no token → 401 on chat, actions, run, status
     assert httpx.post(f"{base}/chat", json={"account_id": "wx-A", "text": "hi"}).status_code == 401
     assert httpx.post(f"{base}/actions/list_todos", json={"account_id": "wx-A"}).status_code == 401
