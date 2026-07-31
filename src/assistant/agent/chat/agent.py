@@ -411,7 +411,8 @@ def _bind_github_token(actions: list, text: str) -> list:
 def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
                 history: list[dict] | None = None,
                 image_paths: list[str] | None = None,
-                rejected_images: list[str] | None = None) -> TurnResult:
+                rejected_images: list[str] | None = None,
+                internal: bool = False) -> TurnResult:
     """``history`` is optional prior exchanges for this session
     (``[{"owner": ..., "assistant": ...}, …]``, oldest first) — supplied by
     the serve daemon's session store so multi-turn references work.
@@ -421,6 +422,9 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
     ``rejected_images`` are bracketed notes for attachments a CHANNEL had to
     drop at staging (oversized email part, malformed base64) — folded into
     this turn's own validation notes so nothing is silently discarded.
+    ``internal`` marks turns whose output is NOT an owner-facing chat reply
+    (routine task execution) — the D5 failure block is suppressed there: it
+    would pollute routine output and its receipts could never be reported.
 
     Returns a `TurnResult` — the reply plus the turn's outcome label and the
     owner's verdict on the previous turn, which session-persisting callers
@@ -451,7 +455,7 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
         try:
             from assistant.platform import delivery
 
-            failures = delivery.open_failures(settings)
+            failures = [] if internal else delivery.open_failures(settings)
             block = delivery.render_failure_block(failures)
             if block:
                 surfaced_ids = [f["id"] for f in failures[:3]]
@@ -765,9 +769,11 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
 def handle_message(text: str, settings: Settings, llm: LLM | None = None,
                    history: list[dict] | None = None,
                    image_paths: list[str] | None = None,
-                   rejected_images: list[str] | None = None) -> str:
+                   rejected_images: list[str] | None = None,
+                   internal: bool = False) -> str:
     """Back-compat string facade over `handle_turn` for callers that only
     need the reply (CLI ask, routines, the legacy channel service)."""
     return handle_turn(text, settings, llm, history=history,
                        image_paths=image_paths,
-                       rejected_images=rejected_images).reply
+                       rejected_images=rejected_images,
+                       internal=internal).reply

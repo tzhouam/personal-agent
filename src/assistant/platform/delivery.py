@@ -103,22 +103,27 @@ class OutboxDB:
             os.chmod(self.path, 0o600)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
-        conn.executescript(_SCHEMA)
-        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        # version gate BEFORE any schema mutation: a db written by newer code
+        # is refused UNTOUCHED
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        except sqlite3.OperationalError:
+            row = None   # no meta table: fresh (or pre-schema) db
+        if row is not None and int(row[0]) > _SCHEMA_VERSION:
+            conn.close()
+            raise RuntimeError(
+                f"outbox.db schema v{row[0]} is newer than this code "
+                f"(v{_SCHEMA_VERSION}) — refusing to touch it")
+        conn.executescript(_SCHEMA)   # additive CREATE IF NOT EXISTS only
         if row is None:
-            conn.execute("INSERT INTO meta VALUES ('schema_version', ?)",
+            conn.execute(
+                "INSERT OR IGNORE INTO meta VALUES ('schema_version', ?)",
+                (str(_SCHEMA_VERSION),))
+        elif int(row[0]) < _SCHEMA_VERSION:
+            # forward migrations run here (none yet at v1)
+            conn.execute("UPDATE meta SET value=? WHERE key='schema_version'",
                          (str(_SCHEMA_VERSION),))
-        else:
-            have = int(row[0])
-            if have > _SCHEMA_VERSION:
-                conn.close()
-                raise RuntimeError(
-                    f"outbox.db schema v{have} is newer than this code "
-                    f"(v{_SCHEMA_VERSION}) — refusing to touch it")
-            if have < _SCHEMA_VERSION:
-                # forward migrations run here, one transaction (none yet at v1)
-                conn.execute("UPDATE meta SET value=? WHERE key='schema_version'",
-                             (str(_SCHEMA_VERSION),))
         conn.commit()
         return conn
 

@@ -323,15 +323,21 @@ def _fire_new(settings: Settings, store: "RoutineStore", outbox, now,
     attempt, so a crash anywhere after leaves a recoverable row, never a
     silently skipped occurrence (a crash between ledger and shadow can only
     DOUBLE-claim next cycle, which routine_claim absorbs idempotently)."""
+    from assistant.platform.locks import user_write_lock
+
     outcomes = []
-    due = store.due_now(now)               # read-only due predicate
-    claims = {}
-    for routine in due:
-        occurrence = f"{now.date().isoformat()} {routine['time']}"
-        token = outbox.routine_claim(routine["id"], occurrence)
-        if token:
-            claims[routine["id"]] = (routine, occurrence, token)
-    store.claim_due(now)                   # YAML shadow (old-code guard)
+    with user_write_lock(settings):
+        # due-read → ledger claim → YAML shadow under ONE user write lock:
+        # a cancel (chat executor holds the same lock) can no longer slip
+        # between the read and the shadow and still see its routine run
+        due = store.due_now(now)           # read-only due predicate
+        claims = {}
+        for routine in due:
+            occurrence = f"{now.date().isoformat()} {routine['time']}"
+            token = outbox.routine_claim(routine["id"], occurrence)
+            if token:
+                claims[routine["id"]] = (routine, occurrence, token)
+        store.claim_due(now)               # YAML shadow (old-code guard)
     for routine, occurrence, token in claims.values():
         outcomes.extend(_run_one(settings, outbox, routine, occurrence, token,
                                  handle_message, send_wechat))
@@ -340,8 +346,18 @@ def _fire_new(settings: Settings, store: "RoutineStore", outbox, now,
 
 def _run_one(settings: Settings, outbox, routine: dict, occurrence: str,
              token: str, handle_message, send_wechat) -> list[dict]:
-    """Drive ONE claimed occurrence through condition → execution → delivery."""
+    """Drive ONE claimed occurrence through condition → execution → delivery.
+    Cancellation is revalidated against the CURRENT store row first — a
+    cancel that landed after the claim closes the occurrence instead of
+    running a routine the owner just cancelled."""
     outcomes = []
+    current = next((r for r in RoutineStore(settings.data_dir).active()
+                    if r["id"] == routine["id"]), None)
+    if current is None:
+        outbox.routine_transition(routine["id"], occurrence, token,
+                                  "cancelled", from_states=("claimed",))
+        return outcomes
+    routine = current
     if True:
         holds, why = check_condition(settings, routine.get("condition", ""))
         if not holds:
@@ -392,7 +408,7 @@ def _run_one(settings: Settings, outbox, routine: dict, occurrence: str,
                   + routine["task"]
                   + (f"\n[Condition already verified true: {why}]" if why else ""))
         try:
-            reply = handle_message(framed, settings)
+            reply = handle_message(framed, settings, internal=True)
             settled = outbox.routine_transition(
                 routine["id"], occurrence, token, "executed", output=reply,
                 from_states=("executing",))

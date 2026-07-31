@@ -69,7 +69,7 @@ def test_fire_due_gates_and_sends(settings, monkeypatch):
                         lambda s, c: (False, "no alert") if c else (True, ""))
     sent, handled = [], []
     monkeypatch.setattr("assistant.agent.chat.agent.handle_message",
-                        lambda task, s, llm=None, history=None:
+                        lambda task, s, llm=None, history=None, **kw:
                         handled.append(task) or f"reply to: {task}")
     monkeypatch.setattr("assistant.platform.notify.send_wechat",
                         lambda s, text: sent.append(text) or "sent")

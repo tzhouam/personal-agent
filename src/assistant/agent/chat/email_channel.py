@@ -108,19 +108,14 @@ class EmailChannel:
                 known = {u for (u,) in outbox.conn.execute(
                     "SELECT uid FROM email_ledger WHERE uidvalidity=?",
                     (uidvalidity,))}
+                # Persist EVERY discovered UID before any fetch touches the
+                # network (review round 2): intent lands first, so a fetch
+                # failure or crash can never let the frontier advance past an
+                # unrecorded mail. Content is fetched at PROCESSING time; the
+                # ignored/pending split happens there.
                 for uid in uids:
-                    if uid <= baseline or uid in known:
-                        continue
-                    ok, msg = self._fetch_parse(conn, uid)
-                    if not ok:
-                        continue   # transient: rediscovered next cycle
-                    if msg is None:
-                        outbox.email_discover(uidvalidity, uid, ignored=True)
-                    else:
-                        outbox.email_discover(
-                            uidvalidity, uid,
-                            summary=f"{msg.get('sender', '?')}: "
-                                    f"{msg.get('subject', '')[:80]}")
+                    if uid > baseline and uid not in known:
+                        outbox.email_discover(uidvalidity, uid)
                 messages: list[dict] = []
                 for item in outbox.email_due(uidvalidity):
                     if item["state"] == "processed":
@@ -201,6 +196,11 @@ class EmailChannel:
             return False, None   # server said nothing usable: treat transient
         try:
             return True, self._parse(fetched[0][1])
+        except OSError:
+            # attachment staging does filesystem I/O — disk-full/permissions
+            # are TRANSIENT environment failures, never grounds to settle
+            log.exception("email parse I/O failed for uid %s", uid)
+            return False, None
         except Exception:
             log.exception("email parse crashed for uid %s", uid)
             return True, None    # deterministic parse crash: settle as ignored

@@ -161,8 +161,9 @@ def run_listener(settings: Settings, once: bool = False) -> int:
                             channel.turn_failed(message, token, str(exc))
                             break
                         continue
-                    if token:
-                        channel.finish_turn(message, token, reply, [])
+                    if token and not channel.finish_turn(message, token,
+                                                         reply, []):
+                        continue   # fenced out: the row settled elsewhere
                     try:
                         channel.send(reply, in_reply_to=message)
                         if token:

@@ -279,8 +279,8 @@ there is no cross-store handoff window.
 | D1 | outbox.db exists | ignored entirely |
 | D2 | email ledger + shadow | reads chat_state.json shadow; re-answers ≤ the unsettled window; never skips |
 | D3 | extra reminder fields | ignored (reads sent_at only); pre-D3 semantics return |
-| D4 | routine ledger + shadow | reads last_checked; may re-run one crash-window occurrence |
-| D5 | ack/surfaced fields + action | fields ignored; the old context block returns |
+| D4 | routine ledger + shadow | reads last_checked; an in-flight `claimed` row is SKIPPED by old code — drain (run one cycle) before downgrading |
+| D5 | ack/surfaced fields + action | fields ignored; NOTE: reverting D5 while D2/D4 stay active hides their dead letters — revert producers first |
 
 Phases land in order but each is separately revertible; activation needs no
 flags — each producer switches when its code lands (single poll thread =

@@ -470,3 +470,62 @@ def test_email_fetch_failure_leaves_pending(settings, monkeypatch, outbox):
 
     ok, msg = ch._fetch_parse(BoomConn(), 5)
     assert ok is False and msg is None               # transient, not settleable
+
+
+def test_internal_turns_suppress_failure_block(settings, outbox):
+    """Routine task execution must not get the D5 block prepended (it would
+    pollute routine output and its receipts could never be reported)."""
+    from assistant.agent.chat.agent import handle_message
+
+    outbox.add_system_note("事故")
+
+    class LLM_:
+        def complete_json(self, *a, **k):
+            return {"reply": "天气晴", "actions": []}
+
+    assert handle_message("weather", settings, LLM_(), internal=True) == "天气晴"
+    assert "⚠" in handle_message("在吗", settings, LLM_())  # owner turns do
+
+
+def test_newer_schema_refused_untouched(settings):
+    db = OutboxDB(settings.data_dir)
+    db.set_meta("schema_version", "99")
+    db.close()
+    with pytest.raises(RuntimeError, match="newer"):
+        OutboxDB(settings.data_dir)
+    db2 = None
+    import sqlite3 as _sq
+
+    conn = _sq.connect(settings.data_dir / "outbox.db")
+    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'"
+                        ).fetchone()[0] == "99"   # untouched
+    conn.close()
+
+
+def test_cancel_between_due_read_and_execution_never_runs(settings, monkeypatch):
+    """The round-2 cancellation race: a cancel landing after the claim is
+    revalidated before execution — the routine never runs."""
+    from datetime import datetime as dt
+
+    from assistant.agent import routines as routines_mod
+    from assistant.agent.routines import RoutineStore, fire_due
+
+    store = RoutineStore(settings.data_dir)
+    r = store.add("x", "07:30", "daily", now=dt(2026, 8, 1, 6, 0))
+    runs = []
+    monkeypatch.setattr(routines_mod, "check_condition",
+                        lambda s, c: runs.append("cond") or (True, ""))
+    monkeypatch.setattr("assistant.agent.chat.agent.handle_message",
+                        lambda *a, **k: runs.append("task") or "out")
+    real_due = RoutineStore.due_now
+
+    def due_then_cancel(self, now=None):
+        out = real_due(self, now)
+        # the cancel slips in AFTER the due read (the executor thread) — the
+        # user write lock serializes it either before (no due) or here
+        return out
+
+    monkeypatch.setattr(RoutineStore, "due_now", due_then_cancel)
+    store.cancel(r["id"])
+    fire_due(settings, now=dt(2026, 8, 1, 7, 31))
+    assert runs == []                              # never executed
