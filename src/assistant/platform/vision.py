@@ -47,20 +47,35 @@ def describe_images(settings: Settings, paths: list[str]) -> list[str]:
     Unreadable/oversized/non-image paths get a bracketed error string instead
     of a description, and backend failures fall through the chain; the caller
     always gets `len(paths)` strings back."""
-    usable: list[str] = []
+    usable: list[str] = []          # unique paths, first-occurrence order
     results: dict[int, str] = {}
-    index_of: dict[str, int] = {}
+    indices: dict[str, list[int]] = {}   # path → every input position holding it
     for i, p in enumerate(paths):
         path = Path(p)
-        if not path.is_file():
+        try:  # a file deleted between is_file() and stat() must degrade to an
+            # error string, not break the "never raises" contract
+            missing = not path.is_file()
+            too_big = not missing and path.stat().st_size > _MAX_IMAGE_BYTES
+        except OSError:
+            missing, too_big = True, False
+        if missing:
             results[i] = f"[image unavailable: {path.name} not found]"
         elif media_type_for(path) is None:
             results[i] = f"[unsupported image type: {path.name}]"
-        elif path.stat().st_size > _MAX_IMAGE_BYTES:
+        elif too_big:
             results[i] = f"[image too large to process: {path.name}]"
         else:
-            usable.append(str(path))
-            index_of[str(path)] = i
+            # The same file can appear twice in one message (an email with an
+            # image both inline and attached stages to one sha1-named path) —
+            # describe it once, fan the description out to every position. A
+            # plain path→index map dropped the first occurrence and broke the
+            # len(paths) contract with a KeyError, which upstream turned into
+            # a silently dropped owner email.
+            key = str(path)
+            if key not in indices:
+                indices[key] = []
+                usable.append(key)
+            indices[key].append(i)
 
     if usable:
         described = None
@@ -71,11 +86,23 @@ def describe_images(settings: Settings, paths: list[str]) -> list[str]:
                     break
             except Exception as exc:
                 log.warning("vision backend %s failed: %s", backend.__name__, exc)
-        if described is None:
+        if not described:  # None (no backend) and [] (empty return) both fail
             described = ["[image could not be analyzed: no vision backend "
                          "available — see VISION_* in .env]"] * len(usable)
+        # Cardinality guard: the contract holds even against a backend that
+        # miscounts — short returns are padded, long ones trimmed.
+        if len(described) < len(usable):
+            log.warning("vision backend returned %d descriptions for %d images",
+                        len(described), len(usable))
+            described += ["[image could not be analyzed: backend returned "
+                          "no result]"] * (len(usable) - len(described))
+        elif len(described) > len(usable):
+            log.warning("vision backend returned %d descriptions for %d images "
+                        "— extra discarded", len(described), len(usable))
+            described = described[:len(usable)]
         for path, text in zip(usable, described):
-            results[index_of[path]] = text
+            for i in indices[path]:
+                results[i] = text
     return [results[i] for i in range(len(paths))]
 
 
