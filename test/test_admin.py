@@ -162,3 +162,19 @@ def test_shared_lessons_require_multi_tenant(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     with pytest.raises(ValueError):
         admin.list_shared_lessons(Settings(_env_file=None))
+
+
+def test_legacy_scheduleless_records_count_as_daily(settings, tmp_path):
+    """F20a: a record with NO schedule field predates the opt-in change (its
+    user was being run daily) — it must stay in the fan-out, and the listing
+    must not display it as on_demand."""
+    from assistant.platform.registry import UserRegistry
+
+    reg = UserRegistry(settings.data_dir)
+    reg.add_user("newbie")                      # new users: explicit on_demand
+    data = reg._load()
+    data["users"].append({"uid": "veteran", "status": "active",
+                          "channels": []})     # legacy shape: no schedule key
+    reg._save(data)
+    assert "veteran" in reg.scheduled()
+    assert "newbie" not in reg.scheduled()
