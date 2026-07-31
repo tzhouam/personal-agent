@@ -266,20 +266,29 @@ class SessionStore:
             self._enforce_max_turns(session_id)
 
     def _finalize_prev(self, session_id: str, prev: dict, prev_verdict: str) -> None:
-        """Apply the owner's verdict to the previous turn, rewriting the (possibly
-        earlier) shard that holds it — matched by its ts."""
-        was = prev.get("outcome")
-        final = ("fail" if prev_verdict == "dissatisfied"
-                 else ("success" if was != "fail" else was))
+        """Apply the owner's verdict to the previous turn, rewriting the
+        (possibly earlier) shard that holds it — matched by (ts, owner). The
+        transition reads the turn's CURRENT stored outcome, never the
+        caller's (possibly stale) reference: with concurrent verdicts on one
+        predecessor, deciding from a stale snapshot could leave e.g.
+        owner_verdict="satisfied" beside outcome="fail". The FIRST change
+        keeps the original label in outcome_initial; a code-observed fail is
+        never upgraded."""
         shard = self._sdir(session_id) / f"{self._local_day(prev.get('ts', ''))}.json"
         if not shard.exists():
             return
         data = self._read(shard)
         for t in data.get("turns", []):
             if t.get("ts") == prev.get("ts") and t.get("owner") == prev.get("owner"):
+                was = t.get("outcome")
+                initial = t.get("outcome_initial", was)
+                if prev_verdict == "dissatisfied":
+                    final = "fail"
+                else:  # satisfied confirms success unless CODE observed fail
+                    final = initial if initial == "fail" else "success"
                 t["owner_verdict"] = prev_verdict
                 if final and final != was:
-                    if was:
+                    if was and "outcome_initial" not in t:
                         t["outcome_initial"] = was
                     t["outcome"] = final
                 break

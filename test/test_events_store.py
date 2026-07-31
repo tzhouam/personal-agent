@@ -41,15 +41,16 @@ def test_versioned_seen_fingerprint_and_cooldown(settings):
         ev.mark_seen_versioned([("n1|mention", "t1")])
         # unchanged: suppressed forever (no bare-TTL resurface)
         assert ev.filter_unseen_versioned([("n1|mention", "t1")]) == []
-        # new activity inside the cooldown: still suppressed…
+        # new activity inside the cooldown FOLDS into the shown thread
+        # (adopted — the revised contract: collection cannot promise to
+        # re-fetch it later); FURTHER activity after the cooldown surfaces
         assert ev.filter_unseen_versioned([("n1|mention", "t2")]) == []
-        # …but after the cooldown it surfaces (backdate last_seen 8 days)
         old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
         ev.conn.execute("UPDATE seen SET last_seen = ? WHERE item_id = ?",
                         (old, "n1|mention"))
         ev.conn.commit()
-        assert ev.filter_unseen_versioned([("n1|mention", "t2")]) == ["n1|mention"]
-        assert ev.filter_unseen_versioned([("n1|mention", "t1")]) == []  # fp match
+        assert ev.filter_unseen_versioned([("n1|mention", "t3")]) == ["n1|mention"]
+        assert ev.filter_unseen_versioned([("n1|mention", "t2")]) == []  # fp match
 
         # legacy row (pre-fingerprint context): suppressed AND adopted
         ev.mark_seen(["legacy|assign"], context="digest 2026-07-30")
@@ -61,5 +62,29 @@ def test_versioned_seen_fingerprint_and_cooldown(settings):
         assert ev.filter_unseen_versioned([("legacy|assign", "t9")]) == []
         assert ev.filter_unseen_versioned([("legacy|assign", "t10")]) == \
             ["legacy|assign"]
+    finally:
+        ev.close()
+
+
+def test_in_cooldown_activity_folds_into_shown_thread(settings):
+    """F21 round-2 contract: activity within the cooldown ADOPTS (the owner
+    saw the thread days ago); only activity after the cooldown resurfaces —
+    no phantom promise about updates collection will never fetch again."""
+    from datetime import datetime, timedelta, timezone
+
+    from assistant.agent.events_store import EventsStore
+
+    ev = EventsStore(settings.events_db)
+    try:
+        ev.mark_seen_versioned([("n|mention", "t1")])
+        assert ev.filter_unseen_versioned([("n|mention", "t2")]) == []  # folds
+        old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        ev.conn.execute("UPDATE seen SET last_seen = ? WHERE item_id = ?",
+                        (old, "n|mention"))
+        ev.conn.commit()
+        # t2 was adopted during the cooldown → post-cooldown t2 stays folded,
+        # only FURTHER activity (t3) resurfaces
+        assert ev.filter_unseen_versioned([("n|mention", "t2")]) == []
+        assert ev.filter_unseen_versioned([("n|mention", "t3")]) == ["n|mention"]
     finally:
         ev.close()

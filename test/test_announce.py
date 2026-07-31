@@ -132,3 +132,13 @@ def test_listener_refuses_scheduling_actions(settings):
     assert "reminder" in run_action("set_reminder",
                                     {"message": "开会", "when": "+5m"},
                                     settings)
+
+
+def test_truncated_final_part_stays_within_byte_budget(settings):
+    """F10 round-2: the truncation marker rides INSIDE the budget."""
+    from assistant.platform.notify import split_message
+
+    parts = split_message("好" * 100000, max_bytes=600, hard_max_parts=3)
+    assert len(parts) == 3 and parts[-1].endswith("…(回复过长已截断)")
+    for p in parts:
+        assert len(p.encode()) <= 600

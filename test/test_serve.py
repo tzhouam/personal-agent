@@ -352,3 +352,26 @@ def test_prev_verdict_binds_to_captured_predecessor(settings):
     assert q1.get("owner_verdict") == "dissatisfied"
     assert q1.get("outcome") == "fail"
     assert "owner_verdict" not in q2             # the innocent turn untouched
+
+
+def test_conflicting_verdicts_stay_internally_consistent(settings):
+    """F13 round-2: opposing verdicts on one predecessor decide from the
+    CURRENT stored outcome — never satisfied-verdict + fail-outcome skew, and
+    a code-observed fail is never upgraded by a late satisfied."""
+    from assistant.platform.serve import SessionStore
+
+    store = SessionStore(settings.data_dir)
+    store.append("s", "q1", "a1", outcome="success")
+    ref = store.history("s")[-1]
+    store.append("s", "不对", "改", prev_verdict="dissatisfied", prev_ref=ref)
+    store.append("s", "谢谢", "客气", prev_verdict="satisfied", prev_ref=ref)
+    q1 = next(t for t in store._all("s") if t["owner"] == "q1")
+    assert q1["owner_verdict"] == "satisfied"
+    assert q1["outcome"] == "success"           # consistent pair, not fail
+    assert q1["outcome_initial"] == "success"   # first change preserved it
+
+    store.append("s2", "q2", "a2", outcome="fail")   # code-observed fail
+    ref2 = store.history("s2")[-1]
+    store.append("s2", "多谢", "🙏", prev_verdict="satisfied", prev_ref=ref2)
+    q2 = next(t for t in store._all("s2") if t["owner"] == "q2")
+    assert q2["outcome"] == "fail"              # never upgraded

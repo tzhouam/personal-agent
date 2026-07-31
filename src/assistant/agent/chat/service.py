@@ -113,8 +113,14 @@ def run_listener(settings: Settings, once: bool = False) -> int:
     token = _listener_active.set(True)
     try:
         while True:
-            if not once:  # hot-reload: fresh credentials/config each sweep
-                settings = Settings()
+            if not once:  # hot-reload: fresh credentials/config each sweep —
+                # but process IDENTITY stays pinned: the pid lock and stores
+                # live under the boot data_dir/uid, and a mid-flight .env
+                # DATA_DIR edit must not silently split state
+                fresh = Settings()
+                fresh.data_dir = settings.data_dir
+                fresh.uid = settings.uid
+                settings = fresh
             llm = LLM(settings)
             for channel in build_channels(settings, log_wecom=False):
                 try:

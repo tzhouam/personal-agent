@@ -112,9 +112,14 @@ class EventsStore:
         activity) AND its `last_seen` is older than `cooldown_days` — new
         activity resurfaces a thread at most once per cooldown (the old
         `updated_at`-keyed scheme re-surfaced busy threads every day; a bare
-        existence check suppressed them forever). Suppression by cooldown
-        does NOT adopt the new fingerprint, so activity during the cooldown
-        still surfaces once it expires. Legacy rows whose context predates
+        existence check suppressed them forever). Activity WITHIN the
+        cooldown is deliberately folded into the already-shown thread (the
+        fingerprint is adopted): the owner saw it days ago, and only
+        activity AFTER the cooldown resurfaces it. (Deferring un-adopted
+        fingerprints instead would promise a resurface the pipeline cannot
+        deliver — collection only fetches recently-updated items, so a
+        change suppressed today may never be fetched again.) Legacy rows
+        whose context predates
         fingerprinting (e.g. "digest 2026-07-30") adopt the current
         fingerprint in place — no deploy-time resurface storm, converging to
         fingerprint tracking after one observation (`last_seen` preserved so
@@ -137,8 +142,11 @@ class EventsStore:
             stored_fp = context[3:] if str(context or "").startswith("fp:") else None
             if stored_fp is None:
                 adopt.append((item_id, fp))       # legacy row: adopt, suppress
-            elif stored_fp != str(fp) and last_seen < cutoff:
-                out.append(item_id)
+            elif stored_fp != str(fp):
+                if last_seen < cutoff:
+                    out.append(item_id)
+                else:                             # in-cooldown activity folds
+                    adopt.append((item_id, fp))   # into the shown thread
         for item_id, fp in adopt:
             self.conn.execute("UPDATE seen SET context = ? WHERE item_id = ?",
                               (f"fp:{fp}", item_id))

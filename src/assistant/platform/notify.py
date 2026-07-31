@@ -56,8 +56,14 @@ def split_message(text: str, max_bytes: int, hard_max_parts: int = 5) -> list[st
         parts.append(remaining[:cut])
         remaining = remaining[cut:]
     if len(parts) > hard_max_parts:
+        trunc = "…(回复过长已截断)"
         parts = parts[:hard_max_parts]
-        parts[-1] = parts[-1].rstrip() + "…(回复过长已截断)"
+        last = parts[-1].rstrip()
+        # the marker rides INSIDE the budget too — trim the payload to fit
+        room = budget - len(trunc.encode())
+        while last and len(last.encode()) > room:
+            last = last[:-1]
+        parts[-1] = last + trunc
     if len(parts) > 1:
         parts = [f"({i + 1}/{len(parts)}) {p}" for i, p in enumerate(parts)]
     return parts
