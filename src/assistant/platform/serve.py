@@ -593,7 +593,7 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                             reply = handle(acct, str(body.get("text", "")), base,
                                            make_llm(base))
                             return self._send(200, {"reply": reply})
-                        except BrokenPipeError:
+                        except (BrokenPipeError, ConnectionResetError):
                             return None
                         except Exception:
                             log.exception("onboarding failed for %s", acct)
@@ -619,7 +619,7 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                                  prev_verdict=turn.prev_verdict)
                     try:
                         return self._send(200, {"reply": reply})
-                    except BrokenPipeError:
+                    except (BrokenPipeError, ConnectionResetError):
                         # The bridge gave up waiting (its timeout) and already
                         # told the user "still computing" — a finished answer
                         # must never be dropped (2026-07-17 noon incident: an
@@ -661,7 +661,7 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                 log.exception("serve: %s failed", self.path)
                 try:
                     return self._send(500, {"error": str(exc)})
-                except BrokenPipeError:  # caller already gone (bridge timeout)
+                except (BrokenPipeError, ConnectionResetError):  # caller already gone (bridge timeout)
                     return None
 
     server = ThreadingHTTPServer(("127.0.0.1", boot.serve_port if port is None else port),
