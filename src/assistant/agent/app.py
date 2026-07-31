@@ -23,9 +23,11 @@ def _run_action(name, params, settings):
     return run_action(name, params, settings)
 
 
-def _handle_turn(text, settings, llm, *, history=None, image_paths=None):
+def _handle_turn(text, settings, llm, *, history=None, image_paths=None,
+                 rejected_images=None):
     from assistant.agent.chat.agent import handle_turn
-    return handle_turn(text, settings, llm, history=history, image_paths=image_paths)
+    return handle_turn(text, settings, llm, history=history,
+                       image_paths=image_paths, rejected_images=rejected_images)
 
 
 def _build_channels(settings, *, log_wecom=False):

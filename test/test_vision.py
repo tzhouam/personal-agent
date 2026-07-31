@@ -86,6 +86,32 @@ def test_handle_message_caps_image_count(settings, tmp_path, monkeypatch):
     assert seen["n"] == settings.vision_max_images
 
 
+def test_followup_calls_keep_images_attached(settings, tmp_path, monkeypatch):
+    """Regression (2026-07-27): with a natively multimodal model the prompt says
+    "the owner's images are attached — look at them directly", but the follow-up
+    calls passed only that text. A sighted model was asked about images it never
+    received and honestly replied that it could not load them. Every call in a
+    turn must carry the attachments the prompt claims are there."""
+    monkeypatch.setattr(settings, "llm_supports_images", True)
+    pic = _png(tmp_path)
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        def complete_json(self, prompt, system=None, **kw):
+            self.calls.append(kw)
+            # first response empty with no actions → drives the retry path
+            return ({"reply": "", "actions": []} if len(self.calls) == 1
+                    else {"reply": "看到了，是一张收据。", "actions": []})
+
+    llm = Recorder()
+    reply = handle_message("", settings, llm, image_paths=[str(pic)])
+    assert reply == "看到了，是一张收据。"
+    assert len(llm.calls) == 2, "the empty first reply should trigger one retry"
+    assert all(c.get("images") == [str(pic)] for c in llm.calls)
+
+
 def test_email_channel_extracts_image_attachments(settings):
     from email.mime.image import MIMEImage
     from email.mime.multipart import MIMEMultipart
