@@ -104,6 +104,61 @@ class EventsStore:
         }
         return [i for i in item_ids if i not in seen]
 
+    def filter_unseen_versioned(self, pairs: list[tuple[str, str]],
+                                cooldown_days: int = 7) -> list[str]:
+        """Fingerprint-aware dedup gate (audit F21): keep ids that should
+        SURFACE. An id passes when it is absent; a known id passes only when
+        its stored fingerprint differs from the current one (genuinely new
+        activity) AND its `last_seen` is older than `cooldown_days` — new
+        activity resurfaces a thread at most once per cooldown (the old
+        `updated_at`-keyed scheme re-surfaced busy threads every day; a bare
+        existence check suppressed them forever). Suppression by cooldown
+        does NOT adopt the new fingerprint, so activity during the cooldown
+        still surfaces once it expires. Legacy rows whose context predates
+        fingerprinting (e.g. "digest 2026-07-30") adopt the current
+        fingerprint in place — no deploy-time resurface storm, converging to
+        fingerprint tracking after one observation (`last_seen` preserved so
+        adoption adds no extra delay)."""
+        if not pairs:
+            return []
+        placeholders = ",".join("?" * len(pairs))
+        rows = {row[0]: (row[1], row[2]) for row in self.conn.execute(
+            f"SELECT item_id, last_seen, context FROM seen "
+            f"WHERE item_id IN ({placeholders})", [i for i, _ in pairs])}
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=cooldown_days)).isoformat()
+        out: list[str] = []
+        adopt: list[tuple[str, str]] = []
+        for item_id, fp in pairs:
+            if item_id not in rows:
+                out.append(item_id)
+                continue
+            last_seen, context = rows[item_id]
+            stored_fp = context[3:] if str(context or "").startswith("fp:") else None
+            if stored_fp is None:
+                adopt.append((item_id, fp))       # legacy row: adopt, suppress
+            elif stored_fp != str(fp) and last_seen < cutoff:
+                out.append(item_id)
+        for item_id, fp in adopt:
+            self.conn.execute("UPDATE seen SET context = ? WHERE item_id = ?",
+                              (f"fp:{fp}", item_id))
+        if adopt:
+            self.conn.commit()
+        return out
+
+    def mark_seen_versioned(self, pairs: list[tuple[str, str]]) -> None:
+        """Record surfaced ids WITH their activity fingerprint (stored as
+        `fp:<fingerprint>` in context; this upsert updates the fingerprint,
+        unlike `mark_seen`'s, which deliberately leaves context alone)."""
+        now = datetime.now(timezone.utc).isoformat()
+        for item_id, fp in pairs:
+            self.conn.execute(
+                "INSERT INTO seen (item_id, first_seen, last_seen, context)"
+                " VALUES (?, ?, ?, ?) ON CONFLICT(item_id) DO UPDATE SET"
+                " last_seen = excluded.last_seen, context = excluded.context",
+                (item_id, now, now, f"fp:{fp}"))
+        self.conn.commit()
+
     def mark_seen(self, item_ids: list[str], context: str = "") -> None:
         """Record ``item_ids`` as surfaced. Upsert: a repeat only advances
         ``last_seen``, preserving the original ``first_seen``. ``context``

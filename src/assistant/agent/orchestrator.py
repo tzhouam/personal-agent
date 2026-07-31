@@ -199,8 +199,12 @@ def build_graph(deps: Deps):
         suppressed. On failure it degrades to an empty digest. Returns the
         digest and advances to `todos`."""
         notifications = state.get("notifications", [])
-        unseen_ids = set(deps.events.filter_unseen(
-            [seen_key(n) for n in notifications]))
+        # fingerprint = updated_at: a thread with genuinely NEW activity can
+        # resurface (at most once per cooldown week); an unchanged one never
+        # does (audit F21 — the bare existence check suppressed a thread's
+        # next real @mention forever)
+        unseen_ids = set(deps.events.filter_unseen_versioned(
+            [(seen_key(n), str(n.get("updated_at", ""))) for n in notifications]))
         fresh = [n for n in notifications if seen_key(n) in unseen_ids]
         try:
             digest = build_digest(deps.llm, deps.profile.load(), fresh,
@@ -375,13 +379,16 @@ def build_graph(deps: Deps):
                 f"Full digest in your email."))
             if note != "disabled":
                 log.info("wechat announce: %s", note)
-            # only mark items seen once actually delivered
-            deps.events.mark_seen(
-                [seen_key(i)   # same key builder as node_digest — must stay in lockstep
-                 for section in digest.get("sections", {}).values() for i in section]
-                + research.get("seen_ids", []),
-                context=f"digest {run_date}",
-            )
+            # only mark items seen once actually delivered; notifications
+            # carry their activity fingerprint (updated_at) so genuinely new
+            # activity can resurface them (F21) — research ids keep the plain
+            # existence-based marking
+            deps.events.mark_seen_versioned(
+                [(seen_key(i), str(i.get("updated_at", "")))
+                 for section in digest.get("sections", {}).values()
+                 for i in section])
+            deps.events.mark_seen(research.get("seen_ids", []),
+                                  context=f"digest {run_date}")
             _advance("curate")
             return {"email_sent": True, "digest_path": str(digest_path), "phase": "curate"}
         except Exception as exc:
