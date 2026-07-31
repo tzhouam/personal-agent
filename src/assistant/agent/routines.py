@@ -117,7 +117,8 @@ class RoutineStore:
 
     @locked_transaction
     def add(self, task: str, time: str, days: str = "daily",
-            condition: str = "", workflow: str = "") -> dict | None:
+            condition: str = "", workflow: str = "",
+            now: datetime | None = None) -> dict | None:
         """Validate and store a new routine, returning the record — or None if
         ``time`` isn't HH:MM, ``days`` doesn't parse, or ``workflow`` isn't a
         wf-id (so the caller can reject bad input). ``task`` and ``condition``
@@ -135,9 +136,17 @@ class RoutineStore:
         if workflow and not re.match(r"^wf\d+$", workflow):
             return None
         data = self._load()
+        # Creation guard (same comparison claim_due uses, boundary included):
+        # "every morning 07:30" created at 22:00 must NOT fire at 22:00 — a
+        # routine already due at creation instant waits for its next
+        # occurrence. `now` is injectable for deterministic tests.
+        now = now or datetime.now()
+        due_now = (day_matches(str(days or "daily").lower(), now.date())
+                   and str(time).strip() <= now.strftime("%H:%M"))
         routine = {"id": f"rt{data['next_id']}", "task": str(task)[:400],
                    "time": str(time).strip(), "days": str(days or "daily").lower(),
-                   "condition": str(condition or "")[:300], "last_checked": None}
+                   "condition": str(condition or "")[:300],
+                   "last_checked": now.date().isoformat() if due_now else None}
         if workflow:
             routine["workflow"] = workflow
             routine["task"] = (str(task).strip() or f"run workflow {workflow}")[:400]
