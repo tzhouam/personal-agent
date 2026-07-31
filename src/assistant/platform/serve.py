@@ -217,7 +217,8 @@ class SessionStore:
 
     def append(self, session_id: str, owner: str, assistant: str,
                outcome: str | None = None, repaired: bool = False,
-               self_reported: bool = False, prev_verdict: str | None = None) -> None:
+               self_reported: bool = False, prev_verdict: str | None = None,
+               prev_ref: dict | None = None) -> None:
         """Record one owner/assistant exchange (each side capped at 2000 chars)
         into today's shard. Serialized under the per-user write lock; shard
         writes are atomic.
@@ -229,13 +230,22 @@ class SessionStore:
         acknowledgment confirms success, a code-observed fail is never upgraded.
         The previous turn may live in an EARLIER shard, so its shard is rewritten
         in place; a previous turn older than ``retention_days`` is never
-        relabeled."""
+        relabeled. ``prev_ref`` — the turn the caller's history read actually
+        ENDED with — pins the verdict to the turn the model judged; without
+        it, two concurrent turns each labeled whatever happened to be last at
+        append time, systematically mislabeling the wrong turn (audit F13).
+        Conflicts (two turns sharing one predecessor) resolve last-writer-
+        wins: verdicts are noisy labels consumed only in aggregate."""
         self._ensure_migrated()
         with _path_lock(self._lock_file):
             if prev_verdict in ("satisfied", "dissatisfied"):
-                recent = self._within(self._all(session_id), self.retention_days * 24)
-                if recent:
-                    self._finalize_prev(session_id, recent[-1], prev_verdict)
+                target = prev_ref
+                if target is None:
+                    recent = self._within(self._all(session_id),
+                                          self.retention_days * 24)
+                    target = recent[-1] if recent else None
+                if target:  # no-op if the referenced turn was pruned
+                    self._finalize_prev(session_id, target, prev_verdict)
             # Mask credential-shaped substrings before they touch disk: a pasted
             # token (e.g. a connect_github turn) must never persist in the
             # forever-retained history, and an LLM reply must not echo one back.
@@ -608,15 +618,18 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                     if not text and not images and not img_notes:
                         return self._send(400, {"error": "missing 'text'"})
                     skey = prefix + str(body.get("session", "") or "default")
+                    history = store.history(skey)
+                    prev_ref = history[-1] if history else None  # the turn the
+                    #             model will judge — captured BEFORE the turn
                     turn = services.handle_turn(text, settings, make_llm(settings),
-                                                history=store.history(skey),
+                                                history=history,
                                                 image_paths=images or None,
                                                 rejected_images=img_notes or None)
                     reply = turn.reply
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
                     store.append(skey, noted.strip(), reply, outcome=turn.outcome,
                                  repaired=turn.repaired, self_reported=turn.self_reported,
-                                 prev_verdict=turn.prev_verdict)
+                                 prev_verdict=turn.prev_verdict, prev_ref=prev_ref)
                     try:
                         return self._send(200, {"reply": reply})
                     except (BrokenPipeError, ConnectionResetError):

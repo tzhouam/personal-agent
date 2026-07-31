@@ -255,10 +255,20 @@ def _build_personal_website(settings: Settings, p: dict) -> str:
                 "replace it with a fresh one built from your GitHub activity.")
     job = _enqueue(settings, "build_website", {"overwrite": confirm},
                    dedupe_key=f"{settings.uid}:build_website", dedupe_scope="active")
+    # Promise an ATTEMPTED completion message only when an announce channel
+    # actually resolves for this user — self-serve tenants onboard with
+    # ANNOUNCE_* empty, and the old unconditional promise meant a FAILED
+    # build was communicated to no one (audit F22). Announce delivery is
+    # itself best-effort, so even with a channel the wording is "尝试".
+    can_notify = bool(settings.announce_account and settings.announce_to)
+    #            (send_wechat's own "disabled" condition, kept in lockstep)
+    tail = (" — 完成后我会尝试给你发消息。" if can_notify else
+            " (this deployment can't push you a completion message — check "
+            "back in a few minutes).")
     if job is None:
-        return "a website build is already running for you — I'll message you when it's live."
-    return (f"building your site now (enrich + publish, ~a few minutes). It'll be live "
-            f"at {st['url']} — I'll message you when it's done.")
+        return "a website build is already running for you" + tail
+    return (f"building your site now (enrich + publish, ~a few minutes). "
+            f"It'll be live at {st['url']}" + tail)
 
 
 # ── profile ──────────────────────────────────────────────────────────
