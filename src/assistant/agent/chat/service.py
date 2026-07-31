@@ -13,7 +13,7 @@ from assistant.platform.llm import LLM
 from assistant.agent.profile_store import ProfileStore
 from assistant.agent.chat.agent import handle_message
 from assistant.agent.chat.email_channel import EmailChannel
-from assistant.agent.chat.wecom import WeComChannel
+from assistant.agent.chat.wecom import WeComChannel, release_callback_server
 
 log = logging.getLogger("assistant")
 
@@ -41,9 +41,19 @@ def build_channels(settings: Settings, log_wecom: bool = True) -> list:
         if wecom.start_callback_server():
             if log_wecom:
                 log.info("wecom: send + receive enabled")
-        elif log_wecom:
-            log.info("wecom: send-only (set WECOM_TOKEN/WECOM_AES_KEY + public "
-                     "callback URL to receive)")
+        else:
+            # Desired-state sync: when THIS cycle's config no longer enables
+            # receiving, any server bound by an earlier cycle must close —
+            # otherwise deleting WECOM_TOKEN from .env leaves a listener
+            # serving with stale credentials forever. A bind FAILURE with
+            # receive still configured is not a release (retry next cycle).
+            if not (settings.wecom_token and settings.wecom_aes_key):
+                release_callback_server()
+            if log_wecom:
+                log.info("wecom: send-only (set WECOM_TOKEN/WECOM_AES_KEY + public "
+                         "callback URL to receive)")
+    else:
+        release_callback_server()  # wecom disabled entirely this cycle
     return channels
 
 
