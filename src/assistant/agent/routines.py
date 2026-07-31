@@ -199,6 +199,18 @@ class RoutineStore:
         self._save(data)
 
     @locked_transaction
+    def due_now(self, now: datetime | None = None) -> list[dict]:
+        """Read-only due predicate — EXACTLY claim_due's selection, without
+        the mutation, so the fire path can persist ledger intent BEFORE the
+        YAML shadow (Track D §4 ledger-first ordering)."""
+        now = now or datetime.now()
+        today = now.date().isoformat()
+        return [r for r in self._load()["routines"]
+                if not r.get("cancelled")
+                and day_matches(r["days"], now.date())
+                and r["time"] <= now.strftime("%H:%M")
+                and r.get("last_checked") != today]
+
     def claim_due(self, now: datetime | None = None) -> list[dict]:
         """Atomically select the due routines and mark them checked — one
         locked load→mark→save, so a concurrent poller can't double-fire them
@@ -262,12 +274,28 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
     outbox = OutboxDB(settings.data_dir)
     outcomes = []
     try:
-        # recovery first: stale executing → unknown; undelivered output →
-        # delivery-only retry (one attempt per cycle, bounded in the ledger)
-        stale_before = (datetime.now() - timedelta(
-            seconds=max(int(getattr(settings, "chat_poll_seconds", 60) or 60),
-                        60))).isoformat()
-        for row in outbox.routine_recover(stale_before):
+        # Recovery first: stale executing → execution_unknown (surfaced);
+        # stale CLAIMED rows are RESUMED (pre-side-effects by definition — a
+        # crash between claim and execution must not strand the occurrence);
+        # executed-but-undelivered output retries DELIVERY ONLY.
+        for row in outbox.routine_recover():
+            if row["state"] == "claimed":
+                routine = next((r for r in store.active()
+                                if r["id"] == row["routine_id"]), None)
+                token = outbox.routine_claim(row["routine_id"],
+                                             row["occurrence"])
+                if token is None:
+                    continue
+                if routine is None:   # cancelled/retired while in flight
+                    outbox.routine_transition(row["routine_id"],
+                                              row["occurrence"], token,
+                                              "cancelled",
+                                              from_states=("claimed",))
+                    continue
+                outcomes.extend(_run_one(settings, outbox, routine,
+                                         row["occurrence"], token,
+                                         handle_message, send_wechat))
+                continue
             status = send_wechat(
                 settings, f"🔁 [{row['routine_id']}] "
                 + (row["output"] or f"(routine task failed: {row['error']})"))
@@ -289,20 +317,32 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
 
 def _fire_new(settings: Settings, store: "RoutineStore", outbox, now,
               handle_message, send_wechat) -> list[dict]:
-    """The new-occurrence path of `fire_due` (recovery handled by the caller)."""
+    """The new-occurrence path of `fire_due` (recovery handled by the caller).
+    LEDGER-FIRST (design §4): mint every due occurrence as a `claimed` ledger
+    row BEFORE the YAML `last_checked` shadow — intent persists before any
+    attempt, so a crash anywhere after leaves a recoverable row, never a
+    silently skipped occurrence (a crash between ledger and shadow can only
+    DOUBLE-claim next cycle, which routine_claim absorbs idempotently)."""
     outcomes = []
-    for routine in store.claim_due(now):  # YAML shadow (old-code guard)
+    due = store.due_now(now)               # read-only due predicate
+    claims = {}
+    for routine in due:
         occurrence = f"{now.date().isoformat()} {routine['time']}"
-        # ledger claim AFTER the YAML shadow would make a crash window
-        # unrecordable — but claim_due IS the shadow write, and the design
-        # orders ledger-first. Practical resolution: the ledger insert is
-        # idempotent per occurrence, so we claim immediately after and accept
-        # that a crash BETWEEN shadow and ledger skips this occurrence
-        # (bounded, recorded as a miss next cycle is impossible — documented
-        # deviation, see design §4 rollback note).
         token = outbox.routine_claim(routine["id"], occurrence)
-        if token is None:   # already past claimed (e.g. replayed cycle)
-            continue
+        if token:
+            claims[routine["id"]] = (routine, occurrence, token)
+    store.claim_due(now)                   # YAML shadow (old-code guard)
+    for routine, occurrence, token in claims.values():
+        outcomes.extend(_run_one(settings, outbox, routine, occurrence, token,
+                                 handle_message, send_wechat))
+    return outcomes
+
+
+def _run_one(settings: Settings, outbox, routine: dict, occurrence: str,
+             token: str, handle_message, send_wechat) -> list[dict]:
+    """Drive ONE claimed occurrence through condition → execution → delivery."""
+    outcomes = []
+    if True:
         holds, why = check_condition(settings, routine.get("condition", ""))
         if not holds:
             outbox.routine_transition(routine["id"], occurrence, token,
@@ -310,10 +350,10 @@ def _fire_new(settings: Settings, store: "RoutineStore", outbox, now,
                                       from_states=("claimed",))
             log.info("routine %s: condition not met (%s)", routine["id"], why)
             outcomes.append({"id": routine["id"], "fired": False, "note": why})
-            continue
+            return outcomes
         if not outbox.routine_transition(routine["id"], occurrence, token,
                                          "executing", from_states=("claimed",)):
-            continue   # displaced by a newer claimant (token CAS)
+            return outcomes   # displaced by a newer claimant (token CAS)
         if routine.get("workflow"):
             # workflow-bound routine: deterministic dispatch through the saved
             # workflow's pre-planned task record — no chat-model interpretation
@@ -322,15 +362,17 @@ def _fire_new(settings: Settings, store: "RoutineStore", outbox, now,
             try:
                 note = run_action("run_workflow", {"id": routine["workflow"]},
                                   settings)
-                outbox.routine_transition(routine["id"], occurrence, token,
-                                          "executed", output=note,
-                                          from_states=("executing",))
+                settled = outbox.routine_transition(
+                    routine["id"], occurrence, token, "executed", output=note,
+                    from_states=("executing",))
             except Exception as exc:
                 log.exception("routine %s workflow dispatch failed", routine["id"])
                 note = f"workflow dispatch failed: {exc}"
-                outbox.routine_transition(routine["id"], occurrence, token,
-                                          "execution_failed", error=str(exc),
-                                          from_states=("executing",))
+                settled = outbox.routine_transition(
+                    routine["id"], occurrence, token, "execution_failed",
+                    error=str(exc), from_states=("executing",))
+            if not settled:      # fenced out by a newer claimant: never send
+                return outcomes
             status = send_wechat(settings, f"🔁 [{routine['id']}] {note}"[:800])
             if status == "sent":
                 outbox.routine_delivered(routine["id"], occurrence, token)
@@ -340,7 +382,7 @@ def _fire_new(settings: Settings, store: "RoutineStore", outbox, now,
             log.info("routine %s workflow %s: %s", routine["id"],
                      routine["workflow"], status)
             outcomes.append({"id": routine["id"], "fired": True, "note": note})
-            continue
+            return outcomes
         # frame the task as immediate execution — without this the chat agent
         # pattern-matches recurring tasks to plan_task and replies with a PLAN
         # (and a junk todo) instead of doing the work
@@ -351,15 +393,17 @@ def _fire_new(settings: Settings, store: "RoutineStore", outbox, now,
                   + (f"\n[Condition already verified true: {why}]" if why else ""))
         try:
             reply = handle_message(framed, settings)
-            outbox.routine_transition(routine["id"], occurrence, token,
-                                      "executed", output=reply,
-                                      from_states=("executing",))
+            settled = outbox.routine_transition(
+                routine["id"], occurrence, token, "executed", output=reply,
+                from_states=("executing",))
         except Exception as exc:  # one broken routine must not block the rest
             log.exception("routine %s task failed", routine["id"])
             reply = f"(routine task failed: {exc})"
-            outbox.routine_transition(routine["id"], occurrence, token,
-                                      "execution_failed", error=str(exc),
-                                      from_states=("executing",))
+            settled = outbox.routine_transition(
+                routine["id"], occurrence, token, "execution_failed",
+                error=str(exc), from_states=("executing",))
+        if not settled:          # fenced out by a newer claimant: never send
+            return outcomes
         prefix = f"🔁 [{routine['id']}] "
         if why:
             prefix += f"({why}) "

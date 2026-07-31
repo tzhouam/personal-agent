@@ -640,7 +640,13 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                                  repaired=turn.repaired, self_reported=turn.self_reported,
                                  prev_verdict=turn.prev_verdict, prev_ref=prev_ref)
                     try:
-                        return self._send(200, {"reply": reply})
+                        self._send(200, {"reply": reply})
+                        from assistant.platform import delivery as _delivery
+
+                        _delivery.mark_surfaced(   # D5 receipt: the reply
+                            settings,              # was transport-accepted
+                            getattr(turn, "surfaced_failure_ids", []) or [])
+                        return
                     except (BrokenPipeError, ConnectionResetError):
                         # The bridge gave up waiting (its timeout) and already
                         # told the user "still computing" — a finished answer
@@ -924,7 +930,8 @@ def _process_email_ledger(channel, message, settings, llm, services,
         channel.turn_failed(message, token, str(exc))
         return False
     ids = getattr(turn, "surfaced_failure_ids", []) or []
-    channel.finish_turn(message, token, turn.reply, ids)
+    if not channel.finish_turn(message, token, turn.reply, ids):
+        return True   # fenced out (row settled elsewhere): never double-send
     append_session(message, turn)
     try:
         channel.send(turn.reply, in_reply_to=message)

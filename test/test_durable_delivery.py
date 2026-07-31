@@ -106,21 +106,20 @@ def test_routine_delivery_retry_never_reexecutes(outbox):
                                      "executed", output="天气晴",
                                      from_states=("executing",))
     outbox.routine_delivery_failed("rt1", "2026-08-01 07:30", token, "down")
-    [row] = outbox.routine_recover(datetime.now().isoformat())
+    [row] = outbox.routine_recover()
     assert row["state"] == "executed" and row["output"] == "天气晴"
     assert outbox.routine_delivered("rt1", "2026-08-01 07:30",
                                     row["claim_token"])
-    assert outbox.routine_recover(datetime.now().isoformat()) == []
+    assert outbox.routine_recover() == []
 
 
 def test_routine_stale_executing_becomes_unknown_never_retried(outbox):
+    """Any executing row seen by the cycle-start scan is from a dead process
+    (the scan and the tasks share one thread) — no timed lease involved."""
     token = outbox.routine_claim("rt2", "2026-08-01 08:00")
     outbox.routine_transition("rt2", "2026-08-01 08:00", token, "executing",
                               from_states=("claimed",))
-    outbox.conn.execute("UPDATE routine_ledger SET claimed_at=?",
-                        ((datetime.now() - timedelta(hours=1)).isoformat(),))
-    outbox.conn.commit()
-    assert outbox.routine_recover(datetime.now().isoformat()) == []
+    assert outbox.routine_recover() == []
     fail = outbox.open_failures()
     assert any(f["id"].startswith("dfort2@") and "一半" in f["summary"]
                for f in fail)
@@ -128,9 +127,11 @@ def test_routine_stale_executing_becomes_unknown_never_retried(outbox):
 
 
 def test_routine_stale_claimed_is_reclaimable_and_fences_old_claimant(outbox):
-    """claimed precedes side effects → safe to re-claim; the DISPLACED
-    claimant's writes are rejected by the token CAS."""
+    """claimed precedes side effects → safe to re-claim; recovery RETURNS it
+    for resumption; the DISPLACED claimant's writes are rejected by CAS."""
     old = outbox.routine_claim("rt3", "2026-08-01 09:00")
+    [row] = outbox.routine_recover()
+    assert row["state"] == "claimed"           # stranded claim is resumable
     new = outbox.routine_claim("rt3", "2026-08-01 09:00")   # re-claim
     assert new and new != old
     assert not outbox.routine_transition("rt3", "2026-08-01 09:00", old,
@@ -145,7 +146,7 @@ def test_routine_condition_false_is_terminal_and_quiet(outbox):
                                      "condition_false", error="不下雨",
                                      from_states=("claimed",))
     assert outbox.open_failures() == []
-    assert outbox.routine_recover(datetime.now().isoformat()) == []
+    assert outbox.routine_recover() == []
 
 
 def test_fire_due_end_to_end_with_send_failure_then_retry(settings, monkeypatch):
@@ -339,3 +340,133 @@ def test_permissions_0600(settings):
     db = OutboxDB(settings.data_dir)
     db.close()
     assert (settings.data_dir / "outbox.db").stat().st_mode & 0o777 == 0o600
+
+
+def test_fire_due_resumes_stranded_claim(settings, monkeypatch):
+    """Crash after the ledger claim but before execution (the round-1 repro):
+    the YAML shadow blocks claim_due, but recovery RESUMES the claimed row —
+    the occurrence is never silently stranded."""
+    from datetime import datetime as dt
+
+    from assistant.agent import routines as routines_mod
+    from assistant.agent.routines import RoutineStore, fire_due
+
+    store = RoutineStore(settings.data_dir)
+    r = store.add("morning brief", "07:30", "daily", now=dt(2026, 8, 1, 6, 0))
+    # simulate: due-scan claimed the ledger row AND wrote the YAML shadow,
+    # then the process died before the condition check
+    db = OutboxDB(settings.data_dir)
+    try:
+        assert db.routine_claim(r["id"], "2026-08-01 07:30")
+    finally:
+        db.close()
+    store.claim_due(now=dt(2026, 8, 1, 7, 30))       # YAML says checked
+
+    runs = []
+    monkeypatch.setattr(routines_mod, "check_condition", lambda s, c: (True, ""))
+    monkeypatch.setattr("assistant.agent.chat.agent.handle_message",
+                        lambda *a, **k: runs.append(1) or "简报内容")
+    monkeypatch.setattr("assistant.platform.notify.send_wechat",
+                        lambda s, t: "sent")
+    out = fire_due(settings, now=dt(2026, 8, 1, 7, 31))
+    assert runs == [1]                               # resumed, executed once
+    assert any(o["fired"] for o in out)
+    db = OutboxDB(settings.data_dir)
+    try:
+        assert db.conn.execute("SELECT state FROM routine_ledger").fetchone()[0] \
+            == "delivered"
+    finally:
+        db.close()
+
+
+def test_fire_due_cancelled_mid_flight_closes_occurrence(settings, monkeypatch):
+    from datetime import datetime as dt
+
+    from assistant.agent.routines import RoutineStore, fire_due
+
+    store = RoutineStore(settings.data_dir)
+    r = store.add("x", "07:30", "daily", now=dt(2026, 8, 1, 6, 0))
+    db = OutboxDB(settings.data_dir)
+    try:
+        assert db.routine_claim(r["id"], "2026-08-01 07:30")
+    finally:
+        db.close()
+    store.claim_due(now=dt(2026, 8, 1, 7, 30))
+    store.cancel(r["id"])                            # cancelled while in flight
+    fire_due(settings, now=dt(2026, 8, 1, 7, 31))
+    db = OutboxDB(settings.data_dir)
+    try:
+        assert db.conn.execute("SELECT state FROM routine_ledger").fetchone()[0] \
+            == "cancelled"
+        assert db.open_failures() == []
+    finally:
+        db.close()
+
+
+def test_chat_endpoint_reports_receipts(settings, monkeypatch, outbox):
+    """/chat's 200 write is a transport acceptance — the D5 receipt must
+    follow it (the round-1 gap: surfaced_at stayed null forever)."""
+    import threading
+
+    import httpx
+
+    from assistant.agent.app import build_services
+    from assistant.platform import serve as serve_mod
+
+    outbox.add_system_note("大事故")
+
+    class LLM_:
+        def complete_json(self, *a, **k):
+            return {"reply": "好", "actions": []}
+
+    server = serve_mod.make_server(settings_factory=lambda: settings, port=0,
+                                   llm_factory=lambda s: LLM_(),
+                                   services=build_services())
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        body = httpx.post(f"{base}/chat", json={"text": "在吗"},
+                          timeout=30).json()
+        assert "dfs1" in body["reply"]               # block prepended in code
+        # the receipt lands right AFTER the response reaches the client —
+        # poll briefly rather than race the handler thread's tail
+        import time as _t
+
+        deadline = _t.monotonic() + 5
+        surfaced = None
+        while _t.monotonic() < deadline and surfaced is None:
+            surfaced = outbox.conn.execute(
+                "SELECT surfaced_at FROM system_notes").fetchone()[0]
+            if surfaced is None:
+                _t.sleep(0.05)
+        assert surfaced is not None
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_renderer_terminates_on_pathological_summaries():
+    from assistant.platform.delivery import render_failure_block
+
+    failures = [{"id": f"dfs{i}", "kind": "system", "summary": "灾" * 400}
+                for i in range(5)]
+    block = render_failure_block(failures)
+    assert len(block.encode()) <= 512
+    assert block.startswith("⚠")
+
+
+def test_email_fetch_failure_leaves_pending(settings, monkeypatch, outbox):
+    """A transient IMAP fetch failure must not settle mail as ignored (the
+    round-1 blocker) — the row stays pending for the next cycle."""
+    from assistant.agent.chat.email_channel import EmailChannel
+
+    ch = EmailChannel.__new__(EmailChannel)          # unit-level: no IMAP login
+    ch.settings = settings
+
+    class BoomConn:
+        def uid(self, *a):
+            raise OSError("timeout")
+
+    ok, msg = ch._fetch_parse(BoomConn(), 5)
+    assert ok is False and msg is None               # transient, not settleable

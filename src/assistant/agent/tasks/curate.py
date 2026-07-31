@@ -1,4 +1,3 @@
-import logging
 """Dormancy curator: flip profile entries not seen within their per-section
 window to `status: dormant`. Archive-only (never deletes — the flip is
 recoverable and evidence is kept), following the Hermes curator invariants."""
@@ -13,26 +12,11 @@ from assistant.agent.profile_store import ProfileStore
 _DORMANCY_DAYS = {"skills": 30, "interests": 30, "projects": 60}
 
 
-log = logging.getLogger("assistant")
-
-
 def curate(store: ProfileStore) -> dict:
     """Mark active entries whose `last_seen` exceeds the section's dormancy
     window as dormant, committing once if anything changed. Returns
     {"decayed": [...]} listing what was flipped. Entries without a parseable
     `last_seen` are left alone; nothing is deleted, so the change is reversible."""
-    try:   # Track D: outbox retention (open failures are never pruned)
-        from assistant.platform.delivery import OutboxDB
-
-        db = OutboxDB(settings.data_dir)
-        try:
-            pruned = db.prune()
-            if pruned:
-                log.info("curate: pruned %d settled outbox rows", pruned)
-        finally:
-            db.close()
-    except Exception:
-        log.exception("curate: outbox prune failed")
     profile = store.load()
     today = date.today()
     decayed: list[str] = []

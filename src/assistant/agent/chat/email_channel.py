@@ -93,9 +93,13 @@ class EmailChannel:
             conn.login(self.settings.smtp_user, self.settings.smtp_password)
             conn.select("INBOX", readonly=True)
             try:
-                uidvalidity = int((conn.response("UIDVALIDITY")[1] or [b"0"])[0])
+                uidvalidity = int((conn.response("UIDVALIDITY")[1] or [None])[0])
             except (TypeError, ValueError, IndexError):
-                uidvalidity = 0
+                # a transient metadata failure must NEVER look like an epoch
+                # change (that would trigger destructive re-baselining) —
+                # skip this cycle entirely
+                log.warning("email poll: UIDVALIDITY unavailable — skipping cycle")
+                return []
             _, data = conn.uid("search", None, "ALL")
             uids = sorted(int(u) for u in data[0].split())
             outbox = OutboxDB(self.settings.data_dir)
@@ -107,7 +111,9 @@ class EmailChannel:
                 for uid in uids:
                     if uid <= baseline or uid in known:
                         continue
-                    msg = self._fetch_parse(conn, uid)
+                    ok, msg = self._fetch_parse(conn, uid)
+                    if not ok:
+                        continue   # transient: rediscovered next cycle
                     if msg is None:
                         outbox.email_discover(uidvalidity, uid, ignored=True)
                     else:
@@ -122,12 +128,16 @@ class EmailChannel:
                             "channel": self.name, "kind": "email_outbox_retry",
                             "text": "[outbox retry]", "sender": "",
                             "subject": "[assistant] chat",
-                            "uidvalidity": uidvalidity, "uid": item["uid"],
+                            "uidvalidity": item["uidvalidity"],
+                            "uid": item["uid"],
                             "reply": item["reply"] or "",
                             "surfaced_ids": item["surfaced_ids"]})
                         continue
-                    msg = self._fetch_parse(conn, item["uid"])
-                    if msg is None:   # content unreadable now → settle it
+                    ok, msg = self._fetch_parse(conn, item["uid"])
+                    if not ok:
+                        break   # transient fetch failure: the row STAYS
+                        #         pending; head-of-line stops here this cycle
+                    if msg is None:   # deterministic non-message → settle
                         outbox.conn.execute(
                             "UPDATE email_ledger SET state='ignored', updated_at=?"
                             " WHERE uidvalidity=? AND uid=? AND state='pending'",
@@ -177,16 +187,23 @@ class EmailChannel:
                 "rejected_images": rejected}
 
     def _fetch_parse(self, conn, uid: int):
-        """Fetch one UID and parse it; None when unreadable or not an owner
-        chat message."""
+        """Fetch one UID and parse it → (ok, msg). ok=False means a TRANSIENT
+        fetch failure (the row must stay pending — settling it as ignored
+        would turn one IMAP timeout into a silently dropped mail, the exact
+        F3 class this ledger exists to kill); ok=True with msg=None means the
+        mail parsed to not-an-owner-chat-message (genuinely settleable)."""
         try:
             _, fetched = conn.uid("fetch", str(uid), "(RFC822)")
-            if not fetched or not isinstance(fetched[0], tuple):
-                return None
-            return self._parse(fetched[0][1])
         except Exception:
             log.exception("email fetch failed for uid %s", uid)
-            return None
+            return False, None
+        if not fetched or not isinstance(fetched[0], tuple):
+            return False, None   # server said nothing usable: treat transient
+        try:
+            return True, self._parse(fetched[0][1])
+        except Exception:
+            log.exception("email parse crashed for uid %s", uid)
+            return True, None    # deterministic parse crash: settle as ignored
 
     def _ensure_baseline(self, outbox, uidvalidity: int, uids: list[int]) -> int:
         """The epoch baseline UID (mail at or below it is settled history).
@@ -208,15 +225,17 @@ class EmailChannel:
                     "末尾重新基线（期间的邮件可能被跳过）")
             else:
                 baseline = int(legacy)
-            outbox.set_meta("email_uidvalidity", str(uidvalidity))
-            outbox.set_meta("email_baseline_uid", str(baseline))
+            outbox.set_meta_many({"email_uidvalidity": str(uidvalidity),
+                                  "email_baseline_uid": str(baseline)})
             return baseline
         if int(stored_uv) != uidvalidity:
-            outbox.set_meta("email_uidvalidity", str(uidvalidity))
-            outbox.set_meta("email_baseline_uid", str(tail))
+            settled = outbox.email_settle_old_epoch_pending(int(stored_uv))
+            outbox.set_meta_many({"email_uidvalidity": str(uidvalidity),
+                                  "email_baseline_uid": str(tail)})
             outbox.add_system_note(
-                "邮箱 UIDVALIDITY 变化（邮箱被重建/迁移）— 已重新基线，"
-                "重置窗口内的邮件可能未被处理")
+                "邮箱 UIDVALIDITY 变化（邮箱被重建/迁移）— 已重新基线"
+                + (f"，{settled} 封未处理邮件已按失败登记" if settled else "")
+                + "；重置窗口内的邮件可能未被处理")
             return tail
         return int(outbox.get_meta("email_baseline_uid") or 0)
 
@@ -231,13 +250,13 @@ class EmailChannel:
             db.close()
 
     def finish_turn(self, message: dict, token: str, reply: str,
-                    surfaced_ids: list[str]) -> None:
+                    surfaced_ids: list[str]) -> bool:
         from assistant.platform.delivery import OutboxDB
 
         db = OutboxDB(self.settings.data_dir)
         try:
-            db.email_finish_turn(message["uidvalidity"], message["uid"], token,
-                                 reply, surfaced_ids or [])
+            return db.email_finish_turn(message["uidvalidity"], message["uid"],
+                                        token, reply, surfaced_ids or [])
         finally:
             db.close()
 

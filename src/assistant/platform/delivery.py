@@ -108,6 +108,17 @@ class OutboxDB:
         if row is None:
             conn.execute("INSERT INTO meta VALUES ('schema_version', ?)",
                          (str(_SCHEMA_VERSION),))
+        else:
+            have = int(row[0])
+            if have > _SCHEMA_VERSION:
+                conn.close()
+                raise RuntimeError(
+                    f"outbox.db schema v{have} is newer than this code "
+                    f"(v{_SCHEMA_VERSION}) — refusing to touch it")
+            if have < _SCHEMA_VERSION:
+                # forward migrations run here, one transaction (none yet at v1)
+                conn.execute("UPDATE meta SET value=? WHERE key='schema_version'",
+                             (str(_SCHEMA_VERSION),))
         conn.commit()
         return conn
 
@@ -120,9 +131,16 @@ class OutboxDB:
         return row[0] if row else None
 
     def set_meta(self, key: str, value: str) -> None:
-        self.conn.execute(
-            "INSERT INTO meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
-            "value=excluded.value", (key, str(value)))
+        self.set_meta_many({key: value})
+
+    def set_meta_many(self, pairs: dict) -> None:
+        """Several meta keys in ONE transaction — an epoch change must never
+        commit its UIDVALIDITY separately from its baseline (a crash between
+        the two would pair a new epoch with an old baseline and skip mail)."""
+        for key, value in pairs.items():
+            self.conn.execute(
+                "INSERT INTO meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                "value=excluded.value", (key, str(value)))
         self.conn.commit()
 
     # ── email ledger (D2) ────────────────────────────────────────────
@@ -158,13 +176,15 @@ class OutboxDB:
                  _now(), uidvalidity, uid, token))
         self.conn.commit()
         rows = self.conn.execute(
-            "SELECT uid, state, attempts, reply, surfaced_ids FROM email_ledger "
-            "WHERE uidvalidity=? AND state IN ('pending','processed') "
-            "ORDER BY uid ASC", (uidvalidity,)).fetchall()
+            "SELECT uidvalidity, uid, state, attempts, reply, surfaced_ids "
+            "FROM email_ledger WHERE (uidvalidity=? AND state='pending') "
+            "OR state='processed' "   # processed replies send over SMTP — an
+            "ORDER BY uidvalidity ASC, uid ASC",  # epoch reset doesn't strand them
+            (uidvalidity,)).fetchall()
         out = []
-        for uid, state, attempts, reply, surfaced in rows:
-            out.append({"uid": uid, "state": state, "attempts": attempts,
-                        "reply": reply,
+        for uv, uid, state, attempts, reply, surfaced in rows:
+            out.append({"uidvalidity": uv, "uid": uid, "state": state,
+                        "attempts": attempts, "reply": reply,
                         "surfaced_ids": json.loads(surfaced) if surfaced else []})
         return out
 
@@ -218,6 +238,18 @@ class OutboxDB:
             (_MAX_ATTEMPTS, str(error)[:300], _now(), uidvalidity, uid))
         self.conn.commit()
 
+    def email_settle_old_epoch_pending(self, old_uidvalidity: int) -> int:
+        """A mailbox reset makes old-epoch PENDING rows unfetchable — settle
+        them as dead (visible on the surface), never silently. processed rows
+        keep retrying their sends."""
+        cur = self.conn.execute(
+            "UPDATE email_ledger SET state='dead', last_error=?, updated_at=? "
+            "WHERE uidvalidity=? AND state IN ('pending','executing')",
+            ("mailbox was reset before this mail could be processed",
+             _now(), old_uidvalidity))
+        self.conn.commit()
+        return cur.rowcount
+
     def email_settled_frontier(self, uidvalidity: int, baseline: int) -> int:
         """Highest contiguous settled UID (among discovered rows) above the
         baseline — the rollback shadow old code resumes from."""
@@ -268,20 +300,23 @@ class OutboxDB:
         self.conn.commit()
         return cur.rowcount > 0
 
-    def routine_recover(self, stale_before: str) -> list[dict]:
-        """Cycle-start recovery: stale `executing` → execution_unknown (side
-        effects may have started — never retried, surfaced); return
-        executed/execution_failed rows with undelivered output for
-        delivery-only retry (attempts bound enforced by the caller via
-        routine_delivery_failed)."""
+    def routine_recover(self) -> list[dict]:
+        """Cycle-start recovery. Runs in the SAME single thread that executes
+        tasks, so any `executing` row it sees is from a dead process — no
+        timed lease, no clock comparison, no long-task mislabel: it becomes
+        execution_unknown (side effects may have started — never retried,
+        surfaced). Returns (a) stale `claimed` rows (pre-side-effects: the
+        caller RESUMES them — a crash between claim and execution must not
+        strand the occurrence) and (b) executed/execution_failed rows with
+        undelivered output for delivery-only retry."""
         self.conn.execute(
             "UPDATE routine_ledger SET state='execution_unknown', updated_at=? "
-            "WHERE state='executing' AND claimed_at < ?", (_now(), stale_before))
+            "WHERE state='executing'", (_now(),))
         self.conn.commit()
         rows = self.conn.execute(
             "SELECT routine_id, occurrence, claim_token, output, error, attempts, "
             "state FROM routine_ledger WHERE state IN "
-            "('executed','execution_failed')").fetchall()
+            "('claimed','executed','execution_failed')").fetchall()
         return [{"routine_id": r, "occurrence": o, "claim_token": t,
                  "output": out, "error": e, "attempts": a, "state": st}
                 for r, o, t, out, e, a, st in rows]
@@ -459,26 +494,37 @@ def open_failures(settings) -> list[dict]:
                                        f"(due {r['due_at']})"})
     except Exception:
         log.exception("failure surface: reminder read failed")
+    out.sort(key=lambda f: (f["kind"], f["id"]))   # deterministic presentation
     return out
+
+
+def _clip_bytes(text: str, limit: int) -> str:
+    """UTF-8-safe byte clip with a visible marker."""
+    if len(text.encode()) <= limit:
+        return text
+    return text.encode()[:max(limit - 3, 0)].decode("utf-8", "ignore") + "…"
 
 
 def render_failure_block(failures: list[dict]) -> str:
     """The ≤512-byte, indivisible owner notice PREPENDED to chat replies in
-    code (never model-dependent). Rendered small so F10 chunking always fits
-    it entirely in part 1."""
+    code (never model-dependent; F10 chunking always fits it in part 1).
+    Provably terminating: every entry is byte-clipped up front, then whole
+    entries drop until the block fits — each step strictly shrinks it."""
     if not failures:
         return ""
-    lines = ["⚠ 有事项没送达（回复 知道了 <编号> 可清除）:"]
-    for f in failures[:3]:
-        lines.append(f"[{f['id']}] {f['summary']}")
-    if len(failures) > 3:
-        lines.append(f"…还有 {len(failures) - 3} 条")
-    block = "\n".join(lines)
-    while len(block.encode()) > 512:
-        lines[-1 if len(failures) <= 3 else -2] = \
-            lines[-1 if len(failures) <= 3 else -2][:-8] + "…"
+    header = "⚠ 有事项没送达（回复 知道了 <编号> 可清除）:"
+    entries = [_clip_bytes(f"[{f['id']}] {f['summary']}", 130)
+               for f in failures[:3]]
+    hidden = len(failures) - len(entries)
+    while True:
+        lines = [header] + entries
+        if hidden:
+            lines.append(f"…还有 {hidden} 条")
         block = "\n".join(lines)
-    return block
+        if len(block.encode()) <= 512 or not entries:
+            return block
+        entries.pop()
+        hidden += 1
 
 
 def mark_surfaced(settings, ids: list[str]) -> None:

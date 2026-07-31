@@ -276,7 +276,7 @@ there is no cross-store handoff window.
 
 | phase | new state | old-code behavior after rollback |
 |---|---|---|
-| D1 | delivery.db exists | ignored entirely |
+| D1 | outbox.db exists | ignored entirely |
 | D2 | email ledger + shadow | reads chat_state.json shadow; re-answers ≤ the unsettled window; never skips |
 | D3 | extra reminder fields | ignored (reads sent_at only); pre-D3 semantics return |
 | D4 | routine ledger + shadow | reads last_checked; may re-run one crash-window occurrence |
