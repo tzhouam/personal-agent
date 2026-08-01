@@ -43,6 +43,12 @@ def _apply_seed(settings, seed: dict | None) -> None:
         store = ReadingList(settings.profile_dir)
         for i, title in enumerate(seed["reading"]):
             store.upsert(f"seed{i}", title=title)
+    if seed.get("github"):
+        # a dummy CONNECTED GitHub identity so credential-gated routing (the
+        # website build) is reachable in the hermetic profile — settings-only,
+        # never used for a real call (the action is sandbox-faked)
+        settings.github_user = seed["github"]["user"]
+        settings.github_token = seed["github"]["token"]
     if seed.get("finance"):
         from assistant.agent.finance_store import FinanceStore
 

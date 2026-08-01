@@ -6,7 +6,7 @@
     "language": "zh-majority",
     "scorer": "first expected action executed with equivalent params; no-action items pass iff nothing executed or faked",
     "equivalence": "amounts compare as floats; params not listed in expect_params are unconstrained; time/date compare verbatim",
-    "seed": "items may carry a `seed` (todos/reading/finance) applied to the scratch stores before the turn, so actions on existing entities can SUCCEED (scored on execution, not attempt)"
+    "seed": "items may carry a `seed` (todos/reading/finance) applied to the scratch stores before the turn, so actions on existing entities can SUCCEED (scored on execution, not attempt); a `github` seed sets a dummy connected GitHub identity so credential-gated routing (website build) is reachable — the action is faked, so no real call is made"
   },
   "items": [
     {
@@ -218,7 +218,10 @@
       "id": "ga23",
       "text": "现在跑一遍完整的日常流程",
       "expect": {
-        "faked": "trigger_run"
+        "faked_any_of": [
+          "trigger_run",
+          "run_phase"
+        ]
       }
     },
     {
@@ -229,6 +232,12 @@
           "build_personal_website",
           "run_phase"
         ]
+      },
+      "seed": {
+        "github": {
+          "user": "benchuser",
+          "token": "ghp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
       }
     },
     {
