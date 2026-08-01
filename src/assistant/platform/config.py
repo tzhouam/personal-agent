@@ -184,6 +184,9 @@ class Settings(BaseSettings):
     # continuously against the live account — the QR is a join credential, so the
     # /qr route is serve-token-gated and the image is NEVER written to a repo.
     login_qr_refresh: bool = True
+    bench_enabled: bool = False    # PA-Mix harness (doc/BENCHMARKS.md) —
+    #                                CLI-only, off by default; nothing in the
+    #                                daemon or pipeline ever reads this
     job_workers: int = 2            # in-process worker threads draining the durable
                                     # job queue in multi_tenant (§6)
     moa_chat_proposer_timeout_s: int = 60   # chat-role MoA: abandon a proposer

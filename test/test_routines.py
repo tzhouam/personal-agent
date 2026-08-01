@@ -145,10 +145,15 @@ def test_day_matches_yearly_and_leap():
 
 def test_store_monthly_yearly_due(settings):
     store = RoutineStore(settings.data_dir)
-    rent = store.add("交房租", "09:00", days="monthly:1")
-    domain = store.add("续域名", "10:00", days="yearly:03-15")
+    # created on a quiet mid-month day: with the F4 creation guard, adding a
+    # monthly:1 routine ON the 1st after its time marks it already-checked
+    # (this fixture used the real clock and only failed on the 1st — the
+    # month-boundary test-fragility class)
+    created = datetime(2026, 7, 20, 8, 0)
+    rent = store.add("交房租", "09:00", days="monthly:1", now=created)
+    domain = store.add("续域名", "10:00", days="yearly:03-15", now=created)
     assert rent and domain
-    assert store.add("bad", "09:00", days="monthly:40") is None
+    assert store.add("bad", "09:00", days="monthly:40", now=created) is None
     due = store.due(datetime(2026, 8, 1, 9, 30))
     assert [r["id"] for r in due] == [rent["id"]]
     due = store.due(datetime(2027, 3, 15, 10, 30))

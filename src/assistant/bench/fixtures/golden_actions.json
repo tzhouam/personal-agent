@@ -1,0 +1,262 @@
+{
+  "manifest": {
+    "track": "golden-actions",
+    "layer": "A",
+    "label": "golden",
+    "language": "zh-majority",
+    "scorer": "first expected action executed with equivalent params; no-action items pass iff nothing executed or faked",
+    "equivalence": "amounts compare as floats; params not listed in expect_params are unconstrained; time/date compare verbatim"
+  },
+  "items": [
+    {
+      "id": "ga01",
+      "text": "帮我记一下待办：周五交房租",
+      "expect": {
+        "action": "add_todo"
+      }
+    },
+    {
+      "id": "ga02",
+      "text": "把待办 t3 标记完成",
+      "expect": {
+        "action": "done_todo",
+        "expect_params": {
+          "id": "t3"
+        }
+      }
+    },
+    {
+      "id": "ga03",
+      "text": "午饭花了45",
+      "expect": {
+        "action": "log_transaction",
+        "expect_params": {
+          "amount": 45,
+          "kind": "expense"
+        }
+      }
+    },
+    {
+      "id": "ga04",
+      "text": "下午3点打车花了32块",
+      "expect": {
+        "action": "log_transaction",
+        "expect_params": {
+          "amount": 32,
+          "time": "15:00"
+        }
+      }
+    },
+    {
+      "id": "ga05",
+      "text": "今天发工资了，到账21000",
+      "expect": {
+        "action": "log_transaction",
+        "expect_params": {
+          "amount": 21000,
+          "kind": "income"
+        }
+      }
+    },
+    {
+      "id": "ga06",
+      "text": "记一下：中午吃了一碗牛肉面",
+      "expect": {
+        "action": "log_meal"
+      }
+    },
+    {
+      "id": "ga07",
+      "text": "今晚跑了5公里，大概30分钟",
+      "expect": {
+        "action": "log_exercise"
+      }
+    },
+    {
+      "id": "ga08",
+      "text": "今天早上称了体重，71.5公斤",
+      "expect": {
+        "action": "log_weight"
+      }
+    },
+    {
+      "id": "ga09",
+      "text": "提醒我明天上午11点有面试",
+      "expect": {
+        "action": "set_reminder"
+      }
+    },
+    {
+      "id": "ga10",
+      "text": "以后每个工作日早上7点半给我发天气",
+      "expect": {
+        "action": "create_routine"
+      }
+    },
+    {
+      "id": "ga11",
+      "text": "取消提醒 m2",
+      "expect": {
+        "action": "cancel_reminder",
+        "expect_params": {
+          "id": "m2"
+        }
+      }
+    },
+    {
+      "id": "ga12",
+      "text": "这个月伙食花了多少钱？",
+      "expect": {
+        "action_any_of": [
+          "finance_summary",
+          "query_transactions"
+        ]
+      }
+    },
+    {
+      "id": "ga13",
+      "text": "六月份我在交通上花了多少？",
+      "expect": {
+        "action": "query_transactions"
+      }
+    },
+    {
+      "id": "ga14",
+      "text": "我最近体重趋势怎么样",
+      "expect": {
+        "action_any_of": [
+          "health_summary",
+          "query_health"
+        ]
+      }
+    },
+    {
+      "id": "ga15",
+      "text": "以后记账默认用港币",
+      "expect": {
+        "action": "learn_preference"
+      }
+    },
+    {
+      "id": "ga16",
+      "text": "忘掉那条港币的规则吧",
+      "expect": {
+        "action": "retire_preference"
+      }
+    },
+    {
+      "id": "ga17",
+      "text": "把维生素D加到我要补充的营养清单里",
+      "expect": {
+        "action": "add_health_need"
+      }
+    },
+    {
+      "id": "ga18",
+      "text": "阅读列表里 r2 那篇我读完了",
+      "expect": {
+        "action": "done_reading",
+        "expect_params": {
+          "id": "r2"
+        }
+      }
+    },
+    {
+      "id": "ga19",
+      "text": "你好呀",
+      "expect": {
+        "action": null
+      }
+    },
+    {
+      "id": "ga20",
+      "text": "谢谢，刚才说得很清楚",
+      "expect": {
+        "action": null
+      }
+    },
+    {
+      "id": "ga21",
+      "text": "你觉得我最近是不是吃得太咸了？",
+      "expect": {
+        "action": null
+      }
+    },
+    {
+      "id": "ga22",
+      "text": "重启一下你自己",
+      "expect": {
+        "faked": "reboot"
+      }
+    },
+    {
+      "id": "ga23",
+      "text": "现在跑一遍完整的日常流程",
+      "expect": {
+        "faked": "trigger_run"
+      }
+    },
+    {
+      "id": "ga24",
+      "text": "帮我把个人网站重新发布一下",
+      "expect": {
+        "faked_any_of": [
+          "build_personal_website",
+          "run_phase"
+        ]
+      }
+    },
+    {
+      "id": "ga25",
+      "text": "昨天晚饭在面点王花了88",
+      "expect": {
+        "action": "log_transaction",
+        "expect_params": {
+          "amount": 88
+        }
+      }
+    },
+    {
+      "id": "ga26",
+      "text": "上周三买了本书，60块，算购物",
+      "expect": {
+        "action": "log_transaction",
+        "expect_params": {
+          "amount": 60,
+          "category": "shopping"
+        }
+      }
+    },
+    {
+      "id": "ga27",
+      "text": "把 f-20260610-1 那笔改成交通类",
+      "expect": {
+        "action": "recategorize_transaction"
+      }
+    },
+    {
+      "id": "ga28",
+      "text": "刚才那笔45的记错了，作废掉",
+      "expect": {
+        "action": "void_transaction"
+      }
+    },
+    {
+      "id": "ga29",
+      "text": "知道了 dfremm1",
+      "expect": {
+        "action": "acknowledge_failure",
+        "expect_params": {
+          "id": "dfremm1"
+        }
+      }
+    },
+    {
+      "id": "ga30",
+      "text": "我的开放待办都有哪些？",
+      "expect": {
+        "action": null
+      }
+    }
+  ]
+}
