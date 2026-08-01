@@ -1,93 +1,117 @@
 """PA-Mix run orchestration + report card (doc/BENCHMARKS.md §2.5/§2.7).
 
-`run_tracks` executes tracks under the network guard, writes an isolated
-results run (manifest, per-item JSONL, summary), and computes paired-delta
-regressions against the previous run's summary. `render_report` prints the
-fixed-order per-track card — no composite number by design."""
+`run_tracks` runs tracks under the network guard on hermetic scratch
+profiles, writes an isolated results run, and computes paired-delta
+regressions ONLY against a comparable reference (same fixture hash, same
+route fingerprint) — a changed fixture/model can't masquerade as a
+regression. A directional track (too few items) never alerts. Regressions
+are labeled unconfirmed pending an immediate rerun (§2.5)."""
 
 import logging
+import shutil
+import tempfile
 import time
+from pathlib import Path
 
 from assistant.bench import stats
 from assistant.bench.results import RunStore
-from assistant.bench.sandbox import bench_settings, network_guard
+from assistant.bench.sandbox import bench_settings, network_guard, route_fingerprint
 from assistant.bench.tracks import TRACKS
 from assistant.platform.llm import LLM
 
 log = logging.getLogger("assistant")
 
-_DEFAULT_REPS = 3
+_MIN_REPS = 3
+_MIN_ITEMS_TO_ALERT = 10
 
 
 def _llm_hosts(settings) -> frozenset[str]:
-    """The only hosts a bench run may reach: every endpoint LLM_ROLES could
-    route to (plus the default base URL)."""
     from urllib.parse import urlsplit
 
     hosts = set()
-    for url in [settings.anthropic_base_url or "https://api.anthropic.com"] + [
-            spec.get("base_url") for spec in (settings.llm_roles or {}).values()
-            if isinstance(spec, dict)]:
-        if url:
-            host = urlsplit(url).hostname
-            if host:
-                hosts.add(host)
+    urls = [settings.anthropic_base_url or "https://api.anthropic.com"]
+    for spec in (settings.llm_roles or {}).values():
+        if isinstance(spec, dict) and spec.get("base_url"):
+            urls.append(spec["base_url"])
+    for spec in (settings.llm_mixture or {}).get("members", []):
+        if isinstance(spec, dict) and spec.get("base_url"):
+            urls.append(spec["base_url"])
+    for url in urls:
+        host = urlsplit(url).hostname
+        if host:
+            hosts.add(host)
     return frozenset(hosts)
 
 
-def run_tracks(track_names: list[str], base_settings, reps: int = _DEFAULT_REPS,
-               seed: int = 0, llm_factory=None, settings_factory=None,
-               results_root=None, guard_network: bool = True) -> dict:
-    """Run the named tracks and persist one results run. Factories are
-    injectable for tests; by default each item/scenario gets a fresh hermetic
-    bench profile and a real LLM on it. Returns the summary dict."""
+def _comparable(cur_manifest: dict, cur_fp: dict, ref_row: dict,
+                ref_fp: dict) -> bool:
+    """A reference row is a valid paired-delta baseline only when the fixture
+    content AND the route fingerprint match — otherwise a changed item set or
+    a changed model would surface as a spurious 'regression'."""
+    return (ref_row.get("valid")
+            and ref_row.get("manifest", {}).get("fixture_sha256")
+            == cur_manifest.get("fixture_sha256")
+            and ref_fp == cur_fp)
+
+
+def run_tracks(track_names: list[str], base_settings, reps: int = _MIN_REPS,
+               seed: int = 0, llm_factory=None, results_root=None,
+               guard_network: bool = True) -> dict:
     unknown = [n for n in track_names if n not in TRACKS]
     if unknown:
         raise ValueError(f"unknown track(s): {unknown} — have {sorted(TRACKS)}")
-    settings_factory = settings_factory or bench_settings
     llm_factory = llm_factory or (lambda s: LLM(s))
+    fingerprint = route_fingerprint(base_settings)
     store = RunStore(root=results_root)
     reference = store.reference_summary()
+    ref_fp = (reference or {}).get("route_fingerprint")
 
     summary: dict = {"run_id": store.run_id, "reps": reps, "seed": seed,
-                     "llm_roles": dict(base_settings.llm_roles or {}),
-                     "default_model": base_settings.anthropic_model,
-                     "tracks": {}}
+                     "route_fingerprint": fingerprint, "tracks": {}}
+    scratch_base = Path(tempfile.mkdtemp(prefix="pa-bench-run-"))
     guard = (network_guard(_llm_hosts(base_settings)) if guard_network
              else _null_context())
-    with guard:
-        for name in track_names:
-            track = TRACKS[name]
-            started = time.monotonic()
-            per_item = track.run(settings_factory, llm_factory, reps, seed)
-            elapsed = round(time.monotonic() - started, 1)
+    try:
+        with guard:
+            for name in track_names:
+                track = TRACKS[name]
+                scratch = scratch_base / name
+                started = time.monotonic()
+                per_item = track.run(base_settings, llm_factory, reps, seed,
+                                     scratch)
+                elapsed = round(time.monotonic() - started, 1)
 
-            means = stats.item_means(per_item)
-            infra_excluded = sum(1 for scores in per_item.values()
-                                 if not any(s is not None for s in scores))
-            coverage = (len(means) / len(per_item)) if per_item else 0.0
-            mean, lo, hi = stats.bootstrap_ci(list(means.values()), seed=seed)
-            row = {"manifest": track.manifest(),
-                   "score": round(mean, 4),
-                   "ci": [round(lo, 4), round(hi, 4)],
-                   "n_items": len(per_item), "n_scored": len(means),
-                   "infra_excluded": infra_excluded,
-                   "coverage": round(coverage, 3),
-                   "valid": coverage >= 0.9,   # §2.5 validity floor
-                   "seconds": elapsed,
-                   "item_means": {k: round(v, 4) for k, v in means.items()}}
-            ref_row = ((reference or {}).get("tracks") or {}).get(name)
-            if ref_row and ref_row.get("valid"):
-                row["delta_vs"] = reference["run_id"]
-                row["delta"] = stats.paired_delta(
-                    means, ref_row.get("item_means", {}), seed=seed)
-            summary["tracks"][name] = row
-            store.write_items(name, [
-                {"item": item_id, "scores": scores}
-                for item_id, scores in per_item.items()])
-    store.write_manifest({name: TRACKS[name].manifest()
-                          for name in track_names})
-    store.write_summary(summary)
+                means = stats.item_means(per_item)
+                acct = stats.rep_accounting(per_item)
+                coverage = (len(means) / len(per_item)) if per_item else 0.0
+                mean, lo, hi = stats.bootstrap_ci(list(means.values()), seed=seed)
+                manifest = track.manifest()
+                directional = (getattr(track, "directional", False)
+                               or len(per_item) < _MIN_ITEMS_TO_ALERT
+                               or reps < _MIN_REPS)
+                row = {"manifest": manifest, "score": round(mean, 4),
+                       "ci": [round(lo, 4), round(hi, 4)],
+                       "n_items": len(per_item), "n_scored": len(means),
+                       "coverage": round(coverage, 3),
+                       "valid": coverage >= 0.9,
+                       "directional": directional,
+                       "reps": acct, "seconds": elapsed,
+                       "item_means": {k: round(v, 4) for k, v in means.items()}}
+                ref_row = ((reference or {}).get("tracks") or {}).get(name)
+                if (ref_row and not directional
+                        and _comparable(manifest, fingerprint, ref_row,
+                                        ref_fp or {})):
+                    d = stats.paired_delta(means, ref_row.get("item_means", {}),
+                                           seed=seed)
+                    if not d.get("directional_only"):
+                        row["delta_vs"] = reference["run_id"]
+                        row["delta"] = d
+                summary["tracks"][name] = row
+                store.write_items(name, per_item)
+        store.write_manifest({n: TRACKS[n].manifest() for n in track_names})
+        store.write_summary(summary)
+    finally:
+        shutil.rmtree(scratch_base, ignore_errors=True)
     return summary
 
 
@@ -100,31 +124,33 @@ class _null_context:
 
 
 def render_report(summary: dict) -> str:
-    """The fixed-order per-track card. Regressions are labeled UNCONFIRMED —
-    the §2.5 policy is that an alert counts only after an immediate rerun
-    reproduces it; the card cannot know that, so it never overstates."""
+    fp = summary.get("route_fingerprint", {})
     lines = [f"PA-Mix {summary['run_id']}  (reps={summary['reps']}, "
-             f"default model {summary.get('default_model', '?')})",
+             f"model {fp.get('default_model', '?')})",
              "─" * 72]
     for name in sorted(summary.get("tracks", {})):
         row = summary["tracks"][name]
         m = row["manifest"]
-        line = (f"{name:20s} {row['score']:.3f} "
+        tag = "directional" if row.get("directional") else "alerting"
+        line = (f"{name:16s} {row['score']:.3f} "
                 f"[{row['ci'][0]:.3f},{row['ci'][1]:.3f}] "
                 f"n={row['n_scored']}/{row['n_items']}×{summary['reps']} "
-                f"{m.get('layer', '?')}/{m.get('label', '?')}")
+                f"{m.get('layer', '?')}/{m.get('label', '?')} {tag}")
         if not row.get("valid"):
             line += "  ⚠ INVALID (<90% coverage)"
+        if row["reps"]["reps_infra"]:
+            line += f"  ({row['reps']['reps_infra']} infra reps)"
         delta = row.get("delta")
-        if delta and not delta.get("directional_only"):
+        if delta:
             sign = f"{delta['delta_mean']:+.3f}"
+            line += f"  Δ{sign} vs {row['delta_vs'][:16]}"
             if delta.get("regressed"):
-                line += (f"  Δ{sign} vs {row['delta_vs']} "
-                         "⚠ REGRESSED (unconfirmed — rerun to confirm)")
-            else:
-                line += f"  Δ{sign} vs {row['delta_vs']}"
+                line += "  ⚠ REGRESSED (unconfirmed — rerun to confirm)"
         lines.append(line)
         if m.get("label") == "official-subset":
-            lines.append(" " * 21 + "(subset — never comparable to the full "
+            lines.append(" " * 17 + "(subset — never comparable to the full "
                          "benchmark or its leaderboard)")
+        elif m.get("label") == "derived":
+            lines.append(" " * 17 + "(derived/custom — not the source "
+                         "benchmark's score)")
     return "\n".join(lines)

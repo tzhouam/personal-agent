@@ -10,16 +10,38 @@ import random
 import statistics
 
 
-def item_means(per_item_scores: dict[str, list[float]]) -> dict[str, float]:
-    """Average each item's repetition scores (`None`s — classified infra
-    failures — are dropped per item; an item with no valid score at all is
-    excluded, counted by the caller)."""
+def item_means(per_item_scores: dict[str, list]) -> dict[str, float]:
+    """Average each item's per-rep scores. Accepts either raw floats/Nones or
+    `{"score": ...}` reps. `None` reps (classified infra failures) are
+    dropped per item; an item with no valid rep at all is excluded (counted
+    by the caller via `rep_accounting`)."""
     out = {}
-    for item_id, scores in per_item_scores.items():
-        valid = [s for s in scores if s is not None]
+    for item_id, reps in per_item_scores.items():
+        valid = [_score(r) for r in reps if _score(r) is not None]
         if valid:
             out[item_id] = sum(valid) / len(valid)
     return out
+
+
+def _score(rep):
+    return rep["score"] if isinstance(rep, dict) else rep
+
+
+def rep_accounting(per_item_scores: dict[str, list]) -> dict:
+    """Rep-level counts so partial-rep infra failures can't hide: total reps,
+    valid reps, infra (None) reps, and items with fewer valid reps than
+    requested."""
+    total = valid = infra = 0
+    partial_items = []
+    for item_id, reps in per_item_scores.items():
+        v = sum(1 for r in reps if _score(r) is not None)
+        total += len(reps)
+        valid += v
+        infra += len(reps) - v
+        if 0 < v < len(reps):
+            partial_items.append(item_id)
+    return {"reps_total": total, "reps_valid": valid, "reps_infra": infra,
+            "items_with_partial_reps": partial_items}
 
 
 def bootstrap_ci(values: list[float], seed: int = 0, iters: int = 2000,

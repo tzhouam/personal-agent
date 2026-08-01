@@ -5,7 +5,8 @@
     "label": "golden",
     "language": "zh-majority",
     "scorer": "first expected action executed with equivalent params; no-action items pass iff nothing executed or faked",
-    "equivalence": "amounts compare as floats; params not listed in expect_params are unconstrained; time/date compare verbatim"
+    "equivalence": "amounts compare as floats; params not listed in expect_params are unconstrained; time/date compare verbatim",
+    "seed": "items may carry a `seed` (todos/reading/finance) applied to the scratch stores before the turn, so actions on existing entities can SUCCEED (scored on execution, not attempt)"
   },
   "items": [
     {
@@ -23,6 +24,13 @@
         "expect_params": {
           "id": "t3"
         }
+      },
+      "seed": {
+        "todos": [
+          "交房租",
+          "买菜",
+          "还信用卡"
+        ]
       }
     },
     {
@@ -159,6 +167,12 @@
         "expect_params": {
           "id": "r2"
         }
+      },
+      "seed": {
+        "reading": [
+          "论文A",
+          "论文B"
+        ]
       }
     },
     {
@@ -229,16 +243,36 @@
     },
     {
       "id": "ga27",
-      "text": "把 f-20260610-1 那笔改成交通类",
+      "text": "把刚记的那笔打车的改成交通类",
       "expect": {
         "action": "recategorize_transaction"
+      },
+      "seed": {
+        "finance": [
+          {
+            "kind": "expense",
+            "amount": 30,
+            "note": "打车",
+            "category": "other"
+          }
+        ]
       }
     },
     {
       "id": "ga28",
-      "text": "刚才那笔45的记错了，作废掉",
+      "text": "刚记的那笔45的午饭记错了，作废掉",
       "expect": {
         "action": "void_transaction"
+      },
+      "seed": {
+        "finance": [
+          {
+            "kind": "expense",
+            "amount": 45,
+            "note": "午饭",
+            "category": "food"
+          }
+        ]
       }
     },
     {

@@ -1,11 +1,12 @@
 """Bench isolation (doc/BENCHMARKS.md §2.6) — mandatory before any A-layer run.
 
-Three independent walls, because a scratch DATA_DIR is not a security
-boundary: (1) `bench_settings` builds a Settings with `_env_file=None` (the
-class otherwise auto-reads the repo/CWD .env) and every outward credential
-blanked; (2) `sandboxed_executor` runs the action registry deny-by-default —
-outward/risky actions become recording fakes; (3) `network_guard` denies
-socket connects at the transport except the allowed LLM endpoints."""
+Hermeticity here means **no outward side effects and no network except the
+LLM endpoints** — NOT hiding the LLM key from ourselves (the whole point of
+the M layer is to benchmark the configured model). So `bench_settings`
+COPIES the base settings' LLM config (key/base-url/model/roles/mixture) and
+blanks only the outward-integration credentials; `sandboxed_executor` runs
+the registry deny-by-default; `network_guard` denies socket connects at the
+transport except the resolved LLM endpoint IPs."""
 
 import contextlib
 import socket
@@ -13,13 +14,12 @@ import tempfile
 from pathlib import Path
 
 from assistant.agent.actions import registry as actions_registry
-from assistant.agent.actions.registry import ACTIONS, validate
+from assistant.agent.actions.registry import ACTIONS, looks_failed, validate
 from assistant.platform.config import Settings
 
-# Actions a bench turn may actually EXECUTE against its scratch stores.
-# Everything else — outward, risky, or pipeline-triggering — is faked and
-# recorded (deny by default: a new registry action is faked until someone
-# consciously adds it here).
+# Actions a bench turn may EXECUTE against its scratch stores. Everything
+# else — outward, risky, or pipeline-triggering — is faked and recorded
+# (deny by default: a new registry action is faked until consciously added).
 ALLOWED_ACTIONS = frozenset({
     "add_todo", "done_todo", "list_todos", "done_reading", "list_reading",
     "unrelated_reading", "set_reminder", "list_reminders", "cancel_reminder",
@@ -32,50 +32,110 @@ ALLOWED_ACTIONS = frozenset({
     "show_profile", "acknowledge_failure",
 })
 
-# Credentials/keys that must be EMPTY in a bench profile — every outward
-# integration the config knows about (kept in sync with config.py; the
-# isolation test asserts none of these survives into bench settings).
-BLANKED_FIELDS = (
-    "anthropic_api_key", "github_token", "github_user",
-    "smtp_user", "smtp_password", "smtp_host", "imap_host",
-    "resend_api_key", "digest_to",
-    "website_repo", "website_token", "marks_repo", "marks_token",
-    "resume_remote_url",
-    "wecom_corp_id", "wecom_secret", "wecom_agent_id", "wecom_token",
-    "wecom_aes_key", "wecom_owner_userid",
-    "openclaw_bin", "announce_account", "announce_to",
-    "vision_api_key", "vision_model",
-    "search_api_key", "serper_api_key", "chrome_history_path",
-)
+# Read-only allowed actions (emitting one alongside the expected action is
+# harmless; a MUTATING extra is not — the golden oracle rejects those).
+READONLY_ACTIONS = frozenset({
+    "list_todos", "list_reading", "list_reminders", "list_routines",
+    "list_transactions", "finance_summary", "query_transactions",
+    "health_summary", "query_health", "list_preferences", "show_profile",
+})
+
+# OUTWARD-integration credentials blanked in a bench profile (LLM config is
+# deliberately KEPT). Derived by listing every Settings field whose name
+# matches a credential/endpoint pattern, MINUS the LLM fields — so a new
+# outward key added to config.py is blanked automatically instead of leaking
+# (the isolation test asserts no non-LLM secret survives).
+_LLM_KEEP = frozenset({
+    "anthropic_api_key", "anthropic_base_url", "anthropic_model",
+    "anthropic_default_haiku_model", "llm_roles", "llm_mixture", "llm_review",
+})
+_OUTWARD_PATTERNS = ("token", "password", "secret", "api_key", "_key",
+                     "smtp", "imap", "_repo", "_url", "_userid", "_to",
+                     "_account", "_bin", "history_path", "digest_to",
+                     "corp_id", "aes_key", "agent_id", "github_user")
 
 
-def bench_settings(scratch: Path | None = None) -> Settings:
-    """A hermetic Settings for one bench run: `_env_file=None` (no .env
-    leakage), a fresh scratch DATA_DIR, and every outward credential field
-    that exists on this Settings version blanked."""
+def outward_credential_fields() -> list[str]:
+    """Every Settings field that names an outward credential/endpoint, minus
+    the LLM config we intentionally keep. Computed from the live model so a
+    new field can't silently leak."""
+    fields = getattr(Settings, "model_fields", {})
+    out = []
+    for name, info in fields.items():
+        if name in _LLM_KEEP:
+            continue
+        # only string/dict/path fields carry credentials or endpoints — an int
+        # like imap_port is config, not a secret, and is left intact
+        ann = getattr(info, "annotation", None)
+        if ann not in (str, dict) and ann is not None and "Path" not in str(ann):
+            continue
+        low = name.lower()
+        if any(pat in low for pat in _OUTWARD_PATTERNS):
+            out.append(name)
+    return out
+
+
+def bench_settings(base: Settings | None = None, scratch: Path | None = None) -> Settings:
+    """A hermetic Settings for one bench run: a COPY of `base` (its LLM
+    config preserved so the M layer benchmarks the real configured model),
+    every outward credential blanked, and a fresh scratch DATA_DIR. When
+    `base` is None a `Settings(_env_file=None)` is used (test default — no
+    .env, no model configured)."""
+    base = base if base is not None else Settings(_env_file=None)
+    settings = base.model_copy(deep=True)
     scratch = Path(scratch or tempfile.mkdtemp(prefix="pa-bench-"))
-    settings = Settings(_env_file=None)
     settings.data_dir = scratch / "data"
-    for field in BLANKED_FIELDS:
-        if hasattr(settings, field):
+    settings.deployment_mode = "single_user"
+    settings.bench_enabled = False
+    for field in outward_credential_fields():
+        cur = getattr(settings, field, None)
+        if isinstance(cur, str):
             setattr(settings, field, "")
+        elif isinstance(cur, dict):
+            setattr(settings, field, {})
+        elif isinstance(cur, Path):
+            # input paths (e.g. chrome_history_path) point under the scratch,
+            # so a read finds nothing rather than the real file
+            setattr(settings, field, scratch / "blanked" / field)
     return settings
 
 
+def route_fingerprint(settings: Settings) -> dict:
+    """A KEY-FREE description of the routing under test — model names + hosts
+    only, for the summary and paired-delta comparability (never persist raw
+    route specs; they can carry api keys, §2.7)."""
+    from urllib.parse import urlsplit
+
+    def host(url: str) -> str:
+        return urlsplit(url or settings.anthropic_base_url
+                        or "https://api.anthropic.com").hostname or ""
+
+    roles = {}
+    for role, spec in (settings.llm_roles or {}).items():
+        if isinstance(spec, dict):
+            roles[role] = {"model": spec.get("model", ""),
+                           "host": host(spec.get("base_url", ""))}
+    return {"default_model": settings.anthropic_model,
+            "default_host": host(settings.anthropic_base_url),
+            "roles": roles,
+            "mixture_members": len((settings.llm_mixture or {}).get("members", []))}
+
+
 class SandboxRecorder:
-    """What the sandbox observed: executed vs. faked action invocations —
-    faked calls are scoreable trace events (e.g. the approval-gate golden
-    asserts a risky action was ATTEMPTED but never ran)."""
+    """What the sandbox observed: executed vs. faked action invocations, each
+    with its outcome line, so the golden oracle can score SUCCESSFUL
+    execution (not mere attempts) and reject harmful extras."""
 
     def __init__(self):
-        self.executed: list[dict] = []
-        self.faked: list[dict] = []
+        self.executed: list[dict] = []   # {"action": {...}, "outcome": str, "ok": bool}
+        self.faked: list[dict] = []      # {"action": {...}}
 
 
 def sandboxed_executor(recorder: SandboxRecorder):
-    """An `executor_override` implementation: allowlisted actions run the
-    REAL handlers (against the bench profile's scratch stores); everything
-    else records and returns a benign line without side effects."""
+    """An `executor_override`: allowlisted actions run the REAL handlers
+    against the bench profile's scratch stores; everything else records and
+    returns a benign line without side effects. Each executed action's
+    outcome (and whether it looks_failed) is recorded."""
 
     def _execute(actions: list, settings: Settings, max_actions: int = 5) -> list[str]:
         results: list[str] = []
@@ -88,18 +148,22 @@ def sandboxed_executor(recorder: SandboxRecorder):
                 results.append(f"unknown action {kind!r} ignored")
                 continue
             if kind not in ALLOWED_ACTIONS:
-                recorder.faked.append(dict(raw))
+                recorder.faked.append({"action": dict(raw)})
                 results.append(f"[bench-sandbox] {kind} recorded, not executed")
                 continue
             error = validate(action, raw)
             if error:
+                recorder.executed.append({"action": dict(raw), "outcome": error,
+                                          "ok": False})
                 results.append(error)
                 continue
             try:
-                recorder.executed.append(dict(raw))
-                results.append(action.handler(settings, raw))
+                outcome = action.handler(settings, raw)
             except Exception as exc:  # mirror production containment
-                results.append(f"action {kind} failed: {exc}")
+                outcome = f"action {kind} failed: {exc}"
+            recorder.executed.append({"action": dict(raw), "outcome": outcome,
+                                      "ok": not looks_failed(outcome)})
+            results.append(outcome)
         return results
 
     return _execute
@@ -107,8 +171,7 @@ def sandboxed_executor(recorder: SandboxRecorder):
 
 @contextlib.contextmanager
 def action_sandbox(recorder: SandboxRecorder):
-    """Scope the executor override to this context — the isolation test
-    asserts it never leaks outside."""
+    """Scope the executor override to this context (leak-proofed by test)."""
     token = actions_registry._executor_override.set(sandboxed_executor(recorder))
     try:
         yield recorder
@@ -116,18 +179,29 @@ def action_sandbox(recorder: SandboxRecorder):
         actions_registry._executor_override.reset(token)
 
 
+def _resolve_hosts(hosts: frozenset[str]) -> set[str]:
+    """Hostnames → the IPs socket.connect actually receives, plus the
+    literal names (a caller may pass an IP)."""
+    out: set[str] = set(hosts)
+    for h in hosts:
+        try:
+            for info in socket.getaddrinfo(h, None):
+                out.add(info[4][0])
+        except OSError:
+            pass
+    return out
+
+
 @contextlib.contextmanager
 def network_guard(allowed_hosts: frozenset[str]):
-    """Deny socket connects except to `allowed_hosts` (exact hostname/IP
-    match on the connect address). Transport-level defense-in-depth on top
-    of blanked credentials and the action sandbox — handler fakes alone do
-    not bound every code path. Loopback stays allowed (local test servers).
-
-    Scope honestly stated: this patches `socket.socket.connect`, which
-    covers httpx/requests/smtplib/imaplib in-process; it does not confine
-    subprocesses — which is one reason subprocess-spawning actions are not
-    in ALLOWED_ACTIONS."""
-    allowed = set(allowed_hosts) | {"127.0.0.1", "localhost", "::1"}
+    """Deny socket connects except to `allowed_hosts` — resolved to IPs at
+    entry, since `socket.connect` receives the resolved address, not the
+    hostname (the round-1 bug). Loopback stays allowed (local test servers).
+    Scope honestly stated: patches `socket.socket.connect`, covering
+    httpx/requests/smtplib/imaplib in-process; it does not confine
+    subprocesses — one reason subprocess-spawning actions are not
+    allowlisted."""
+    allowed = _resolve_hosts(allowed_hosts) | {"127.0.0.1", "::1"}
     real_connect = socket.socket.connect
 
     def guarded(self, address, *a, **k):

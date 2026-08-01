@@ -24,12 +24,26 @@ def role_probe(settings: Settings, role: str, prompt: str, llm: LLM | None = Non
 
 @dataclass
 class TurnRecord:
-    """Everything a scorer may inspect from one bench chat turn."""
+    """Everything a scorer may inspect from one bench chat turn. `executed`
+    entries are {"action", "outcome", "ok"} (ok=False when the outcome
+    looks_failed); `faked` entries are {"action"}."""
 
     reply: str
     outcome: str
-    executed: list[dict] = field(default_factory=list)   # real (sandboxed) runs
-    faked: list[dict] = field(default_factory=list)      # recorded, not run
+    executed: list[dict] = field(default_factory=list)
+    faked: list[dict] = field(default_factory=list)
+
+    def executed_types(self, ok_only: bool = False) -> list:
+        return [e["action"].get("type") for e in self.executed
+                if not ok_only or e.get("ok")]
+
+    def faked_types(self) -> list:
+        return [e["action"].get("type") for e in self.faked]
+
+    def raw(self) -> dict:
+        """The retained-for-rescoring payload (§2.7)."""
+        return {"reply": self.reply, "executed": self.executed,
+                "faked": self.faked}
 
 
 def chat_turn(settings: Settings, llm, text: str,

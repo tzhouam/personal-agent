@@ -263,14 +263,17 @@ def main() -> None:
         if args.bench_cmd == "report":
             import json as _json
 
-            runs = sorted(RESULTS_ROOT.glob("run-*/summary.json"))
-            if not runs:
+            archive = sorted((RESULTS_ROOT / "summaries").glob("run-*.json"))
+            if not archive:
                 print("no bench runs yet — `assistant bench run` first")
                 sys.exit(1)
-            print(render_report(_json.loads(runs[-1].read_text())))
+            print(render_report(_json.loads(archive[-1].read_text())))
             sys.exit(0)
         tracks = args.track or ["golden-actions", "golden-dedup"]
-        summary = run_tracks(tracks, settings, reps=args.reps)
+        reps = max(args.reps, 3)   # n>=3 for stable CIs (doc/BENCHMARKS.md §2.5)
+        if reps != args.reps:
+            print(f"note: reps raised to {reps} (minimum for stable CIs)")
+        summary = run_tracks(tracks, settings, reps=reps)
         print(render_report(summary))
         sys.exit(0)
     elif args.command == "serve":

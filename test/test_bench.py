@@ -14,9 +14,10 @@ from assistant.agent.actions.registry import execute
 from assistant.bench import stats
 from assistant.bench.results import RunStore
 from assistant.bench.run import render_report, run_tracks
-from assistant.bench.sandbox import (BLANKED_FIELDS, SandboxRecorder,
-                                     action_sandbox, bench_settings,
-                                     network_guard)
+from assistant.bench.sandbox import (SandboxRecorder, action_sandbox,
+                                     bench_settings, network_guard,
+                                     outward_credential_fields,
+                                     route_fingerprint)
 from assistant.bench.surfaces import chat_turn
 
 
@@ -43,6 +44,16 @@ class ScriptedLLM:
 
     def complete_json(self, prompt, system=None, **kw):
         owner = self._owner_message(prompt)
+        import re as _re
+
+        fid = _re.search(r"\[(f-[0-9-]+)\]", prompt)
+        if "改成交通类" in owner and fid:
+            return {"reply": "好", "actions": [
+                {"type": "recategorize_transaction", "id": fid.group(1),
+                 "category": "transport"}]}
+        if "作废" in owner and fid:
+            return {"reply": "好", "actions": [
+                {"type": "void_transaction", "id": fid.group(1)}]}
         for needle, actions in self.script.items():
             if needle in owner:
                 return {"reply": "好的", "actions": actions}
@@ -56,14 +67,14 @@ def test_executor_override_is_scoped_and_leakproof(settings):
     with action_sandbox(rec):
         out = execute([{"type": "reboot"}], settings)
         assert out == ["[bench-sandbox] reboot recorded, not executed"]
-        assert rec.faked == [{"type": "reboot"}]
+        assert rec.faked == [{"action": {"type": "reboot"}}]
     # outside the context, production behavior returns untouched
     out = execute([{"type": "unknown_action_x"}], settings)
     assert out == ["unknown action 'unknown_action_x' ignored"]
 
 
 def test_sandbox_runs_allowlisted_actions_for_real(tmp_path):
-    settings = bench_settings(tmp_path)
+    settings = bench_settings(scratch=tmp_path)
     rec = SandboxRecorder()
     with action_sandbox(rec):
         out = execute([{"type": "log_transaction", "kind": "expense",
@@ -80,36 +91,53 @@ def test_sandbox_denies_by_default(tmp_path):
     """An action NOT on the allowlist — even a legitimate llm action — is
     recorded, never executed (new registry actions are faked until someone
     consciously allows them)."""
-    settings = bench_settings(tmp_path)
+    settings = bench_settings(scratch=tmp_path)
     rec = SandboxRecorder()
     with action_sandbox(rec):
         execute([{"type": "web_search", "query": "天气"}], settings)
         execute([{"type": "execute_task", "task": "调研"}], settings)
-    assert [a["type"] for a in rec.faked] == ["web_search", "execute_task"]
+    assert [a["action"]["type"] for a in rec.faked] == \
+        ["web_search", "execute_task"]
     assert rec.executed == []
 
 
-def test_bench_settings_hermetic(tmp_path):
-    settings = bench_settings(tmp_path)
-    for field in BLANKED_FIELDS:
-        if hasattr(settings, field):
-            assert getattr(settings, field) == "", field
-    assert settings.bench_enabled is False          # knob never auto-enables
+def test_bench_settings_keeps_llm_blanks_outward(settings, tmp_path):
+    """The M layer must benchmark the CONFIGURED model, so LLM config is kept;
+    every outward credential is blanked and none survives into the summary
+    fingerprint."""
+    settings.anthropic_api_key = "sk-secret"
+    settings.anthropic_model = "test-model"
+    settings.github_token = "ghp_leak"
+    settings.smtp_password = "pw"
+    bench = bench_settings(settings, tmp_path)
+    assert bench.anthropic_api_key == "sk-secret"     # LLM kept
+    assert bench.anthropic_model == "test-model"
+    from pathlib import Path as _P
+
+    for field in outward_credential_fields():
+        val = getattr(bench, field, None)
+        if isinstance(val, _P):
+            assert str(bench.data_dir.parent) in str(val), (field, val)
+        else:
+            assert val in ("", {}, None), (field, val)    # outward blanked
+    assert "leak" not in json.dumps(route_fingerprint(bench))  # no key persisted
+    assert bench.bench_enabled is False
 
 
-def test_network_guard_denies_at_transport():
-    with network_guard(frozenset({"api.anthropic.com"})):
+def test_network_guard_denies_by_ip_and_allows_resolved_host():
+    with network_guard(frozenset({"1.2.3.4"})):
         with pytest.raises(PermissionError):
             socket.create_connection(("93.184.216.34", 80), timeout=1)
-    # restored afterwards: loopback connect to a real listener works
+    # an allowed HOST resolves to the IP connect() actually receives —
+    # localhost is the reliably-resolvable case
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(1)
     try:
-        with network_guard(frozenset()):
+        with network_guard(frozenset({"localhost"})):
             c = socket.create_connection(srv.getsockname(), timeout=2)
-            c.close()                               # loopback always allowed
-        c = socket.create_connection(srv.getsockname(), timeout=2)
+            c.close()
+        c = socket.create_connection(srv.getsockname(), timeout=2)  # restored
         c.close()
     finally:
         srv.close()
@@ -117,9 +145,12 @@ def test_network_guard_denies_at_transport():
 
 # ── stats ────────────────────────────────────────────────────────────
 
-def test_item_means_drops_infra_nulls():
-    means = stats.item_means({"a": [1.0, 0.0, None], "b": [None, None]})
-    assert means == {"a": 0.5}
+def test_item_means_drops_infra_nulls_and_accounts_reps():
+    per_item = {"a": [{"score": 1.0}, {"score": 0.0}, {"score": None}],
+                "b": [{"score": None}, {"score": None}]}
+    assert stats.item_means(per_item) == {"a": 0.5}
+    acct = stats.rep_accounting(per_item)
+    assert acct["reps_infra"] == 3 and acct["items_with_partial_reps"] == ["a"]
 
 
 def test_bootstrap_ci_deterministic():
@@ -171,9 +202,7 @@ _PERFECT_SCRIPT = {
                       "amount": 88}],
     "算购物": [{"type": "log_transaction", "kind": "expense", "amount": 60,
                "category": "shopping"}],
-    "改成交通类": [{"type": "recategorize_transaction",
-                   "id": "f-20260610-1", "category": "transport"}],
-    "作废": [{"type": "void_transaction", "id": "f-1"}],
+
     "知道了 dfremm1": [{"type": "acknowledge_failure", "id": "dfremm1"}],
 }
 
@@ -182,7 +211,6 @@ def test_golden_actions_track_end_to_end(settings, tmp_path):
     summary = run_tracks(
         ["golden-actions"], settings, reps=1,
         llm_factory=lambda s: ScriptedLLM(_PERFECT_SCRIPT),
-        settings_factory=lambda: bench_settings(tmp_path / "s"),
         results_root=tmp_path / "results", guard_network=False)
     row = summary["tracks"]["golden-actions"]
     assert row["valid"] and row["coverage"] == 1.0
@@ -195,7 +223,6 @@ def test_golden_actions_scores_wrong_actions_zero(settings, tmp_path):
     summary = run_tracks(
         ["golden-actions"], settings, reps=1,
         llm_factory=lambda s: ScriptedLLM(bad),
-        settings_factory=lambda: bench_settings(tmp_path / "s"),
         results_root=tmp_path / "results", guard_network=False)
     means = summary["tracks"]["golden-actions"]["item_means"]
     assert means["ga03"] == 0.0            # wrong action
@@ -238,16 +265,9 @@ def test_golden_dedup_track_end_to_end(settings, tmp_path):
                     {"type": "void_transaction", "id": fid}]}
             return super().complete_json(prompt, system=system, **kw)
 
-    counter = {"n": 0}
-
-    def fresh(_c=counter):
-        _c["n"] += 1
-        return bench_settings(tmp_path / f"s{_c['n']}")
-
     summary = run_tracks(
         ["golden-dedup"], settings, reps=1,
         llm_factory=lambda s: DedupLLM(script),
-        settings_factory=fresh,
         results_root=tmp_path / "results", guard_network=False)
     row = summary["tracks"]["golden-dedup"]
     assert row["score"] == 1.0, json.dumps(row["item_means"], ensure_ascii=False)
@@ -255,9 +275,8 @@ def test_golden_dedup_track_end_to_end(settings, tmp_path):
 
 def test_results_run_isolated_and_report_renders(settings, tmp_path):
     summary = run_tracks(
-        ["golden-actions"], settings, reps=1,
+        ["golden-actions"], settings, reps=3,
         llm_factory=lambda s: ScriptedLLM(_PERFECT_SCRIPT),
-        settings_factory=lambda: bench_settings(tmp_path / "s"),
         results_root=tmp_path / "results", guard_network=False)
     run_dir = tmp_path / "results" / summary["run_id"]
     assert (run_dir / "summary.json").exists()
@@ -265,11 +284,10 @@ def test_results_run_isolated_and_report_renders(settings, tmp_path):
     assert run_dir.stat().st_mode & 0o777 == 0o700
     card = render_report(summary)
     assert "golden-actions" in card and "PA-Mix" in card
-    # second run computes a paired delta vs the first
+    # second run (same fixture + route) computes a paired delta vs the first
     summary2 = run_tracks(
-        ["golden-actions"], settings, reps=1,
+        ["golden-actions"], settings, reps=3,
         llm_factory=lambda s: ScriptedLLM({}),      # everything wrong now
-        settings_factory=lambda: bench_settings(tmp_path / "s2"),
         results_root=tmp_path / "results", guard_network=False)
     delta = summary2["tracks"]["golden-actions"]["delta"]
     assert delta["regressed"] is True
@@ -279,11 +297,12 @@ def test_results_run_isolated_and_report_renders(settings, tmp_path):
 def test_nutribench_scoring_and_missing_data(settings, tmp_path, monkeypatch):
     from assistant.bench.tracks import NutriBenchTrack
 
-    track = NutriBenchTrack(data_dir=tmp_path)
+    track = NutriBenchTrack(data_dir=str(tmp_path / "nb"))
+    (tmp_path / "nb").mkdir()
     with pytest.raises(FileNotFoundError, match="PA_BENCH_DATA"):
-        track.run(lambda: settings, lambda s: None, 1, 0)
+        track.run(settings, lambda s: None, 1, 0, tmp_path / "sc")
 
-    (tmp_path / "nutribench_subset.json").write_text(json.dumps([
+    (tmp_path / "nb" / "nutribench_subset.json").write_text(json.dumps([
         {"id": "nb1", "meal": "a bowl of rice", "carb": 45.0},
         {"id": "nb2", "meal": "two eggs", "carb": 1.0},
     ]))
@@ -292,9 +311,10 @@ def test_nutribench_scoring_and_missing_data(settings, tmp_path, monkeypatch):
         def complete(self, prompt, **kw):
             return "45" if "rice" in prompt else "garbage no numbers at all"
 
-    out = track.run(lambda: settings, lambda s: FakeLLM(), 1, 0)
-    assert out["nb1"] == [1.0]                 # exact
-    assert out["nb2"] == [0.0]                 # unparseable scores 0, not null
-    assert track._score("52.5", 45.0) == 1.0   # at tolerance edge
-    assert track._score("60", 45.0) == 0.0     # ≥2× tolerance
-    assert 0 < track._score("55", 45.0) < 1    # linear between
+    out = track.run(settings, lambda s: FakeLLM(), 1, 0, tmp_path / "sc")
+    assert out["nb1"][0]["score"] == 1.0       # exact
+    assert out["nb2"][0]["score"] == 0.0       # unparseable scores 0, not null
+    assert track.manifest()["label"] == "derived"   # no provenance → derived
+    assert track._score("52.5", 45.0) == 1.0
+    assert track._score("60", 45.0) == 0.0
+    assert 0 < track._score("55", 45.0) < 1
