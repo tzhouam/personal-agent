@@ -109,6 +109,12 @@
         "expect_params": {
           "id": "m2"
         }
+      },
+      "seed": {
+        "reminders": [
+          "面试",
+          "开会"
+        ]
       }
     },
     {
@@ -150,6 +156,11 @@
       "text": "忘掉那条港币的规则吧",
       "expect": {
         "action": "retire_preference"
+      },
+      "seed": {
+        "lessons": [
+          "记账默认港币"
+        ]
       }
     },
     {
@@ -283,6 +294,11 @@
         "expect_params": {
           "id": "dfremm1"
         }
+      },
+      "seed": {
+        "failed_reminders": [
+          "漏了的提醒"
+        ]
       }
     },
     {

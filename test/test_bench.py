@@ -314,7 +314,98 @@ def test_nutribench_scoring_and_missing_data(settings, tmp_path, monkeypatch):
     out = track.run(settings, lambda s: FakeLLM(), 1, 0, tmp_path / "sc")
     assert out["nb1"][0]["score"] == 1.0       # exact
     assert out["nb2"][0]["score"] == 0.0       # unparseable scores 0, not null
-    assert track.manifest()["label"] == "derived"   # no provenance → derived
+    assert track.manifest()["label"] == "derived"   # always derived (custom scorer)
+    assert track.manifest()["fixture_sha256"]        # data hash present
     assert track._score("52.5", 45.0) == 1.0
     assert track._score("60", 45.0) == 0.0
     assert 0 < track._score("55", 45.0) < 1
+
+
+def test_reps_get_fresh_state_no_leak(settings, tmp_path):
+    """The state-leak fix: with reps=2, an item that mutates state must score
+    identically each rep — a shared scratch would make rep 2 see rep 1's
+    records (e.g. a dedup/void starting from a dirty store)."""
+    summary = run_tracks(
+        ["golden-actions"], settings, reps=2,
+        llm_factory=lambda s: ScriptedLLM(_PERFECT_SCRIPT),
+        results_root=tmp_path / "results", guard_network=False)
+    # ga28 voids "刚记的那笔" — with a leaked store, rep 2 would find TWO
+    # seeded records and the natural reference would be ambiguous
+    for item_id in ("ga02", "ga28"):
+        # read the per-item jsonl: both reps must have scored 1.0
+        pass
+    row = summary["tracks"]["golden-actions"]
+    assert row["score"] == 1.0
+    assert row["reps"]["reps_total"] == 30 * 2
+
+
+def test_seeded_id_items_require_real_success(settings, tmp_path):
+    """ga11/ga16/ga29 operate on seeded entities — with the seeds present the
+    action SUCCEEDS; drop the reminder seed and ga11 must score 0 (cancel of a
+    nonexistent reminder is not success)."""
+    from assistant.bench.tracks import GoldenActionsTrack, _apply_seed
+    from assistant.bench.sandbox import bench_settings as bs
+    from assistant.bench.surfaces import chat_turn
+    from assistant.bench.tracks import _score_action_item, _load_fixture
+
+    items = {i["id"]: i for i in _load_fixture("golden_actions.json")[0]["items"]}
+    llm = ScriptedLLM({"取消提醒 m2": [{"type": "cancel_reminder", "id": "m2"}]})
+
+    seeded = bs(settings, tmp_path / "seeded")
+    _apply_seed(seeded, items["ga11"]["seed"])
+    rec = chat_turn(seeded, llm, items["ga11"]["text"])
+    assert _score_action_item(items["ga11"], rec) == 1.0   # m2 exists → success
+
+    bare = bs(settings, tmp_path / "bare")             # no seed
+    rec2 = chat_turn(bare, llm, items["ga11"]["text"])
+    assert _score_action_item(items["ga11"], rec2) == 0.0  # cancel of nothing
+
+
+def test_unexpected_fakes_rejected(settings, tmp_path):
+    """A faked-expectation item must reject EXTRA risky actions."""
+    from assistant.bench.tracks import _score_action_item
+    from assistant.bench.surfaces import TurnRecord
+
+    item = {"expect": {"faked": "reboot"}}
+    ok = TurnRecord("", "", faked=[{"action": {"type": "reboot"}}])
+    assert _score_action_item(item, ok) == 1.0
+    bad = TurnRecord("", "", faked=[{"action": {"type": "reboot"}},
+                                    {"action": {"type": "trigger_run"}}])
+    assert _score_action_item(item, bad) == 0.0   # extra risky fake → fail
+
+
+def test_changed_fixture_not_comparable():
+    from assistant.bench.run import _comparable
+
+    fp = {"default_model": "m"}
+    cur = {"valid": True, "manifest": {"fixture_sha256": "aaa"}}
+    ref = {"valid": True, "manifest": {"fixture_sha256": "bbb"}}
+    assert not _comparable(cur, fp, ref, fp)          # different hash
+    same = {"valid": True, "manifest": {"fixture_sha256": "aaa"}}
+    assert _comparable(cur, fp, same, fp)             # same hash + fp
+    hashless = {"valid": True, "manifest": {}}
+    assert not _comparable(hashless, fp, hashless, fp)  # None==None is NOT a match
+    invalid = {"valid": False, "manifest": {"fixture_sha256": "aaa"}}
+    assert not _comparable(invalid, fp, same, fp)     # invalid current run
+
+
+def test_provenance_validated_against_data(settings, tmp_path):
+    import hashlib
+
+    from assistant.bench.tracks import NutriBenchTrack
+
+    data = json.dumps([{"id": "nb1", "meal": "rice", "carb": 45.0}])
+    (tmp_path / "nutribench_subset.json").write_text(data)
+    digest = hashlib.sha256(data.encode()).hexdigest()[:16]
+    track = NutriBenchTrack(data_dir=str(tmp_path))
+    # stale provenance (wrong hash) must not validate
+    (tmp_path / "provenance.json").write_text(json.dumps({
+        "source_version": "v2", "content_sha256": "WRONG", "license": "x",
+        "seed": 1, "item_ids": ["nb1"]}))
+    assert track.manifest()["provenance"] == "unvalidated (data origin unconfirmed)"
+    # correct hash + ids validates (but label stays derived)
+    (tmp_path / "provenance.json").write_text(json.dumps({
+        "source_version": "v2", "content_sha256": digest, "license": "x",
+        "seed": 1, "item_ids": ["nb1"]}))
+    m = track.manifest()
+    assert isinstance(m["provenance"], dict) and m["label"] == "derived"

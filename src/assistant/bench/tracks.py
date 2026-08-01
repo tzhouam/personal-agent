@@ -50,6 +50,30 @@ def _apply_seed(settings, seed: dict | None) -> None:
         for rec in seed["finance"]:
             store.add(rec["kind"], rec["amount"], category=rec.get("category"),
                       note=rec.get("note", ""))
+    if seed.get("reminders"):
+        from datetime import datetime, timedelta
+
+        from assistant.platform.notify import ReminderStore
+
+        store = ReminderStore(settings.data_dir)
+        for msg in seed["reminders"]:            # → m1, m2, …
+            store.add(msg, datetime.now() + timedelta(hours=1))
+    if seed.get("lessons"):
+        from assistant.agent.lessons_store import LessonsStore
+
+        store = LessonsStore(settings.profile_dir)
+        for rule in seed["lessons"]:             # → L1, L2, …
+            store.learn(rule)
+    if seed.get("failed_reminders"):
+        from datetime import datetime, timedelta
+
+        from assistant.platform.notify import ReminderStore
+
+        store = ReminderStore(settings.data_dir)
+        for msg in seed["failed_reminders"]:     # dead-lettered → dfremm<n>
+            r = store.add(msg, datetime.now() - timedelta(hours=1))
+            for _ in range(3):
+                store.deliver_due(settings, send=lambda *a: "failed: seeded")
 
 log = logging.getLogger("assistant")
 
@@ -87,8 +111,12 @@ def _score_action_item(item: dict, record) -> float:
     if "faked" in expect or "faked_any_of" in expect:
         want = {expect["faked"]} if "faked" in expect else set(expect["faked_any_of"])
         hit = bool(want & set(faked))
+        # every faked action must be one of the expected risky ones — a turn
+        # that ALSO attempts reboot+trigger_run alongside the expected
+        # publish must not pass
+        only_expected = set(faked) <= want
         clean = all(t in READONLY_ACTIONS for t in ok_types)
-        return 1.0 if hit and clean else 0.0
+        return 1.0 if hit and only_expected and clean else 0.0
 
     if expect.get("action", "sentinel") is None:
         clean = not faked and all(t in READONLY_ACTIONS for t in ok_types)
@@ -107,11 +135,13 @@ def _score_action_item(item: dict, record) -> float:
 
 def _run_reps(reps, make, body):
     """Shared rep loop: setup failure → None (infra); body crash → 0 (agent
-    failure, not excluded); returns [{"score", "raw"}]."""
+    failure, not excluded); returns [{"score", "raw"}]. `make(rep)` MUST
+    allocate fresh state per rep (state leak across reps invalidates the
+    per-item mean and its CI)."""
     out = []
-    for _ in range(reps):
+    for rep in range(reps):
         try:
-            ctx = make()
+            ctx = make(rep)
         except Exception:
             log.exception("bench infra: setup failed")
             out.append({"score": None, "raw": None})
@@ -140,8 +170,8 @@ class GoldenActionsTrack:
         items = self._fixture()[0]["items"]
         result = {}
         for i, item in enumerate(items):
-            def make(item=item, i=i):
-                s = bench_settings(base_settings, scratch_root / f"ga{i}")
+            def make(rep, item=item, i=i):   # FRESH scratch per item×rep
+                s = bench_settings(base_settings, scratch_root / f"ga{i}-r{rep}")
                 return s, llm_factory(s)
 
             def body(ctx, item=item):
@@ -193,8 +223,8 @@ class GoldenDedupTrack:
         scenarios = self._fixture()[0]["scenarios"]
         result = {}
         for i, sc in enumerate(scenarios):
-            def make(i=i):
-                s = bench_settings(base_settings, scratch_root / f"gd{i}")
+            def make(rep, i=i):              # FRESH scratch per scenario×rep
+                s = bench_settings(base_settings, scratch_root / f"gd{i}-r{rep}")
                 return s, llm_factory(s)
 
             def body(ctx, sc=sc):
@@ -232,7 +262,23 @@ class NutriBenchTrack:
     def __init__(self, data_dir: str | None = None):
         self.data_dir = Path(data_dir or os.environ.get("PA_BENCH_DATA", ""))
 
-    def _provenance(self) -> dict | None:
+    def _raw_and_hash(self) -> tuple[str, str]:
+        path = self.data_dir / "nutribench_subset.json"
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"NutriBench subset not found at {path} — download the "
+                "official dataset (doc/BENCHMARKS.md) and set PA_BENCH_DATA; "
+                "not redistributed in this repo")
+        text = path.read_text()
+        return text, hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def _items(self) -> list[dict]:
+        return json.loads(self._raw_and_hash()[0])
+
+    def _validated_provenance(self, data_hash: str, items: list) -> dict | None:
+        """Provenance is only trustworthy when its content hash and item ids
+        actually MATCH the loaded subset — a stale provenance.json alongside a
+        changed subset must not validate."""
         path = self.data_dir / "provenance.json"
         if not path.is_file():
             return None
@@ -242,31 +288,31 @@ class NutriBenchTrack:
             return None
         required = ("source_version", "content_sha256", "license", "seed",
                     "item_ids")
-        return prov if all(k in prov for k in required) else None
-
-    def _items(self) -> list[dict]:
-        path = self.data_dir / "nutribench_subset.json"
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"NutriBench subset not found at {path} — download the "
-                "official dataset (doc/BENCHMARKS.md) and set PA_BENCH_DATA; "
-                "not redistributed in this repo")
-        return json.loads(path.read_text())
+        if not all(k in prov for k in required):
+            return None
+        if prov["content_sha256"] != data_hash:
+            return None
+        if sorted(prov["item_ids"]) != sorted(i["id"] for i in items):
+            return None
+        return prov
 
     def manifest(self) -> dict:
-        prov, n = None, 0
+        prov, n, digest = None, 0, None
         try:
-            n = len(self._items())
-            prov = self._provenance()
+            text, digest = self._raw_and_hash()
+            items = json.loads(text)
+            n = len(items)
+            prov = self._validated_provenance(digest, items)
         except FileNotFoundError:
             pass
-        return {"track": self.name, "layer": "M",
-                "label": "official-subset" if prov else "derived",
+        # ALWAYS `derived`: this uses a custom prompt + scorer, NOT the
+        # official NutriBench runner — provenance establishes data ORIGIN,
+        # not protocol fidelity, so it is recorded but never promotes the
+        # label (reviewer round 2).
+        return {"track": self.name, "layer": "M", "label": "derived",
                 "source": "NutriBench (https://mehak126.github.io/nutribench.html)",
-                "role": "chat", "n_items": n,
-                "provenance": prov or "MISSING — labeled derived; provide "
-                                      "data_dir/provenance.json to claim "
-                                      "official-subset",
+                "role": "chat", "n_items": n, "fixture_sha256": digest,
+                "provenance": prov or "unvalidated (data origin unconfirmed)",
                 "scorer": f"1.0 within +/-{self.TOLERANCE_G}g, linear to 0 at "
                           "2x; unparseable=0. Custom scorer, NOT the official "
                           "runner; never comparable to leaderboard numbers."}
@@ -289,8 +335,11 @@ class NutriBenchTrack:
             prompt = ("Estimate the total carbohydrates in this meal. Reply "
                       "with ONLY a number in grams.\n\nMeal: " + item["meal"])
 
-            def make(item=item):
-                s = bench_settings(base_settings, scratch_root / item["id"])
+            def make(rep, item=item, i=len(result)):
+                # item ids come from external data — never use one as a path
+                # component (../ or absolute would escape scratch)
+                s = bench_settings(base_settings,
+                                   scratch_root / f"nb{i}-r{rep}")
                 return s, llm_factory(s)
 
             def body(ctx, item=item, prompt=prompt):

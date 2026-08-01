@@ -4,7 +4,7 @@
     "layer": "A",
     "label": "golden",
     "scorer": "end-state on scratch stores after ALL turns: expected record counts per store (the never-twice guarantees)",
-    "clock": "scenarios assume a frozen day; stated times drive identity"
+    "clock": "scenarios are same-day by construction (all turns run in one process tick); TZ is pinned by the runner; identity is driven by STATED times, not the wall clock, so scoring is clock-independent"
   },
   "scenarios": [
     {

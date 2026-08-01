@@ -17,6 +17,23 @@ from assistant.agent.actions import registry as actions_registry
 from assistant.agent.actions.registry import ACTIONS, looks_failed, validate
 from assistant.platform.config import Settings
 
+# Bench-STRICT non-success markers: production's `looks_failed` is deliberately
+# narrow (a dedup rejection is not a failure for the repair loop), but for
+# scoring we must reject "nothing actually happened" outcomes too — e.g.
+# `cancel_reminder` of a non-existent id returns "no pending reminder 'm2'",
+# which has no production failure marker yet is NOT a successful execution
+# (reviewer round 2). These are checked IN ADDITION to looks_failed.
+_BENCH_NONSUCCESS = ("no pending", "no active", "no open", "no such",
+                     "not found", "unknown action", "couldn't", "can't find",
+                     "已经完成", "找不到", "没有找到", "不存在", "无此",
+                     "没有该", "无法")
+
+
+def bench_succeeded(outcome: str) -> bool:
+    low = str(outcome).lower()
+    return not looks_failed(outcome) and not any(m in low or m in str(outcome)
+                                                 for m in _BENCH_NONSUCCESS)
+
 # Actions a bench turn may EXECUTE against its scratch stores. Everything
 # else — outward, risky, or pipeline-triggering — is faked and recorded
 # (deny by default: a new registry action is faked until consciously added).
@@ -115,10 +132,18 @@ def route_fingerprint(settings: Settings) -> dict:
         if isinstance(spec, dict):
             roles[role] = {"model": spec.get("model", ""),
                            "host": host(spec.get("base_url", ""))}
+    mix = settings.llm_mixture or {}
+    mixture = {"members": [{"model": m.get("model", ""),
+                            "host": host(m.get("base_url", ""))}
+                           for m in mix.get("members", []) if isinstance(m, dict)],
+               "aggregator": {"model": (mix.get("aggregator") or {}).get("model", ""),
+                              "host": host((mix.get("aggregator") or {}).get("base_url", ""))}
+               if isinstance(mix.get("aggregator"), dict) else None,
+               "roles": sorted(mix.get("roles", []))}
     return {"default_model": settings.anthropic_model,
             "default_host": host(settings.anthropic_base_url),
-            "roles": roles,
-            "mixture_members": len((settings.llm_mixture or {}).get("members", []))}
+            "cheap_model": settings.anthropic_default_haiku_model,
+            "roles": roles, "mixture": mixture}
 
 
 class SandboxRecorder:
@@ -162,7 +187,7 @@ def sandboxed_executor(recorder: SandboxRecorder):
             except Exception as exc:  # mirror production containment
                 outcome = f"action {kind} failed: {exc}"
             recorder.executed.append({"action": dict(raw), "outcome": outcome,
-                                      "ok": not looks_failed(outcome)})
+                                      "ok": bench_succeeded(outcome)})
             results.append(outcome)
         return results
 

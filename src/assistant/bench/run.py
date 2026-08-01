@@ -8,6 +8,7 @@ regression. A directional track (too few items) never alerts. Regressions
 are labeled unconfirmed pending an immediate rerun (§2.5)."""
 
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -33,9 +34,13 @@ def _llm_hosts(settings) -> frozenset[str]:
     for spec in (settings.llm_roles or {}).values():
         if isinstance(spec, dict) and spec.get("base_url"):
             urls.append(spec["base_url"])
-    for spec in (settings.llm_mixture or {}).get("members", []):
+    mix = settings.llm_mixture or {}
+    for spec in mix.get("members", []):
         if isinstance(spec, dict) and spec.get("base_url"):
             urls.append(spec["base_url"])
+    agg = mix.get("aggregator")
+    if isinstance(agg, dict) and agg.get("base_url"):
+        urls.append(agg["base_url"])
     for url in urls:
         host = urlsplit(url).hostname
         if host:
@@ -43,15 +48,18 @@ def _llm_hosts(settings) -> frozenset[str]:
     return frozenset(hosts)
 
 
-def _comparable(cur_manifest: dict, cur_fp: dict, ref_row: dict,
+def _comparable(cur_row: dict, cur_fp: dict, ref_row: dict,
                 ref_fp: dict) -> bool:
-    """A reference row is a valid paired-delta baseline only when the fixture
-    content AND the route fingerprint match — otherwise a changed item set or
-    a changed model would surface as a spurious 'regression'."""
-    return (ref_row.get("valid")
-            and ref_row.get("manifest", {}).get("fixture_sha256")
-            == cur_manifest.get("fixture_sha256")
-            and ref_fp == cur_fp)
+    """A paired delta is meaningful only when BOTH runs are valid, both
+    fixture hashes are present AND equal (a None==None match is not a match —
+    it would let a hashless/changed subset compare), and the full route
+    fingerprints match. Otherwise a changed item set or model would surface
+    as a spurious 'regression'."""
+    cur_hash = cur_row.get("manifest", {}).get("fixture_sha256")
+    ref_hash = ref_row.get("manifest", {}).get("fixture_sha256")
+    return bool(cur_row.get("valid") and ref_row.get("valid")
+                and cur_hash and ref_hash and cur_hash == ref_hash
+                and ref_fp == cur_fp)
 
 
 def run_tracks(track_names: list[str], base_settings, reps: int = _MIN_REPS,
@@ -71,6 +79,12 @@ def run_tracks(track_names: list[str], base_settings, reps: int = _MIN_REPS,
     scratch_base = Path(tempfile.mkdtemp(prefix="pa-bench-run-"))
     guard = (network_guard(_llm_hosts(base_settings)) if guard_network
              else _null_context())
+    prev_tz = os.environ.get("TZ")
+    os.environ["TZ"] = getattr(base_settings, "tz", "") or "Asia/Shanghai"
+    try:
+        time.tzset()
+    except AttributeError:
+        pass
     try:
         with guard:
             for name in track_names:
@@ -99,7 +113,7 @@ def run_tracks(track_names: list[str], base_settings, reps: int = _MIN_REPS,
                        "item_means": {k: round(v, 4) for k, v in means.items()}}
                 ref_row = ((reference or {}).get("tracks") or {}).get(name)
                 if (ref_row and not directional
-                        and _comparable(manifest, fingerprint, ref_row,
+                        and _comparable(row, fingerprint, ref_row,
                                         ref_fp or {})):
                     d = stats.paired_delta(means, ref_row.get("item_means", {}),
                                            seed=seed)
@@ -112,6 +126,14 @@ def run_tracks(track_names: list[str], base_settings, reps: int = _MIN_REPS,
         store.write_summary(summary)
     finally:
         shutil.rmtree(scratch_base, ignore_errors=True)
+        if prev_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = prev_tz
+        try:
+            time.tzset()
+        except AttributeError:
+            pass
     return summary
 
 
