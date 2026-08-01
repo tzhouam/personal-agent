@@ -19,3 +19,6 @@ nohup.out
 # over loopback /qr; this is a backstop if one is ever written under the repo)
 qr-login.*
 *-qr.png
+
+# PA-Mix results (raw model outputs; doc/BENCHMARKS.md §2.7)
+bench/results/

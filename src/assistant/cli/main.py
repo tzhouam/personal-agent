@@ -111,6 +111,15 @@ def main() -> None:
                             help="answer owner messages from email/WeCom (foreground loop)")
     chat_p.add_argument("--once", action="store_true", help="single poll cycle, then exit")
 
+    bench_p = sub.add_parser("bench", help="PA-Mix benchmark harness "
+                             "(doc/BENCHMARKS.md; needs BENCH_ENABLED=true)")
+    bench_p.add_argument("bench_cmd", choices=["run", "report"],
+                         help="run tracks / show the latest report card")
+    bench_p.add_argument("--track", action="append", default=None,
+                         help="track name (repeatable); default: v1 golden set")
+    bench_p.add_argument("--reps", type=int, default=3,
+                         help="repetitions per item (default 3)")
+
     sub.add_parser("serve", help="local HTTP daemon: chat/actions/run endpoints "
                                  "for the OpenClaw bridge + email chat polling")
 
@@ -243,6 +252,30 @@ def main() -> None:
         from assistant.agent.chat.service import run_listener
 
         sys.exit(run_listener(settings, once=args.once))
+    elif args.command == "bench":
+        if not settings.bench_enabled:
+            print("bench is disabled — set BENCH_ENABLED=true in .env "
+                  "(doc/BENCHMARKS.md) to opt in")
+            sys.exit(2)
+        from assistant.bench.results import RESULTS_ROOT
+        from assistant.bench.run import render_report, run_tracks
+
+        if args.bench_cmd == "report":
+            import json as _json
+
+            archive = sorted((RESULTS_ROOT / "summaries").glob("run-*.json"))
+            if not archive:
+                print("no bench runs yet — `assistant bench run` first")
+                sys.exit(1)
+            print(render_report(_json.loads(archive[-1].read_text())))
+            sys.exit(0)
+        tracks = args.track or ["golden-actions", "golden-dedup"]
+        reps = max(args.reps, 3)   # n>=3 for stable CIs (doc/BENCHMARKS.md §2.5)
+        if reps != args.reps:
+            print(f"note: reps raised to {reps} (minimum for stable CIs)")
+        summary = run_tracks(tracks, settings, reps=reps)
+        print(render_report(summary))
+        sys.exit(0)
     elif args.command == "serve":
         from assistant.agent.app import run as serve_run
 

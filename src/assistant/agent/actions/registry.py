@@ -604,9 +604,24 @@ def prompt_block(settings: Settings | None = None) -> str:
     return "\n".join(f"  {a.prompt_example}" for a in acts)
 
 
+import contextvars
+
+# PA-Mix seam (doc/BENCHMARKS.md §2.6): when set, `execute` delegates to the
+# override instead of running handlers. ContextVar-scoped, so a bench run in
+# one context can never leak a sandbox into normal operation — and because
+# handle_turn's repair rounds and the task runner all call THIS `execute`,
+# the override covers them by construction. Defaults to None: production
+# behavior is byte-identical when unset.
+_executor_override: contextvars.ContextVar = contextvars.ContextVar(
+    "actions_executor_override", default=None)
+
+
 def execute(actions: list, settings: Settings, max_actions: int = 5) -> list[str]:
     """Apply LLM-emitted typed actions; return what actually happened, one
     line each. Only registry entries marked ``llm`` are honored here."""
+    override = _executor_override.get()
+    if override is not None:
+        return override(actions, settings, max_actions)
     import logging
 
     from assistant.platform.locks import user_write_lock

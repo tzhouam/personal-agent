@@ -261,3 +261,38 @@ v1's budgets, CIs, and the isolation tests are validated:
 5. T2 (LitSearch/LaMP, triage golden set, memory-through-the-agent,
    frozen-fixture web) and the paired-run attribution tooling.
 6. T3 official runners, HAL cross-check, `bench publish`.
+
+
+---
+
+## 3. v1 implementation status
+
+Built (`src/assistant/bench/`, `assistant bench run|report`, gated on
+`BENCH_ENABLED`): the executor_override seam, hermetic bench settings (LLM
+config preserved, outward credentials blanked, key-free route fingerprint),
+deny-by-default action sandbox + IP-resolving network guard, role_probe/
+chat_turn surfaces, §2.5 statistics (per-item repetition averaging, seeded
+bootstrap CIs, paired-delta with comparability gating on fixture-hash +
+route fingerprint), the two PA-golden tracks (action-selection with seeds
+and bench-strict success scoring, all-or-nothing dedup) and the NutriBench
+runner (always `derived` — custom prompt/scorer, provenance validated
+against the data hash + ids), isolated results with retained masked raw
+outputs and a permanent summary archive. Two GPT design rounds + two code
+rounds; all must-fixes applied.
+
+Accepted residuals (recorded, not fixed in v1):
+- `network_guard`/`RunStore.prune` are single-run safe, not concurrency-safe
+  — the CLI runs one bench at a time; concurrent runs are out of scope.
+- Credential blanking is heuristic over field-name patterns; a future oddly
+  named credential could slip. Mitigated by the sandbox (outward actions are
+  faked regardless) and the network guard (deny-by-default), so a leaked
+  credential still can't be used. A fail-closed allowlist of LLM-only fields
+  is the follow-up.
+- `_run_reps` classifies all setup exceptions as infra and all body
+  exceptions as agent-failure; setup here is only object construction (no
+  network), so this is defensible but coarse.
+- `mask_secrets` masks known token formats only; raw outputs are additionally
+  protected by the blanked-credential profile (they should not contain
+  secrets in the first place) and 0700 dirs.
+- No official-protocol runners yet (τ²/GAIA/DocVQA Tier 3) — v1 is the two
+  golden tracks + the one derived NutriBench runner, per the cut scope.
