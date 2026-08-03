@@ -17,3 +17,4 @@ matching your symptom before re-deriving the fix.
 | [notification-todo-lifecycle](notification-todo-lifecycle/SKILL.md) | dedup todos by URL not notification id; auto-close via API (merged/closed/reviewed); payload.size for push counts |
 | [publishing-agent-output-safely](publishing-agent-output-safely/SKILL.md) | public pages = deterministic render; LLM prose = approval gate; compile checks; pull-rebase never force; Overleaf has no API |
 | [headless-container-scheduling](headless-container-scheduling/SKILL.md) | PID1=tini → no systemd/cron; dual scheduling paths; don't fight permission classifiers, hand the owner the one-liner |
+| [wechat-outbound-context-token](wechat-outbound-context-token/SKILL.md) | `prepare failed` on pushes >24h after the owner's last message = CLI direct send drops the Weixin context token; restore persisted tokens on miss, don't "reboot the channel" |
