@@ -11,24 +11,48 @@ lands at their own checkpoints — phase boundaries in the pipeline, per turn in
 the task loop — not just at job start.
 """
 
+import logging
 import os
 
 from assistant.platform.dispatch import Dispatch
 
+log = logging.getLogger(__name__)
+
 
 def _dispatch_run(settings, args, token):
     from assistant.agent.orchestrator import run
+    from assistant.agent.state import load_state
     token.check()
     # Default resume=True: a REQUEUED job (daemon restart mid-run) then continues
     # from its state.json checkpoint instead of restarting from collect. Safe for
     # fresh runs too — run() only resumes when the previous run is incomplete.
-    run(settings, resume=bool(args.get("resume", True)), cancel_check=token.check)
+    rc = run(settings, resume=bool(args.get("resume", True)), cancel_check=token.check)
+    # rc=3 is a BENIGN lock conflict, not a failure: run() returned before doing
+    # any work or writing a checkpoint because another run holds run.lock, and
+    # that run is doing this job's work. _SINGLETON_KINDS already bars a second
+    # `run` job per uid, so the holder is a manual `assistant run` or
+    # admin.delete_user. Raising here would burn the retry ladder and eventually
+    # push a "background task failed" note while the pipeline ran fine.
+    if rc == 3:
+        log.info("daily run skipped — another run already holds run.lock")
+        return
+    # rc=1 means the graph stopped short of `done` (classically: deliver failed).
+    # Discarding it marked the job `done` and left the owner with no signal at
+    # all — and because _dispatch_run defaults resume=True, tomorrow's job then
+    # resumed the stuck run at its checkpoint and collected nothing, so ONE
+    # deliver failure silently ate two days of output before self-healing.
+    if rc:
+        stuck = (load_state(settings.state_file) or {}).get("phase") or "?"
+        raise RuntimeError(f"daily run stopped at phase {stuck!r} (rc={rc})")
 
 
 def _dispatch_run_phase(settings, args, token):
     from assistant.cli.commands import cmd_run_phase
     token.check()
-    cmd_run_phase(settings, str(args.get("phase", "")))
+    phase = str(args.get("phase", ""))
+    rc = cmd_run_phase(settings, phase)
+    if rc:   # 1 = unknown phase; a real phase that fails raises out of here
+        raise RuntimeError(f"run_phase {phase!r} exited {rc}")
 
 
 def _dispatch_task(settings, args, token):
