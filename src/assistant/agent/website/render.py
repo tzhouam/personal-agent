@@ -51,8 +51,19 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
                 marks_cfg: dict | None = None) -> dict[str, str]:
     """Returns {filename: content} for the generated site — one page per section.
 
-    Every page is always rendered (an empty section shows a placeholder) so a
-    previously published page never goes stale-but-orphaned in the repo."""
+    Every page is rendered (an empty section shows a placeholder) so a
+    previously published page never goes stale-but-orphaned in the repo — with
+    one exception that overrides it: **without a password the private pages are
+    not emitted at all.**
+
+    `_PROTECTED_PAGES` hold todos, the reading list and routines, and the site
+    is published to a *public* GitHub Pages repo. Encryption used to be
+    conditional on `password` being set while the pages rendered regardless, so
+    an empty `WEBSITE_PASSWORD` silently published all three in plaintext —
+    including LLM-written todo detail lines. Dropping them from `pages` also
+    drops them from the nav built off it, so nothing links to a missing page.
+    The caller (`sync.sync_website`) deletes any previously published copies;
+    the failure mode is a missing page, never a leaked one."""
     today = today or date.today()
     ident = profile.get("identity", {})
     e = html.escape
@@ -78,10 +89,13 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
         ("experience.html", "Experience", _experience_html(profile.get("experience", []))),
         ("education.html", "Education", _education_html(profile.get("education", []))),
         ("projects.html", "Projects", _projects_html(actives("projects"))),
-        ("todos.html", "Todos", _render_calendar(todos, today)),
-        ("reading.html", "Reading", _render_reading(reading or [], today)),
-        ("routines.html", "Routines", _render_routines(routines or [], reminders or [])),
     ]
+    if password:   # private pages exist only when they can be encrypted
+        pages += [
+            ("todos.html", "Todos", _render_calendar(todos, today)),
+            ("reading.html", "Reading", _render_reading(reading or [], today)),
+            ("routines.html", "Routines", _render_routines(routines or [], reminders or [])),
+        ]
 
     files = {"agent-site.css": _CSS, "agent-site.js": _JS}
     for filename, label, body in pages:
@@ -119,7 +133,11 @@ def render_site(profile: dict, todos: list[dict], today: date | None = None,
                 + nav + "</div></header>"
             )
         body = body or "<section class='card'><p class='empty'>Nothing here yet.</p></section>"
-        if password and filename in _PROTECTED_PAGES:
+        if filename in _PROTECTED_PAGES:
+            # Belt and braces: the page list above already excludes these when
+            # no password is set. Assert it here too — this is the last point
+            # before private content becomes a file destined for a public repo.
+            assert password, f"{filename} must never render without a password"
             # marks config (incl. the repo-scoped push token) ships ONLY inside
             # the ciphertext — a page without the password never reveals it
             if marks_cfg and marks_cfg.get("repo") and marks_cfg.get("token") \

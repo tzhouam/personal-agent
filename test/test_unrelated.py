@@ -8,6 +8,7 @@ from assistant.agent.research import pipeline as pipeline_mod
 from assistant.agent.research.pipeline import run_research
 from assistant.agent.todo_store import ReadingList
 from assistant.agent.website import render_site
+from conftest import _body
 
 PROFILE = {"identity": {"name": "T", "github": "t", "emails": ["me@example.com"]},
            "skills": [], "interests": [], "projects": [],
@@ -66,14 +67,17 @@ def test_research_scorer_sees_negatives(settings, monkeypatch):
 def test_reading_page_unrelated_button(settings):
     reading = [{"id": "r1", "title": "Paper", "url": "u", "why": "", "source": "arxiv",
                 "created": "2026-07-09", "status": "open"}]
-    files = render_site(PROFILE, [], today=date(2026, 7, 9), reading=reading)
-    page = files["reading.html"]
+    # private pages render only with a password, so assert on the decrypted body
+    files = render_site(PROFILE, [], today=date(2026, 7, 9), reading=reading,
+                        password="pw")
+    page = _body(files, "reading.html")
     assert "b-unrel" in page and "🚫 Unrelated" in page
     # todos page never shows the unrelated button
     todos = [{"id": "t1", "title": "T", "source": "manual",
               "created": "2026-07-09", "status": "open"}]
-    assert "b-unrel" not in render_site(PROFILE, todos,
-                                        today=date(2026, 7, 9))["todos.html"]
+    assert "b-unrel" not in _body(
+        render_site(PROFILE, todos, today=date(2026, 7, 9), password="pw"),
+        "todos.html")
     # the JS handles marks locally + queues for the agent — the mailto
     # handoff is gone (owner decision 2026-07-10)
     js = files["agent-site.js"]
