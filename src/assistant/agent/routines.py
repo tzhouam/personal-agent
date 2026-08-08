@@ -112,14 +112,26 @@ class RoutineStore:
 
     def _save(self, data: dict) -> None:
         """Atomically replace the routines file (tmp + os.replace, 0600) —
-        a crash mid-write must not corrupt the store (Track D §4)."""
+        a crash mid-write must not corrupt the store (Track D §4).
+
+        The temp name carries the writer's pid+thread id: a *shared* ``.tmp``
+        makes two concurrent writers race on one path, and the loser's
+        ``os.replace`` dies with FileNotFoundError after the winner consumed
+        it. Callers hold the write lock, so that race shouldn't arise — but a
+        per-writer name means a lock that goes missing degrades to a
+        last-writer-wins save instead of an exception from the save itself."""
         import os as _os
+        import threading as _threading
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
-        _os.chmod(tmp, 0o600)
-        _os.replace(tmp, self.path)
+        tmp = self.path.with_name(
+            f"{self.path.name}.{_os.getpid()}.{_threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+            _os.chmod(tmp, 0o600)
+            _os.replace(tmp, self.path)
+        finally:
+            tmp.unlink(missing_ok=True)   # no-op after a successful replace
 
     @locked_transaction
     def add(self, task: str, time: str, days: str = "daily",
@@ -211,6 +223,7 @@ class RoutineStore:
                 and r["time"] <= now.strftime("%H:%M")
                 and r.get("last_checked") != today]
 
+    @locked_transaction
     def claim_due(self, now: datetime | None = None) -> list[dict]:
         """Atomically select the due routines and mark them checked — one
         locked load→mark→save, so a concurrent poller can't double-fire them

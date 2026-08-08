@@ -20,6 +20,18 @@ _PRIORITY_META = {
 }
 
 
+def _href(url) -> str:
+    """Escape a URL for an `href='…'` attribute.
+
+    Link text was always escaped here but the href values were not, so a URL
+    carrying a quote could close the attribute and inject markup into the
+    digest — and these URLs are third-party data (GitHub titles/links, arXiv
+    and RSS entries), not owner input. `html.escape` defaults to quote=True,
+    which covers the single quotes these attributes actually use. The website
+    renderer already escapes the same values; this brings the email in line."""
+    return html.escape(str(url or ""), quote=True)
+
+
 def render_html(run_date: str, digest: dict, research: dict, resume: dict,
                 todos: dict, reading: list[dict], website: dict,
                 profile_diff: str, profile_ops: list[dict], stats: dict,
@@ -52,9 +64,9 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
                 label = ref_label(todo.get("url"), todo.get("detail", "") or todo.get("title", ""),
                                   todo.get("type", ""))
                 if label:  # short bracketed link, summary stays plain text
-                    title = f"<a href='{todo['url']}'>[{label}]</a>: {title}"
+                    title = f"<a href='{_href(todo['url'])}'>[{label}]</a>: {title}"
                 elif todo.get("url"):
-                    title = f"<a href='{todo['url']}'>[link]</a>: {title}"
+                    title = f"<a href='{_href(todo['url'])}'>[link]</a>: {title}"
                 badge = (" <b style='color:#c0392b'>NEW</b>" if todo.get("id") in added_today else "")
                 due = f" · due {html.escape(str(todo['due']))}" if todo.get("due") else ""
                 detail = (f"<br><span style='color:#6b7280;font-size:13px'>{html.escape(todo['detail'])}</span>"
@@ -94,7 +106,7 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
                 f" <em style='color:{color}'>→ {html.escape(action)}</em>" if action else ""
             )
             ref = ref_label(item.get("url"), item.get("title", ""), item.get("type", ""))
-            link = f"<a href='{url}'>[{ref or item.get('type') or 'link'}]</a>"
+            link = f"<a href='{_href(url)}'>[{ref or item.get('type') or 'link'}]</a>"
             parts.append(
                 f"<li style='margin-bottom:6px'>{link} "
                 f"<span style='color:#6b7280'>{repo}</span>: {summary}{action_html}</li>"
@@ -114,7 +126,7 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
                 body += f"<br><em style='color:#4b5563'>Why: {html.escape(item['why'])}</em>"
             parts.append(
                 f"<p style='margin:8px 0'>[<code>{item.get('id')}</code>] "
-                f"<a href='{item.get('url', '#')}'><b>{html.escape(item.get('title', ''))}</b></a>"
+                f"<a href='{_href(item.get('url', '#'))}'><b>{html.escape(item.get('title', ''))}</b></a>"
                 f"{badge}{body}</p>"
             )
         if len(reading) > 15:
@@ -127,7 +139,7 @@ def render_html(run_date: str, digest: dict, research: dict, resume: dict,
         parts.append(f"<h3>{label} ({len(items)})</h3><ul style='margin-top:4px'>")
         for item in items:
             parts.append(
-                f"<li style='margin-bottom:6px'><a href='{item.get('url', '#')}'>"
+                f"<li style='margin-bottom:6px'><a href='{_href(item.get('url', '#'))}'>"
                 f"{html.escape(item.get('title', ''))}</a> <span style='color:#9ca3af'>"
                 f"({html.escape(item.get('source', ''))})</span><br>"
                 f"{html.escape(item.get('takeaway', ''))}</li>"

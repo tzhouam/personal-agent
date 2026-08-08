@@ -86,9 +86,11 @@ def test_marks_token_ships_only_inside_ciphertext():
         assert "SECRET-TOKEN" not in content
     assert "data-ct=" in files["reading.html"]  # encrypted payload present
 
-    # without a password: config is dropped entirely, never shipped plaintext
+    # without a password the private page is not emitted AT ALL, so the token
+    # has nowhere to leak to — it only ever travels inside the ciphertext
     files = render_site(PROFILE, [], today=date(2026, 7, 9), reading=reading,
                         marks_cfg=cfg)
     for content in files.values():
         assert "SECRET-TOKEN" not in content
-    assert "id='marks-cfg'" not in files["reading.html"]
+        assert "id='marks-cfg'" not in content
+    assert "reading.html" not in files

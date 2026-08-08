@@ -91,3 +91,43 @@ def test_self_improve_raises_on_nonzero_exit(monkeypatch):
                         lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="x", stderr="y"))
     with pytest.raises(RuntimeError):
         build_dispatch()["self_improve"](None, {}, _Token())
+
+
+# ── exit-code propagation (the pipeline job's failure signal) ──────────────
+#
+# `_dispatch_run` used to call `run(...)` and discard its return value, so the
+# worker marked every daily run `done` regardless of outcome. Because the same
+# handler defaults resume=True, a run stuck at `deliver` was then resumed the
+# next day — jumping straight to deliver/curate with yesterday's artifacts, so
+# day N+1 collected nothing either. One deliver failure ate two days silently.
+
+
+def test_run_handler_raises_when_the_pipeline_stops_short(monkeypatch, tmp_path):
+    """rc=1 (graph never reached `done`) must raise, so the queue's retry
+    ladder runs and the failure can reach the owner."""
+    import assistant.agent.orchestrator as orch
+    import assistant.agent.state as state_mod
+
+    monkeypatch.setattr(orch, "run", lambda settings, **kw: 1)
+    monkeypatch.setattr(state_mod, "load_state", lambda f: {"phase": "deliver"})
+    settings = types.SimpleNamespace(state_file=tmp_path / "state.json")
+
+    with pytest.raises(RuntimeError, match="deliver"):
+        build_dispatch()["run"](settings, {}, _Token())
+
+
+def test_run_handler_treats_lock_conflict_as_a_clean_skip(monkeypatch):
+    """rc=3 means another run already holds run.lock — it did this job's work.
+    Raising would burn the retry ladder and push a false failure note."""
+    import assistant.agent.orchestrator as orch
+
+    monkeypatch.setattr(orch, "run", lambda settings, **kw: 3)
+    build_dispatch()["run"]("S", {}, _Token())      # must not raise
+
+
+def test_run_phase_handler_raises_on_nonzero_exit(monkeypatch):
+    import assistant.cli.commands as cmds
+
+    monkeypatch.setattr(cmds, "cmd_run_phase", lambda settings, phase: 1)
+    with pytest.raises(RuntimeError, match="bogus"):
+        build_dispatch()["run_phase"]("S", {"phase": "bogus"}, _Token())

@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 
 from assistant.platform.config import Settings
-from assistant.agent.website.render import render_site
+from assistant.agent.website.render import _PROTECTED_PAGES, render_site
 
 _API = "https://api.github.com"
 
@@ -95,11 +95,19 @@ def sync_website(settings: Settings, profile: dict, todos: list[dict],
 
     marks_cfg = ({"repo": settings.marks_repo, "token": settings.marks_push_token}
                  if settings.marks_repo and settings.marks_push_token else None)
-    for filename, content in render_site(profile, todos, reading=reading,
-                                         routines=routines, reminders=reminders,
-                                         password=settings.website_password,
-                                         marks_cfg=marks_cfg).items():
+    rendered = render_site(profile, todos, reading=reading,
+                           routines=routines, reminders=reminders,
+                           password=settings.website_password,
+                           marks_cfg=marks_cfg)
+    for filename, content in rendered.items():
         (workdir / filename).write_text(content)
+
+    # A page that stops being rendered must also stop being PUBLISHED. Only the
+    # `replace` path clears the workdir, so without this an existing plaintext
+    # todos.html would survive on the public site after WEBSITE_PASSWORD was
+    # unset — the render-side fix alone would protect only a fresh repo.
+    for stale in _PROTECTED_PAGES - set(rendered):
+        (workdir / stale).unlink(missing_ok=True)
 
     if not _git(workdir, settings, "status", "--porcelain").stdout.strip():
         return {"status": "no_change"}

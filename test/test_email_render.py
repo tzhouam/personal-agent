@@ -66,3 +66,36 @@ def test_email_omits_red_notification_section():
     # a truly empty day still cheers
     assert "No GitHub notifications" in _render(
         digest={"sections": {"red": [], "yellow": [], "white": []}, "total": 0})
+
+
+# ── href escaping ──────────────────────────────────────────────────────────
+#
+# Link *text* was always escaped, but href values were interpolated raw into
+# single-quoted attributes. These URLs are third-party data (GitHub, arXiv,
+# RSS), so a quote in one could close the attribute and inject markup. The
+# website renderer already escaped the same values.
+
+_EVIL = "https://e.com/x'><script>alert(1)</script><a href='"
+
+
+def test_todo_href_is_escaped():
+    html_out = _render(todos={"open": [
+        {"id": "t1", "title": "hi", "source": "github",
+         "created": "2026-07-15", "url": _EVIL}]})
+    assert "<script>" not in html_out
+    assert "&#x27;" in html_out
+
+
+def test_notification_href_is_escaped():
+    html_out = _render(digest={"sections": {"yellow": [
+        {"summary": "s", "repo": "r", "url": _EVIL, "type": "PullRequest"}]}})
+    assert "<script>" not in html_out
+
+
+def test_reading_and_feed_hrefs_are_escaped():
+    html_out = render_html(
+        "2026-07-21", {}, {"industry": [{"title": "t", "url": _EVIL,
+                                         "source": "s", "takeaway": "k"}]},
+        {}, {}, [{"id": "r1", "title": "paper", "url": _EVIL}], {},
+        "", [], {"run": "x"})
+    assert "<script>" not in html_out

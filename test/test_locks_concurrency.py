@@ -21,12 +21,30 @@ def _git_init(repo_dir):
 
 
 def _run_threads(workers):
-    threads = [threading.Thread(target=w) for w in workers]
+    """Run every worker concurrently and fail on a deadlock OR a raise.
+
+    Capturing exceptions is load-bearing, not hygiene: an unhandled thread
+    exception only produces a pytest *warning*, so a worker that died could
+    silently satisfy an exactly-once assertion by never recording its result.
+    That is precisely how a missing `@locked_transaction` on
+    `RoutineStore.claim_due` hid behind a green test."""
+    errors: list[BaseException] = []
+
+    def guarded(w):
+        def run():
+            try:
+                w()
+            except BaseException as exc:      # noqa: BLE001 — re-raised below
+                errors.append(exc)
+        return run
+
+    threads = [threading.Thread(target=guarded(w)) for w in workers]
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=60)
     assert not any(t.is_alive() for t in threads), "a worker deadlocked"
+    assert not errors, f"worker raised: {errors[0]!r}"
 
 
 def test_concurrent_todo_writes_no_lost_updates_or_commits(settings):

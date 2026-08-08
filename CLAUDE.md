@@ -14,7 +14,7 @@ trivial questions, pure lookups, or an explicit "just implement".
 
 ```bash
 pip install -e .                          # editable install; provides the `assistant` CLI
-.venv/bin/python -m pytest -q             # full suite (527 tests, ~40 s)
+.venv/bin/python -m pytest -q             # full suite (674 tests, ~75 s)
 .venv/bin/python -m pytest test/test_chat.py -q          # one file
 .venv/bin/python -m pytest test/test_chat.py::test_x -q  # one test
 ```

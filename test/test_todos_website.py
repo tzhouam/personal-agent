@@ -1,8 +1,16 @@
+import base64
+import re
 from datetime import date
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from assistant.agent.tasks.todos import update_todos
 from assistant.agent.todo_store import ReadingList, TodoStore
 from assistant.agent.website import render_site, sync_website
+from assistant.agent.website.render import _PROTECTED_PAGES
+from conftest import _body
 
 
 def test_todo_upsert_dedupe_done(tmp_path):
@@ -134,7 +142,7 @@ def test_render_site_pages_and_calendar():
         {"id": "t2", "title": "No due date", "source": "manual",
          "created": "2026-07-01", "status": "open"},
     ]
-    files = render_site(PROFILE, todos, today=today)
+    files = render_site(PROFILE, todos, today=today, password="pw")
 
     # one page per section, plus shared assets
     for page_name in ("index.html", "experience.html", "education.html",
@@ -164,7 +172,7 @@ def test_render_site_pages_and_calendar():
     assert "hero compact" not in home and "avatar" in home
     assert "hero compact" in files["projects.html"]
 
-    page = files["todos.html"]
+    page = _body(files, "todos.html")
     assert "July 2026" in page
     # calendar shows only important todos: due-dated chip present…
     assert page.count("Review scheduler PR"[:40]) == 2      # calendar chip + list entry
@@ -194,7 +202,8 @@ def test_calendar_importance_cap_and_list_order():
            {"id": "t10", "title": "New undated", "source": "manual",
             "created": "2026-07-01", "status": "open"}]
     )
-    page = render_site(PROFILE, todos, today=today)["todos.html"]
+    page = _body(render_site(PROFILE, todos, today=today, password="pw"),
+                 "todos.html")
     assert "+1 more" in page
     assert "Key items only" in page
     # scroll list ordered by date: due items soonest-first, then undated newest-first
@@ -221,12 +230,12 @@ def test_reading_page_like_todos():
         {"id": "r2", "title": "Old survey", "url": "https://arxiv.org/abs/2",
          "why": "", "source": "arxiv", "created": "2026-06-10", "status": "open"},
     ]
-    files = render_site(PROFILE, [], today=today, reading=reading)
+    files = render_site(PROFILE, [], today=today, reading=reading, password="pw")
     assert "reading.html" in files
-    page = files["reading.html"]
-    # nav on every page includes Reading, and the page marks itself active
-    assert "<a href='reading.html' class=active" in page
+    # nav lives OUTSIDE the ciphertext, so it stays assertable on the raw page
+    assert "<a href='reading.html' class=active" in files["reading.html"]
     assert "href='reading.html'" in files["index.html"]
+    page = _body(files, "reading.html")
     # day-grouped scroll list, newest day first, with the todo buttons
     assert page.index("2026-07-08") < page.index("2026-06-10")
     # the reading list gets the tall scroll variant (far more items than todos)
@@ -236,7 +245,8 @@ def test_reading_page_like_todos():
     # reading items never show the todo staleness badge
     assert "going stale" not in page
     # empty state renders a placeholder, not a broken section
-    assert "Nothing unread" in render_site(PROFILE, [], today=today)["reading.html"]
+    assert "Nothing unread" in _body(
+        render_site(PROFILE, [], today=today, password="pw"), "reading.html")
 
 
 def test_routines_page():
@@ -245,25 +255,21 @@ def test_routines_page():
                  "last_checked": "2026-07-09"}]
     reminders = [{"id": "m4", "message": "submit the report", "due_at": "2026-07-10 09:00"}]
     files = render_site(PROFILE, [], today=date(2026, 7, 9),
-                        routines=routines, reminders=reminders)
-    page = files["routines.html"]
-    assert "<a href='routines.html' class=active" in page
+                        routines=routines, reminders=reminders, password="pw")
+    assert "<a href='routines.html' class=active" in files["routines.html"]
+    page = _body(files, "routines.html")
     assert "🔁 workdays 22:00" in page and "check Shenzhen storm warnings" in page
     assert "if: 深圳市发布暴雨或台风预警" in page and "last checked 2026-07-09" in page
     assert "⏰ 2026-07-10 09:00" in page and "submit the report" in page
     # nav includes Routines on other pages too; empty state is friendly
     assert "href='routines.html'" in files["index.html"]
-    empty = render_site(PROFILE, [], today=date(2026, 7, 9))["routines.html"]
+    empty = _body(render_site(PROFILE, [], today=date(2026, 7, 9),
+                              password="pw"), "routines.html")
     assert "No routines yet" in empty
 
 
 def test_password_protected_pages_ship_ciphertext_only():
-    import base64
-    import re
 
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
     todos = [{"id": "t1", "title": "SECRET-TODO-TITLE", "source": "manual",
               "created": "2026-07-09", "status": "open"}]
@@ -292,9 +298,15 @@ def test_password_protected_pages_ship_ciphertext_only():
     # unlock machinery is in the shared JS
     js = files["agent-site.js"]
     assert "initLock" in js and "PBKDF2" in js and "AES-GCM" in js
-    # no password → everything plaintext as before
+    # no password → the private pages are NOT EMITTED AT ALL. They used to
+    # render in plaintext, which published todos/reading/routines (including
+    # LLM-written detail lines) on a public Pages site whenever
+    # WEBSITE_PASSWORD was unset.
     open_files = render_site(PROFILE, todos, today=date(2026, 7, 9))
-    assert "SECRET-TODO-TITLE" in open_files["todos.html"]
+    assert not (_PROTECTED_PAGES & set(open_files))
+    assert not any("SECRET-TODO-TITLE" in c for c in open_files.values())
+    # ...and nothing links to the pages that no longer exist
+    assert "todos.html" not in open_files["index.html"]
 
 
 def test_todo_expiry_after_a_month(tmp_path):
@@ -341,3 +353,43 @@ def test_update_todos_reports_expired_as_closed(tmp_path):
 
 def test_sync_website_not_configured(settings):
     assert sync_website(settings, PROFILE, [])["status"] == "not_configured"
+
+
+def test_unset_password_deletes_already_published_private_pages(settings,
+                                                                monkeypatch):
+    """The render-side fix alone protects only a FRESH repo.
+
+    render_site simply stops emitting the private pages, and nothing but the
+    `replace` path clears the workdir — so a site published while
+    WEBSITE_PASSWORD was set would keep serving its old plaintext todos.html
+    forever after the password was removed. sync must delete them."""
+    import types
+
+    from assistant.agent.website import sync as sync_mod
+
+    workdir = settings.data_dir / "website"
+    (workdir / ".git").mkdir(parents=True)          # looks like an existing checkout
+    for stale in _PROTECTED_PAGES:                  # a previous publish
+        (workdir / stale).write_text("<html>SECRET-FROM-LAST-PUBLISH</html>")
+
+    settings.website_repo = "o/r"
+    settings.website_password = ""                  # owner cleared it
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"default_branch": "main"}
+
+    monkeypatch.setattr(sync_mod.httpx, "Client",
+                        lambda **kw: types.SimpleNamespace(get=lambda url: _Resp()))
+    monkeypatch.setattr(sync_mod, "_git",
+                        lambda *a, **k: types.SimpleNamespace(
+                            stdout="", stderr="", returncode=0))
+
+    sync_mod.sync_website(settings, PROFILE, [], routines=[], reminders=[])
+
+    for stale in _PROTECTED_PAGES:
+        assert not (workdir / stale).exists(), f"{stale} is still published"
+    assert (workdir / "index.html").exists()        # public site unaffected
