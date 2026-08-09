@@ -11,6 +11,7 @@ import time
 
 from assistant.platform.config import Settings
 from assistant.platform.llm import LLM
+from assistant.platform.secrets import mask_secrets
 from assistant.agent.profile_store import ProfileStore
 from assistant.agent.chat.agent import handle_message
 from assistant.agent.chat.email_channel import EmailChannel
@@ -145,7 +146,8 @@ def run_listener(settings: Settings, once: bool = False) -> int:
                             break
                         continue
                     log.info("%s message from %s: %.80s", channel.name,
-                             message.get("sender", "?"), message["text"])
+                             message.get("sender", "?"),
+                             mask_secrets(message["text"]))
                     token = (channel.begin_turn(message)
                              if "uid" in message else None)
                     if "uid" in message and token is None:

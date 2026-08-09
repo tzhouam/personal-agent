@@ -803,7 +803,7 @@ def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
         return
     for message in messages:
         log.info("email message for %s from %s: %.80s", user.uid,
-                 message.get("sender", "?"), message["text"])
+                 message.get("sender", "?"), mask_secrets(message["text"]))
         skey = f"{user.uid}:email:{message.get('sender', '')}"
         if "uid" in message:   # ledger-tracked (Track D §2)
             history = store.history(skey)
@@ -990,7 +990,8 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                             log.exception("unsupported-media ack failed")
                         continue
                     log.info("%s message from %s: %.80s", channel.name,
-                             message.get("sender", "?"), message["text"])
+                             message.get("sender", "?"),
+                             mask_secrets(message["text"]))
                     session = f"{channel.name}:{message.get('sender', '')}"
                     if "uid" in message:   # ledger-tracked email (Track D §2)
                         history = sessions.history(session)
@@ -1057,6 +1058,41 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
             stop.wait(60)
 
 
+class _MaskingFilter(logging.Filter):
+    """Scrub credential-shaped substrings out of every record the daemon logs.
+
+    `secrets.py` names two sinks a pasted token could persist to — the chat
+    history writer and the trace writer — and concludes "nothing on disk retains
+    it". The daemon's own log was a third: the poll loops logged raw owner text,
+    so a token pasted over email landed verbatim in a never-rotated, 0644
+    `serve.log` (the file the WeChat runbook tells operators to attach), while
+    the masked SessionStore copy made it look like it was never written down.
+
+    Masking at the call sites fixes today's leak; this filter is what stops the
+    next `log.info` of owner text from reintroducing it. Applied to the root
+    logger's handlers, so it covers every module including third-party ones."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = mask_secrets(record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: mask_secrets(v) if isinstance(v, str) else v
+                               for k, v in record.args.items()}
+            else:
+                record.args = tuple(mask_secrets(a) if isinstance(a, str) else a
+                                    for a in record.args)
+        return True
+
+
+def _install_masking_filter() -> None:
+    """Attach `_MaskingFilter` to every root handler exactly once (idempotent —
+    `basicConfig` is a no-op on re-entry but this may be called again)."""
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, _MaskingFilter) for f in handler.filters):
+            handler.addFilter(_MaskingFilter())
+
+
 def run_serve(settings: Settings, services=None) -> int:
     """`assistant serve`: the long-lived daemon. Takes the shared inbox pid
     lock (so it can never race the standalone chat-listener on the watermark),
@@ -1067,6 +1103,7 @@ def run_serve(settings: Settings, services=None) -> int:
     `services` (a `ServeServices`) supplies the agent behaviors and the worker
     dispatch; omitted, it comes from the registered default (`agent.app`)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _install_masking_filter()
     services = _resolve_services(services)
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -1213,6 +1250,7 @@ def reboot(settings: Settings, delay: float = 0.0, timeout: float = 20.0,
     start, and the per-job side-effect guards (delivery ledger) keep the replay
     from double-sending (§6)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _install_masking_filter()
     if delay > 0:
         time.sleep(delay)
     pid_file = settings.data_dir / "chat_listener.pid"
