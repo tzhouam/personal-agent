@@ -323,6 +323,37 @@ def build_context(settings: Settings) -> str:
     except Exception:
         log.exception("context: workflows failed")
 
+    try:  # tasks paused on the approval gate — the ONLY durable surface for them
+        # A paused task is released solely by `approve_task <id>`, and the id
+        # used to exist only inside the WeChat push announcing the pause. A push
+        # that is dropped (unset ANNOUNCE_*, a shut context-token window) left
+        # the task stranded with no way to find it: no list_tasks action, no D5
+        # producer, nothing in this context. Listing them here makes a pending
+        # approval visible on EVERY turn, however the push fared.
+        import json as _json
+
+        tasks_dir = settings.data_dir / "tasks"
+        waiting = []
+        for path in sorted(tasks_dir.glob("task-*.json")) if tasks_dir.exists() else []:
+            if path.name.endswith("-trace.jsonl"):
+                continue
+            try:
+                rec = _json.loads(path.read_text())
+            except Exception:      # a torn/partial record must not hide the rest
+                continue
+            if rec.get("status") == "awaiting_approval":
+                waiting.append(rec)
+        if waiting:
+            parts.append(
+                "## Awaiting approval (paused on an outward step; the owner "
+                "releases one by replying 批准任务 <id>)\n" + "\n".join(
+                    f"[{r['id']}] {str(r.get('request', ''))[:80]}"
+                    + (f" — 待执行: {r['pending_action'].get('type')}"
+                       if isinstance(r.get("pending_action"), dict) else "")
+                    for r in waiting[:5]))
+    except Exception:
+        log.exception("context: awaiting-approval tasks failed")
+
     try:  # finance: this month's computed totals + latest records, so money
         # questions are answered from real ledger numbers, never invented
         from assistant.agent.finance_store import FinanceStore, timestamp_of

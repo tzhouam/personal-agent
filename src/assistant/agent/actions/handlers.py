@@ -766,15 +766,30 @@ def _execute_task(settings: Settings, p: dict) -> str:
         return "execute_task needs the request"
     if settings.deployment_mode == "multi_tenant":
         _enqueue(settings, "task", {"request": request})
-        return ("task queued — I'll work through it step by step and message "
-                "you the result on WeChat")
+        return ("task queued — I'll work through it step by step"
+                + _push_promise(settings))
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     log_file = (settings.data_dir / "task_run.log").open("a")
     subprocess.Popen([sys.executable, "-m", "assistant.cli", "task", request],
                      stdout=log_file, stderr=subprocess.STDOUT,
                      start_new_session=True)
     return ("task started in the background — I'll work through it step by "
-            "step and message you the result on WeChat")
+            "step" + _push_promise(settings))
+
+
+def _push_promise(settings: Settings) -> str:
+    """Tail describing HOW a background result will reach the owner.
+
+    Mirrors the F22 precedent above: promise a push only when an announce
+    channel actually resolves for this user. Self-serve tenants onboard with
+    ANNOUNCE_* empty, so the old unconditional "message you on WeChat" was
+    false 100% of the time for them — and for a paused task the push carries
+    the only copy of the id `approve_task` needs. Kept in lockstep with
+    `send_wechat`'s own "disabled" condition."""
+    if settings.announce_account and settings.announce_to:
+        return " — I'll message you the result on WeChat"
+    return (" — this deployment can't push you a message, so ask me about it "
+            "here when you want the result")
 
 
 def _dispatch_task_record(settings: Settings, task_id: str) -> bool:
@@ -851,7 +866,8 @@ def _approve_task(settings: Settings, p: dict) -> str:
         else:
             return f"task {task_id} is {status or 'unknown'} — nothing to approve"
     _dispatch_task_record(settings, task_id)
-    return f"task {task_id} approved — executing now, report arrives on WeChat"
+    return (f"task {task_id} approved — executing now"
+            + _push_promise(settings))
 
 
 # ── workflows (owner-authored reusable procedures) ───────────────────

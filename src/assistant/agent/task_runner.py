@@ -190,15 +190,48 @@ def _pause_for_approval(record: dict, settings: Settings, notify: bool,
             plan = record.get("plan") or {}
             steps = "\n".join(f"  {i}. {m['step']}" for i, m in
                               enumerate(plan.get("milestones", [])[:6], 1))
-            send_wechat(settings, (
+            status = send_wechat(settings, (
                 f"⏸ [任务待批准] {record['request'][:100]}\n{reason}\n"
                 + (f"计划:\n{steps}\n" if steps else "")
                 + (f"待执行动作: {json.dumps(pending_action, ensure_ascii=False)[:150]}\n"
                    if pending_action else "")
                 + f"批准请回复: 批准任务 {record['id']}"))
+            # This push carries the ONLY copy of the id `approve_task` requires,
+            # so losing it strands the task permanently. send_wechat never
+            # raises — it RETURNS "sent"/"disabled …"/"failed: …" — so the
+            # except below could never have caught a drop. Record it on the D5
+            # surface, which carries the id into the owner's next reply.
+            _note_push_failure(settings, status, "任务待批准但推送失败", record)
         except Exception:
             log.exception("approval notify failed")
     return record
+
+
+def _note_push_failure(settings: Settings, status: str, what: str,
+                       record: dict) -> None:
+    """Log a WeChat push verdict and, when it isn't "sent", put it on the D5
+    failure surface so it reaches the owner's next chat reply.
+
+    `send_wechat` reports failure by RETURN VALUE ("sent" / "disabled …" /
+    "failed: …"), never by raising, so a bare call discards the only signal
+    there is. Two live cases make that concrete: a tenant whose ANNOUNCE_* is
+    unset gets "disabled" for 100% of pushes, and the documented ~24h WeChat
+    context-token window closes on an idle owner. Never raises — a failure to
+    report a failure must not fail the task."""
+    if status == "sent":
+        return
+    log.warning("task %s push not delivered: %s", record.get("id"), status)
+    try:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(settings.data_dir)
+        try:
+            db.add_system_note(f"{what}: {record.get('id')} "
+                               f"({str(status)[:60]})")
+        finally:
+            db.close()
+    except Exception:
+        log.exception("could not record task push failure")
 
 
 def _load_approved(settings: Settings, task_id: str,
@@ -468,9 +501,11 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
         try:
             from assistant.platform.notify import send_wechat
 
-            status = "✅" if record["status"] == "done" else "⚠️"
-            send_wechat(settings, f"{status} [任务] {record['request'][:80]}\n"
-                                  f"{record['report'][:1600]}")
+            mark = "✅" if record["status"] == "done" else "⚠️"
+            status = send_wechat(settings,
+                                 f"{mark} [任务] {record['request'][:80]}\n"
+                                 f"{record['report'][:1600]}")
+            _note_push_failure(settings, status, "任务报告没送达", record)
         except Exception:
             log.exception("task result notify failed")
     return record

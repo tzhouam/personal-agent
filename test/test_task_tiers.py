@@ -209,3 +209,43 @@ def test_is_risky_metadata():
     assert not is_risky("run_phase", {"phase": "research"})
     assert not is_risky("add_todo", {"title": "x"})
     assert not is_risky("nonexistent", {})
+
+def test_lost_approval_push_is_recorded_and_the_task_stays_findable(
+        settings, monkeypatch, risky_action):
+    """A paused task is released only by `approve_task <id>`, and that id used
+    to exist solely inside the WeChat push. send_wechat reports failure by
+    RETURN VALUE, never by raising, so the bare call dropped the only signal
+    and the task was stranded permanently."""
+    from assistant.agent.chat.agent import build_context
+    from assistant.platform import notify
+    from assistant.platform.delivery import open_failures
+
+    monkeypatch.setattr(notify, "send_wechat",
+                        lambda s, text: "disabled (set ANNOUNCE_ACCOUNT and ANNOUNCE_TO)")
+    llm = ScriptedLLM([
+        _assess("simple"),
+        {"thought": "publish it", "action": {"type": "publish_test"}},
+    ])
+    record = run_task("do the thing", settings, llm=llm, notify=True)
+    assert record["status"] == "awaiting_approval"
+
+    # 1. the dropped push is on the D5 surface, carrying the id
+    failures = open_failures(settings)
+    assert any(record["id"] in f["summary"] for f in failures), failures
+
+    # 2. and the task is visible in chat context on EVERY later turn,
+    #    independently of how the push fared
+    ctx = build_context(settings)
+    assert "## Awaiting approval" in ctx and record["id"] in ctx
+    assert "批准任务" in ctx
+
+
+def test_push_promise_is_not_made_when_no_announce_channel_resolves(settings):
+    """Two tenants on this deployment have ANNOUNCE_* empty, so the old
+    unconditional 'I'll message you on WeChat' was false every single time."""
+    from assistant.agent.actions.handlers import _push_promise
+
+    settings.announce_account = settings.announce_to = ""
+    assert "WeChat" not in _push_promise(settings)
+    settings.announce_account, settings.announce_to = "acct", "owner"
+    assert "WeChat" in _push_promise(settings)
