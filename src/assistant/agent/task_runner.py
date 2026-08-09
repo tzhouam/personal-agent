@@ -350,9 +350,18 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
     while len(record["steps"]) < turns:
         if cancel_check is not None:   # §6: per-turn cancellation checkpoint —
             cancel_check()             # outside the LLM try so the raise propagates
+        # Approval is tracked HERE, in a local the model cannot reach — never as
+        # a key read back out of `move`. `move` is either the synthetic dict
+        # below or raw `llm.complete_json` output, so a model that emitted
+        # `_approved: true` next to a risky action used to walk straight through
+        # the gate. Task prompts carry web-search results and action outcomes,
+        # which makes that an injection surface onto the one boundary protecting
+        # outward actions.
+        approved_this_turn = False
         if pending is not None:        # the ONE approved action — runs unguarded,
             move = {"thought": "(owner approved the pending action)",
-                    "action": pending, "_approved": True}   # then gating resumes
+                    "action": pending}                       # then gating resumes
+            approved_this_turn = True
             pending = None
         else:
             transcript = "\n".join(
@@ -409,7 +418,7 @@ def run_task(request: str, settings: Settings, llm=None, max_turns: int = 12,
         elif action.get("type") in EXCLUDED_ACTIONS:
             step["outcome"] = f"action {action['type']!r} is not available inside a task"
             consecutive_failures += 1
-        elif is_risky(action["type"], action) and not move.get("_approved"):
+        elif is_risky(action["type"], action) and not approved_this_turn:
             # THE approval boundary: an outward/irreversible action pauses the
             # task at every tier — only the single just-approved pending action
             # bypasses it, so a task with two risky steps pauses twice.
