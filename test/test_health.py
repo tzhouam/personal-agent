@@ -387,3 +387,20 @@ def test_health_reverse_migration_reconstructs_shared_next_id(settings):
     assert single["next_id"] == 5
     assert single["profile"] == {"sex": "male", "height_cm": 178.0}
     assert len(single["records"]) == 3 and len(single["needs"]) == 2
+
+
+def test_reverse_migration_run_twice_preserves_records_profile_and_needs(settings):
+    """Health's second run was worse than finance's: meta_path lives INSIDE the
+    day dir, so a re-run wrote an empty health.yaml with no records, no body
+    profile and no nutrient needs, then committed it."""
+    import yaml
+    p = settings.profile_dir
+    _legacy_health(p)
+    store = HealthStore(p)
+    store.to_single_file()
+
+    before = (p / "health.yaml").read_text()
+    HealthStore(p).to_single_file()
+    assert (p / "health.yaml").read_text() == before
+    data = yaml.safe_load(before)
+    assert data["records"] and data.get("profile") is not None

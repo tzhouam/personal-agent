@@ -193,7 +193,19 @@ class FinanceStore:
         `finance.yaml` the pre-sharding code can read *and* add() to. Reconstructs
         `next_id` above the max legacy `fN` suffix so old-code `add()` can't
         collide, removes the day dir + marker. Returns the record count. Caller
-        must quiesce writers (daemon stopped) and hold the lock."""
+        must quiesce writers (daemon stopped) and hold the lock.
+
+        Idempotent: the day dir is the ONLY source this reads, and the first run
+        removes it. A second run therefore used to collect zero records, write
+        `{next_id: 1, records: []}` over the ledger the first run had just
+        correctly reconstructed, and COMMIT that — hard-deleting every record in
+        a store whose central invariant is that nothing is ever deleted (wrong
+        entries are voided, never removed). Re-running now reports the existing
+        count and changes nothing."""
+        if not self.dir.exists():   # already single-file — nothing to merge
+            legacy = ((yaml.safe_load(self.legacy_path.read_text()) or {})
+                      if self.legacy_path.exists() else {})
+            return len(legacy.get("records", []))
         recs = []
         if self.dir.exists():
             for p in sorted(self.dir.glob("*.yaml")):
