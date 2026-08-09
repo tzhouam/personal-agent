@@ -1,11 +1,15 @@
 """Secret masking for anything durable.
 
 A single chokepoint (`mask_secrets`) that redacts credential-shaped substrings to
-a legible-but-useless fingerprint (`ghp_…aB12`). Wired into the two places a
-pasted token could otherwise persist: the chat-history writer (`SessionStore`)
-and the trace writer. A token still transits the one live LLM request that routes
-a `connect_github` turn — unavoidable for natural-language routing — but nothing
-on disk retains it.
+a legible-but-useless fingerprint (`ghp_…aB12`). Wired into the three places a
+pasted token could otherwise persist: the chat-history writer (`SessionStore`),
+the trace writer, and the **daemon log** — the poll loops log inbound message
+text, so a token pasted over email used to land verbatim in a never-rotated,
+world-readable `serve.log`. That sink is covered twice: at the call sites and by
+`serve._MaskingFilter` on the root handlers, so a future log line cannot
+reintroduce it. A token still transits the one live LLM request that routes a
+`connect_github` turn — unavoidable for natural-language routing — and, by
+design, the owner's own `config.env` (0600). Nothing else on disk retains it.
 """
 
 import re
