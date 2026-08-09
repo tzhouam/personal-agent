@@ -88,7 +88,15 @@ class EmailChannel:
             return []
         from assistant.platform.delivery import OutboxDB
 
-        conn = imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port)
+        # timeout is load-bearing, not hygiene: this runs on the daemon's SINGLE
+        # poll thread, which also drives reminders, routines and the daily/weekly
+        # job fan-out for EVERY tenant. imaplib blocks in _get_response() from
+        # construction onward, so a mail host that completes the TLS handshake
+        # and then goes quiet would stall all of that indefinitely — and the
+        # try/except below isolates exceptions, not blocks. Matches the bound
+        # every other network call here already carries (smtplib/httpx: 30s).
+        conn = imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port,
+                                 timeout=30)
         try:
             conn.login(self.settings.smtp_user, self.settings.smtp_password)
             conn.select("INBOX", readonly=True)
