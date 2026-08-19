@@ -11,7 +11,7 @@ import yaml
 from assistant.platform import admin
 from assistant.platform.config import Settings
 from assistant.platform.identity import onboarding_candidate
-from assistant.platform.onboarding import InviteStore, handle, provision_user
+from assistant.platform.onboarding import InviteStore, _extract_name, handle, provision_user
 from assistant.platform.registry import UserRegistry
 from assistant.platform.serve import make_server
 
@@ -102,6 +102,72 @@ def test_handle_full_flow(tmp_path):
     # a now-bound account is no longer an onboarding candidate
     assert onboarding_candidate("t", {"account_id": "wx-1"}, base,
                                 UserRegistry(base.data_dir)) is None
+
+
+class _FakeLLM:
+    """Onboarding name-extraction double: returns a canned string, or raises."""
+    def __init__(self, reply="", boom=False):
+        self.reply, self.boom, self.prompts = reply, boom, []
+
+    def complete(self, prompt, system=None, **kw):
+        self.prompts.append(prompt)
+        if self.boom:
+            raise RuntimeError("llm down")
+        return self.reply
+
+
+def test_extract_name_llm_primary_wins():
+    # the LLM's answer is used verbatim (trimmed), even for a fuzzy reply
+    llm = _FakeLLM(reply="大牛")
+    assert _extract_name("嗯…你就喊我大牛吧😄", llm=llm) == "大牛"
+    assert llm.prompts                                  # the LLM was actually consulted
+
+
+@pytest.mark.parametrize("llm_reply", ["UNKNOWN", "  ", "a name that is way too long " * 3])
+def test_extract_name_llm_garbage_falls_back_to_stripper(llm_reply):
+    # an unusable LLM answer → deterministic net extracts from "可以叫我spencer"
+    assert _extract_name("可以叫我spencer", llm=_FakeLLM(reply=llm_reply)) == "spencer"
+
+
+def test_extract_name_llm_error_falls_back_to_stripper():
+    assert _extract_name("call me Bob", llm=_FakeLLM(boom=True)) == "Bob"
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("可以叫我spencer", "spencer"),
+    ("叫我小明", "小明"),
+    ("我叫张三", "张三"),
+    ("你可以称呼我：阿强", "阿强"),
+    ("call me Spencer", "Spencer"),
+    ("my name is Alice", "Alice"),
+    ("I'm Dave", "Dave"),
+    ("Spencer", "Spencer"),          # plain name untouched
+    ('"Nina"', "Nina"),              # wrapping quotes stripped
+    ("Imani", "Imani"),              # real name that merely starts with 'i' letters
+])
+def test_extract_name_fallback_strips_leadins(reply, expected):
+    # no llm → deterministic net (the safety net used when the LLM is down)
+    assert _extract_name(reply) == expected
+
+
+def test_handle_uses_llm_to_extract_name(tmp_path):
+    """A conversational reply provisions the LLM-extracted display name."""
+    base = _base(tmp_path)
+    code = InviteStore(base.shared_dir).create()
+    handle("wx-9", code, base)
+    welcome = handle("wx-9", "嗯 可以叫我 Spencer 啦", base, llm=_FakeLLM(reply="Spencer"))
+    assert "欢迎，Spencer！" in welcome
+    uid = UserRegistry(base.data_dir).by_channel("weixin", "wx-9")
+    assert UserRegistry(base.data_dir).get(uid)["display"] == "Spencer"
+
+
+def test_handle_without_llm_uses_fallback(tmp_path):
+    """Regression + no-hard-dependency: even with no LLM wired, '可以叫我spencer'
+    provisions 'spencer', never the whole phrase."""
+    base = _base(tmp_path)
+    code = InviteStore(base.shared_dir).create()
+    handle("wx-8", code, base)
+    assert "欢迎，spencer！" in handle("wx-8", "可以叫我spencer", base)
 
 
 def test_handle_bounds_bad_code_attempts(tmp_path):

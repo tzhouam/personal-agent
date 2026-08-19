@@ -49,6 +49,33 @@ def bind_channel(settings: Settings, uid: str, channel: str, external_id: str) -
     return f"bound {channel}:{external_id} → {uid}"
 
 
+def unbind_channel(settings: Settings, uid: str, channel: str, external_id: str) -> str:
+    """Drop one channel identity from a user, leaving their other bindings —
+    e.g. the dead accountId a gateway host migration leaves behind."""
+    _require_multi_tenant(settings)
+    removed = UserRegistry(settings.data_dir).unbind_channel(uid, channel, external_id)
+    return (f"unbound {channel}:{external_id} from {uid}" if removed
+            else f"{uid} has no {channel} binding {external_id!r}")
+
+
+def set_schedule(settings: Settings, uid: str, schedule: str) -> str:
+    """Set a user's automated-run cadence: `daily` (swept into the daily/weekly
+    fan-out) or `on_demand` (no scheduled runs — self-serve only)."""
+    _require_multi_tenant(settings)
+    UserRegistry(settings.data_dir).set_schedule(uid, schedule)
+    return f"{uid} schedule set to {schedule}"
+
+
+def set_display(settings: Settings, uid: str, display: str) -> str:
+    """Rename a user's human display name (roster metadata, not identity). The
+    profile's identity.name is agent-owned and fixed separately."""
+    _require_multi_tenant(settings)
+    if not str(display).strip():
+        raise ValueError("display must be non-empty")
+    UserRegistry(settings.data_dir).set_display(uid, str(display).strip())
+    return f"{uid} display set to {display.strip()!r}"
+
+
 def set_bridge_token(settings: Settings, token: str) -> str:
     """Store the hash of the (single) bridge↔daemon token; the bridge keeps the
     plaintext (§A.6). Refuses an empty token — an empty token is never valid."""
@@ -103,7 +130,8 @@ def list_users(settings: Settings) -> str:
     out = []
     for u in rows:
         chans = ", ".join(f"{c['channel']}:{c['id']}" for c in u.get("channels", [])) or "—"
-        out.append(f"{u['uid']:<20} {u.get('status','?'):<9} {chans}")
+        sched = u.get("schedule") or "daily (legacy)"
+        out.append(f"{u['uid']:<20} {u.get('status','?'):<9} {sched:<10} {chans}")
     return "\n".join(out)
 
 
@@ -294,7 +322,11 @@ def migrate_single_user(settings: Settings, uid: str, dry_run: bool = False) -> 
     dest.mkdir(parents=True, exist_ok=True)
     for p in movable:
         shutil.move(str(p), str(dest / p.name))
-    reg.add_user(uid, display=uid)
+    # A migrated single-user owner IS the daily-run owner by definition —
+    # registering with the on_demand default silently killed their 07:00 run.
+    reg.add_user(uid, display=uid, schedule="daily")
     if not (dest / "config.env").exists():
         write_personal_env(settings, uid)
-    return plan + f"\nregistered {uid!r} active — set channels with `admin bind-channel`"
+    return plan + (f"\nregistered {uid!r} active with schedule=daily (the "
+                   "migrated owner keeps their daily run) — set channels "
+                   "with `admin bind-channel`")

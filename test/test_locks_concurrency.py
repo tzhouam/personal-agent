@@ -21,12 +21,30 @@ def _git_init(repo_dir):
 
 
 def _run_threads(workers):
-    threads = [threading.Thread(target=w) for w in workers]
+    """Run every worker concurrently and fail on a deadlock OR a raise.
+
+    Capturing exceptions is load-bearing, not hygiene: an unhandled thread
+    exception only produces a pytest *warning*, so a worker that died could
+    silently satisfy an exactly-once assertion by never recording its result.
+    That is precisely how a missing `@locked_transaction` on
+    `RoutineStore.claim_due` hid behind a green test."""
+    errors: list[BaseException] = []
+
+    def guarded(w):
+        def run():
+            try:
+                w()
+            except BaseException as exc:      # noqa: BLE001 — re-raised below
+                errors.append(exc)
+        return run
+
+    threads = [threading.Thread(target=guarded(w)) for w in workers]
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=60)
     assert not any(t.is_alive() for t in threads), "a worker deadlocked"
+    assert not errors, f"worker raised: {errors[0]!r}"
 
 
 def test_concurrent_todo_writes_no_lost_updates_or_commits(settings):
@@ -93,7 +111,9 @@ def test_routine_claim_due_is_exactly_once_and_respects_cancel(settings):
     total, and a cancelled routine is never claimed."""
     store = RoutineStore(settings.data_dir)
     now = datetime.now().replace(hour=23, minute=59)
-    store.add("say hi", "00:00", days="daily")
+    # created YESTERDAY (F4: a routine already due at its creation instant
+    # waits for the next occurrence — so create it before today's occurrence)
+    store.add("say hi", "00:00", days="daily", now=now - timedelta(days=1))
     claims = []
 
     _run_threads([lambda: claims.extend(store.claim_due(now))] * 2)

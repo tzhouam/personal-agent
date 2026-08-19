@@ -27,6 +27,50 @@ class Cancelled(Exception):
     turns this into a `cancelled` terminal state (not a failure)."""
 
 
+def _note_job_failure(settings, uid: str, kind: str, exc: BaseException) -> None:
+    """Give a job that exhausted its retries an owner-visible trace.
+
+    Until this existed, `jobs.db` was write-only from the owner's side: no
+    D5 row, no push, no `admin jobs` surface — a failed daily run left nothing
+    but a journal line, which is exactly what the durable-delivery work set out
+    to eliminate for every *other* producer.
+
+    Per-user jobs go through `OutboxDB.add_system_note`, so the failure joins
+    the existing D5 surface and rides out on the next chat reply (ackable as
+    `知道了 dfs<n>`) — no new schema, no new surface.
+
+    A GLOBAL_UID job has no tenant to notify and runs under root `Settings`,
+    where a system note would land in an outbox nobody reads. It gets a
+    best-effort push on the operator's own ANNOUNCE_* channel instead. That
+    push can legitimately fail (the WeChat context-token window is ~24h from
+    the owner's last inbound message), so it is wrapped and the log line is
+    unconditional — the journal stays the floor, never the only attempt.
+
+    Never raises: this runs inside the worker's failure path, and a failure to
+    *report* a failure must not take down the pool.
+    """
+    summary = f"后台任务失败: {kind} — {str(exc)[:120]}"
+    try:
+        if uid == GLOBAL_UID:
+            from assistant.platform import notify
+
+            # send_wechat never raises: it returns "sent" / "disabled …" /
+            # "failed: …". Log the verdict so a shut push window or an
+            # unconfigured ANNOUNCE_* is diagnosable rather than invisible.
+            log.warning("global job %s failed → operator push: %s",
+                        kind, notify.send_wechat(settings, f"⚠ {summary}"))
+            return
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(settings.data_dir)
+        try:
+            db.add_system_note(summary)
+        finally:
+            db.close()
+    except Exception:
+        log.exception("job failure note could not be recorded (%s/%s)", uid, kind)
+
+
 class CancelToken:
     """A job's cooperative-cancellation handle. `check()` at a checkpoint raises
     `Cancelled` if the queue has flagged this job."""
@@ -126,6 +170,7 @@ class WorkerPool:
         if fn is None:
             log.error("job %s: unknown kind %r", jid, kind)
             return self.queue.mark(jid, "failed")
+        settings = None
         try:
             settings = self.settings_for(uid)
             ctx = contextvars.copy_context()
@@ -134,9 +179,16 @@ class WorkerPool:
         except Cancelled:
             log.info("job %s (%s/%s) cancelled", jid, uid, kind)
             self.queue.mark(jid, "cancelled")
-        except Exception:
+        except Exception as exc:
             state = self.queue.fail_or_retry(jid)
             log.exception("job %s (%s/%s) errored → %s", jid, uid, kind, state)
+            # Only a TERMINAL failure reaches the owner: a job with attempts
+            # left will run again shortly, and one note per retry would train
+            # the owner to ignore the surface. `settings` is None only when
+            # settings_for itself raised — nothing to write it to, and the
+            # log.exception above is already the record.
+            if state == "failed" and settings is not None:
+                _note_job_failure(settings, uid, kind, exc)
 
     def stop(self, timeout: float = 5.0) -> None:
         """Signal the pool to stop and join with a bounded timeout (a worker mid-job

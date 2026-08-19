@@ -269,13 +269,79 @@ _ASK_CODE = "你好！请发送邀请码开始使用 👋"
 _BAD_CODE = "邀请码无效或已过期，请检查后重发 🙏"
 _ASK_NAME = "邀请码有效 ✅ 请回复你想让我怎么称呼你（昵称）"
 
+def _extract_name_llm(text: str, llm, model: str | None) -> str:
+    """Primary name extractor: ask the (cheap, single-shot) LLM for the name the
+    user wants to be called. Returns '' on any failure or an unusable answer so
+    the caller falls back — the LLM is best-effort, never a hard dependency of
+    onboarding."""
+    prompt = ("用户被问「我该怎么称呼你」，TA的回复是：\n"
+              f"「{text}」\n\n"
+              "只输出用户希望被称呼的名字或昵称本身——去掉“可以叫我 / 我叫 / call me”"
+              "这类引导语、以及标点和引号。如果实在无法判断名字，只输出 UNKNOWN。")
+    try:
+        out = llm.complete(
+            prompt,
+            system="You extract a person's preferred display name from their reply. "
+                   "Output ONLY the name, no punctuation, quotes, or explanation.",
+            model=model, max_tokens=32, mixture=False)
+    except Exception:
+        log.warning("onboarding: LLM name extraction failed — using fallback", exc_info=True)
+        return ""
+    out = str(out or "").strip().strip("「」“”‘’\"' 　\t。.!！?？,，")
+    if not out or out.upper() == "UNKNOWN" or "\n" in out or len(out) > _MAX_NAME:
+        return ""
+    return out
 
-def handle(account_id: str, text: str, base_settings: Settings) -> str:
+
+# Deterministic offline SAFETY NET (used only when the LLM is unavailable or
+# returns nothing usable): strip common Chinese/English lead-ins, longest-first,
+# then fall back to the raw text. A plain "Spencer" is left untouched.
+_NAME_LEADINS = (
+    "你可以称呼我", "你可以叫我", "可以称呼我", "可以叫我", "我的名字是", "我的名字叫",
+    "请你称呼我", "请你叫我", "请称呼我", "请叫我", "就叫我", "称呼我", "名字叫", "名字是",
+    "我叫做", "我叫", "我就是", "我是", "叫我",
+    "you can just call me", "you can call me", "just call me", "please call me",
+    "call me", "my name is", "my name's", "the name is", "the name's", "i am", "i'm",
+)
+
+
+def _extract_name_fallback(text: str) -> str:
+    """Offline net: strip a natural-language lead-in ('可以叫我' / 'call me' …),
+    else return the raw text (capped)."""
+    raw = str(text or "").strip()
+    candidate, low = raw, raw.lower()
+    for lead in sorted(_NAME_LEADINS, key=len, reverse=True):
+        if low.startswith(lead):
+            candidate = raw[len(lead):]
+            break
+    candidate = candidate.strip(" \t：:，,。.、'\"“”‘’!！?？")
+    return (candidate or raw)[:_MAX_NAME].strip()
+
+
+def _extract_name(text: str, llm=None, model: str | None = None) -> str:
+    """The intended display name from a reply. LLM-first (when an `llm` is
+    provided — production always wires one); on any LLM miss, or when no `llm` is
+    given, the deterministic net (`_extract_name_fallback`) takes over."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if llm is not None:
+        got = _extract_name_llm(raw, llm, model)
+        if got:
+            return got[:_MAX_NAME].strip()
+    return _extract_name_fallback(raw)
+
+
+def handle(account_id: str, text: str, base_settings: Settings, llm=None) -> str:
     """Run one onboarding turn for an unknown `account_id` and return the reply.
     Only reached in multi_tenant, behind a valid bridge token, for an accountId
     with no bound user (identity.onboarding_candidate). Two steps: a valid
     invite code → ask for a name → provision the tenant. Bad codes are bounded
-    (then the account goes quiet); an already-bound account never reaches here."""
+    (then the account goes quiet); an already-bound account never reaches here.
+
+    `llm` (wired by serve) extracts the display name from a conversational reply
+    like "可以叫我spencer"; omitted, name capture uses the deterministic fallback
+    only, so onboarding never hard-depends on the LLM."""
     account_id = str(account_id)
     reg = UserRegistry(base_settings.data_dir)
     if reg.by_channel("weixin", account_id):     # defensive: already onboarded
@@ -286,7 +352,7 @@ def handle(account_id: str, text: str, base_settings: Settings) -> str:
     text = str(text or "").strip()
 
     if session.get("state") == "awaiting_name":
-        name = text[:_MAX_NAME].strip()
+        name = _extract_name(text, llm, base_settings.cheap_model)
         if not name:
             return _ASK_NAME
         try:

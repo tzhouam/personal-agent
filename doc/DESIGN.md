@@ -514,16 +514,20 @@ contract and the agent registers an implementation, wired at a composition root
 src/assistant/
 ├── cli/                argparse entry points  (composition root — imports both)
 ├── init_wizard.py      `init` wizard + `--check` doctor  (composition root)
+├── bench/              PA-Mix evaluation harness  (composition root; CLI-only)
 │
 ├── platform/           SYSTEM — runtime, hosting, tenancy (never imports agent/)
 │   ├── config.py           Pydantic Settings (all .env knobs)
+│   ├── user_config.py      per-user config.env read/write (multi_tenant)
 │   ├── llm.py              Anthropic client (retry, JSON, roles, MoA; injected metrics sink)
-│   ├── serve.py            loopback HTTP daemon (injected ServeServices)
+│   ├── serve.py            loopback HTTP daemon (injected ServeServices) + SessionStore
 │   ├── jobs.py scheduler.py worker.py   durable job queue + in-process pool
 │   ├── dispatch.py         the job-kind contract (agent supplies handlers)
+│   ├── delivery.py         durable outbox ledgers + the D5 failure surface
 │   ├── identity.py registry.py onboarding.py admin.py   multi-tenant tenancy
 │   ├── notify.py search.py vision.py    shared services (WeChat, web search, vision)
-│   └── locks.py timeutil.py tracing.py uidsafe.py       infra leaves
+│   ├── login_qr.py         gateway login QR refresh
+│   └── locks.py timeutil.py tracing.py uidsafe.py secrets.py   infra leaves
 │
 └── agent/              USER — one owner's personal agent (imports platform/)
     ├── orchestrator.py state.py        the 9-phase daily pipeline + resume
@@ -532,7 +536,7 @@ src/assistant/
     ├── events_store.py todo_store.py lessons_store.py workflow_store.py
     ├── task_runner.py routines.py marks.py metrics.py urgency.py writing.py utils.py
     ├── actions/            the typed action registry + handlers
-    ├── chat/               agent, email/wecom channels, session service
+    ├── chat/               agent, email/wecom channels, chat service
     ├── collectors/         github, chrome, gmail
     ├── deliver/            email render/send, wechat announce
     ├── research/           arxiv, feeds, ranking pipeline
@@ -545,3 +549,9 @@ doc/                    this doc + the sub-docs
 skills/                 operational runbooks
 test/                   pytest suite
 ```
+
+`bench/` sits alongside `platform/`/`agent/` under `src/assistant/` and is its
+own composition root: it drives the real action registry through a sandbox
+(`registry._executor_override`) so outward actions are recorded rather than
+performed. Production metrics only count what happened; the bench is the only
+thing that scores whether the agent did the *right* thing.

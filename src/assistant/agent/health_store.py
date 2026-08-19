@@ -153,7 +153,18 @@ class HealthStore:
         """Reverse migration (rollback): merge day-files + `profile.yaml` back
         into a single `health.yaml`. Reconstructs the shared `next_id` above the
         max legacy `hN` AND `nN` suffix so old-code `add()`/`add_need()` can't
-        collide. Returns the record count. Caller quiesces writers + holds lock."""
+        collide. Returns the record count. Caller quiesces writers + holds lock.
+
+        Idempotent: the day dir is the ONLY source for both records and meta
+        (`meta_path` lives inside it), and the first run removes it. A second
+        run therefore used to write an empty `health.yaml` — no records, no body
+        profile, no nutrient needs — over the file the first run had just
+        correctly reconstructed, and COMMIT it. Re-running now reports the
+        existing count and changes nothing."""
+        if not self.dir.exists():   # already single-file — nothing to merge
+            legacy = ((yaml.safe_load(self.legacy_path.read_text()) or {})
+                      if self.legacy_path.exists() else {})
+            return len(legacy.get("records", []))
         recs = []
         if self.dir.exists():
             for p in sorted(self.dir.glob("*.yaml")):

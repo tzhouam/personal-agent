@@ -74,13 +74,18 @@ def _unrelated_reading(settings: Settings, p: dict) -> str:
 
 # ── run control ──────────────────────────────────────────────────────
 
-def _enqueue(settings: Settings, kind: str, args: dict, dedupe_key: str | None = None):
+def _enqueue(settings: Settings, kind: str, args: dict, dedupe_key: str | None = None,
+             dedupe_scope: str = "all"):
     """Enqueue a background job on the durable queue for **this** user (the
     handler already holds the authenticated `settings.uid` — a job never names
-    another user). Returns the job id, or None if a duplicate was deduped. Only
-    used in `multi_tenant`; single_user keeps the legacy detached-CLI path (§6)."""
+    another user). Returns the job id, or None if a duplicate was deduped.
+    `dedupe_scope="active"` dedupes only against in-flight (queued/running) jobs,
+    so a re-runnable kind (e.g. `build_website`) is allowed again once the prior
+    one finished. Only used in `multi_tenant`; single_user keeps the legacy
+    detached-CLI path (§6)."""
     from assistant.platform.jobs import JobQueue
-    return JobQueue(settings.shared_dir).enqueue(settings.uid, kind, args, dedupe_key)
+    return JobQueue(settings.shared_dir).enqueue(settings.uid, kind, args, dedupe_key,
+                                                 dedupe_scope=dedupe_scope)
 
 
 def _trigger_run(settings: Settings, p: dict) -> str:
@@ -170,6 +175,102 @@ def _run_phase(settings: Settings, p: dict) -> str:
             "on the website/next digest, or ask me in a few minutes")
 
 
+# ── self-serve website (connect GitHub → build & publish) ────────────
+
+def _classic_scope_gap(scopes: str) -> str:
+    """For a CLASSIC PAT, GitHub returns granted scopes in `x-oauth-scopes`;
+    return a warning fragment if neither `repo` nor `public_repo` is present
+    (creating/pushing the site needs one). A fine-grained token sends no scopes
+    header (per-repo permissions) — we can't inspect it, so accept it and let any
+    real gap surface at publish time."""
+    if not scopes.strip():
+        return ""
+    granted = {s.strip() for s in scopes.split(",")}
+    return "" if ({"repo", "public_repo"} & granted) else "the 'repo' scope"
+
+
+def _connect_github(settings: Settings, p: dict) -> str:
+    """Validate a GitHub token pasted in chat, store it in this tenant's
+    `config.env`, and report the resolved login. The raw token is scrubbed from
+    the persisted history by the SessionStore masker; this handler never echoes
+    it back."""
+    import httpx
+
+    from assistant.platform.secrets import looks_like_github_token
+    from assistant.platform.user_config import update_user_config
+
+    # The token is bound from the owner's RAW message upstream (chat/agent.py) —
+    # never from the model's echo, which on a retry is the masked `github_pat_…`
+    # read back from history. Validate the shape here too (defense in depth for
+    # the CLI/direct path): a masked/partial token contains the non-ASCII `…` and
+    # must be rejected, not sent into an HTTP header (that crashes on encode).
+    token = looks_like_github_token(p.get("token"))
+    if not token:
+        return ("没收到完整的 token。请把 GitHub token 完整地直接粘贴给我"
+                "（形如 ghp_… 或 github_pat_…，全是字母和数字，别带省略号/空格）。\n"
+                "I didn't get a complete token — paste the full GitHub token "
+                "(all letters/numbers, no '…').")
+    try:
+        resp = httpx.get("https://api.github.com/user",
+                         headers={"Authorization": f"Bearer {token}",
+                                  "Accept": "application/vnd.github+json",
+                                  "X-GitHub-Api-Version": "2022-11-28"},
+                         timeout=20)
+    except Exception as exc:
+        return f"couldn't reach GitHub to validate that token: {exc}"
+    if resp.status_code == 401:
+        return "GitHub rejected that token (401) — check it's valid and not expired."
+    if resp.status_code != 200:
+        return f"GitHub rejected that token ({resp.status_code})."
+    login = resp.json().get("login", "")
+    update_user_config(settings.data_dir, {"GITHUB_TOKEN": token, "GITHUB_USER": login})
+    gap = _classic_scope_gap(resp.headers.get("x-oauth-scopes", ""))
+    tail = (f" ⚠️ that token is missing {gap} — creating/pushing your site may fail; "
+            "a classic PAT with 'repo' scope works best." if gap else "")
+    return (f"connected as {login}. Say “build my site” and I'll publish "
+            f"{login}.github.io from your GitHub activity.{tail}")
+
+
+def _build_personal_website(settings: Settings, p: dict) -> str:
+    """Enqueue the on-demand website build after a synchronous pre-flight:
+    require a connected token, and guard against clobbering an existing
+    non-empty `<login>.github.io` (the reply asks the user to confirm
+    'overwrite'). The build itself runs on the durable per-user queue."""
+    from assistant.agent.tasks.build_website import site_repo_status
+
+    if settings.deployment_mode != "multi_tenant":
+        return "the self-serve website build is a multi_tenant feature."
+    try:
+        st = site_repo_status(settings)
+    except Exception as exc:
+        return f"couldn't check your GitHub site repo: {exc}"
+    state = st.get("state")
+    if state == "missing_token":
+        return "send me your GitHub token first — paste your ghp_… (or github_pat_…) token here."
+    if state == "no_login":
+        return "GitHub isn't fully connected — paste your token again and I'll resolve your login."
+    confirm = str(p.get("confirm", "")).strip().lower() in ("1", "true", "yes", "y", "overwrite")
+    if state == "nonempty" and not confirm:
+        return (f"you already have a site at {st['url']} — reply “overwrite” and I'll "
+                "replace it with a fresh one built from your GitHub activity.")
+    job = _enqueue(settings, "build_website", {"overwrite": confirm},
+                   dedupe_key=f"{settings.uid}:build_website", dedupe_scope="active")
+    # Promise an ATTEMPTED completion message only when an announce channel
+    # actually resolves for this user — self-serve tenants onboard with
+    # ANNOUNCE_* empty, and the old unconditional promise meant a FAILED
+    # build was communicated to no one (audit F22). Announce delivery is
+    # itself best-effort, so even with a channel the wording is "尝试".
+    can_notify = bool(settings.announce_account and settings.announce_to)
+    #            (send_wechat's own "disabled" condition, kept in lockstep)
+    tail = (" — 完成后我会尝试给你发消息。" if can_notify else
+            " (this deployment can't push you a completion message — check "
+            "back in a few minutes).")
+    if job is None:
+        return "a website build is already running for you" + tail
+    return (f"building your site now (enrich + publish, ~a few minutes). "
+            f"It'll be live at {st['url']}" + tail)
+
+
 # ── profile ──────────────────────────────────────────────────────────
 
 def _show_profile(settings: Settings, p: dict) -> str:
@@ -221,6 +322,10 @@ def _set_reminder(settings: Settings, p: dict) -> str:
     """Schedule a one-shot WeChat reminder: parse `when` (+30m/+2h/HH:MM/
     'YYYY-MM-DD HH:MM') and store `message`. Returns the reminder id + fire time,
     or a format hint on an unparseable `when`."""
+    from assistant.agent.chat.service import listener_active
+    if listener_active():
+        return ("此模式（chat-listen）不支持定时提醒/例行任务 — 它没有投递循环，"
+                "请运行 `assistant serve`")
     from assistant.platform.notify import ReminderStore, parse_when
 
     due = parse_when(p.get("when", ""))
@@ -258,6 +363,10 @@ def _create_routine(settings: Settings, p: dict) -> str:
     on a free-text `condition` checked at fire time, optionally bound to a
     saved `workflow` (fired deterministically, no text interpretation).
     Returns the routine id + schedule, or a format hint on invalid input."""
+    from assistant.agent.chat.service import listener_active
+    if listener_active():
+        return ("此模式（chat-listen）不支持定时提醒/例行任务 — 它没有投递循环，"
+                "请运行 `assistant serve`")
     from assistant.agent.routines import RoutineStore
 
     if not str(p.get("task", "")).strip() and not str(p.get("workflow", "")).strip():
@@ -657,15 +766,30 @@ def _execute_task(settings: Settings, p: dict) -> str:
         return "execute_task needs the request"
     if settings.deployment_mode == "multi_tenant":
         _enqueue(settings, "task", {"request": request})
-        return ("task queued — I'll work through it step by step and message "
-                "you the result on WeChat")
+        return ("task queued — I'll work through it step by step"
+                + _push_promise(settings))
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     log_file = (settings.data_dir / "task_run.log").open("a")
     subprocess.Popen([sys.executable, "-m", "assistant.cli", "task", request],
                      stdout=log_file, stderr=subprocess.STDOUT,
                      start_new_session=True)
     return ("task started in the background — I'll work through it step by "
-            "step and message you the result on WeChat")
+            "step" + _push_promise(settings))
+
+
+def _push_promise(settings: Settings) -> str:
+    """Tail describing HOW a background result will reach the owner.
+
+    Mirrors the F22 precedent above: promise a push only when an announce
+    channel actually resolves for this user. Self-serve tenants onboard with
+    ANNOUNCE_* empty, so the old unconditional "message you on WeChat" was
+    false 100% of the time for them — and for a paused task the push carries
+    the only copy of the id `approve_task` needs. Kept in lockstep with
+    `send_wechat`'s own "disabled" condition."""
+    if settings.announce_account and settings.announce_to:
+        return " — I'll message you the result on WeChat"
+    return (" — this deployment can't push you a message, so ask me about it "
+            "here when you want the result")
 
 
 def _dispatch_task_record(settings: Settings, task_id: str) -> bool:
@@ -742,7 +866,8 @@ def _approve_task(settings: Settings, p: dict) -> str:
         else:
             return f"task {task_id} is {status or 'unknown'} — nothing to approve"
     _dispatch_task_record(settings, task_id)
-    return f"task {task_id} approved — executing now, report arrives on WeChat"
+    return (f"task {task_id} approved — executing now"
+            + _push_promise(settings))
 
 
 # ── workflows (owner-authored reusable procedures) ───────────────────
@@ -941,3 +1066,14 @@ def _self_evolve(settings: Settings, p: dict) -> str:
                 f"({len(result['proposed'])} proposal(s) were duplicates or empty)")
     return "learned:\n" + "\n".join(f"[{l['id']}] {l['rule']}"
                                     for l in result["learned"])
+
+
+def _acknowledge_failure(settings: Settings, p: dict) -> str:
+    """Clear one delivery failure from the D5 surface (知道了) — the row is
+    kept for audit, never deleted."""
+    from assistant.platform import delivery
+
+    fid = str(p.get("id", "")).strip()
+    if delivery.acknowledge(settings, fid):
+        return f"cleared delivery failure {fid}"
+    return f"no open delivery failure {fid!r} (already cleared, or wrong id?)"

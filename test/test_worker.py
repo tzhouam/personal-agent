@@ -175,3 +175,96 @@ def test_global_job_dispatches_with_root_settings(q, tmp_path, monkeypatch):
         pool.stop()
     assert seen == [tmp_path]                            # root, not users/<uid>
     assert q.counts() == {"done": 1}
+
+
+# ── terminal-failure visibility ────────────────────────────────────────────
+#
+# jobs.db was write-only from the owner's side: a failed daily run produced no
+# D5 row, no push, and no operator surface — only a journal line. These pin the
+# signal that closes that hole (and pin that a *retryable* failure stays quiet).
+
+
+def _boom(settings, args, token):
+    raise RuntimeError("kaboom")
+
+
+def test_terminal_job_failure_becomes_a_system_note(q, settings):
+    """A per-user job that exhausts its attempts lands on the existing D5
+    surface, so it rides out on the owner's next chat reply."""
+    from assistant.platform.delivery import open_failures
+
+    q.max_attempts = 1                      # one execution, then terminal
+    q.enqueue("alice1", "run", {})
+    pool = WorkerPool(q, settings_for=lambda uid: settings,
+                      dispatch={"run": _boom}, poll_interval=0.02).start()
+    try:
+        _drain(q, pool, 1)
+    finally:
+        pool.stop()
+
+    assert q.counts() == {"failed": 1}
+    failures = open_failures(settings)
+    assert [f for f in failures if "run" in f["summary"]], failures
+    assert failures[0]["id"].startswith("dfs")     # a system note, ackable
+
+
+def test_retryable_failure_does_not_notify(q, settings):
+    """Attempts remaining → the job runs again shortly. One note per retry
+    would train the owner to ignore the failure surface."""
+    from assistant.platform.delivery import open_failures
+
+    q.max_attempts = 3
+    q.enqueue("alice1", "run", {})
+    pool = WorkerPool(q, settings_for=lambda uid: settings,
+                      dispatch={"run": _boom}, poll_interval=0.02).start()
+    try:
+        deadline = time.time() + 2.0
+        while time.time() < deadline and q.counts().get("failed", 0) == 0:
+            time.sleep(0.02)
+    finally:
+        pool.stop()
+
+    # by now it has been requeued at least once; every note so far is terminal-only
+    assert len(open_failures(settings)) <= 1
+
+
+def test_global_job_failure_pushes_to_the_operator(q, settings, monkeypatch):
+    """GLOBAL_UID has no tenant to notify and runs under root Settings, where a
+    system note would land in an outbox nobody reads."""
+    from assistant.platform import notify
+    from assistant.platform.jobs import GLOBAL_UID
+
+    pushed = []
+    monkeypatch.setattr(notify, "send_wechat",
+                        lambda s, text: pushed.append(text) or "sent")
+
+    q.max_attempts = 1
+    q.enqueue(GLOBAL_UID, "global_evolve", {})
+    pool = WorkerPool(q, settings_for=lambda uid: settings,
+                      dispatch={"global_evolve": _boom}, poll_interval=0.02).start()
+    try:
+        _drain(q, pool, 1)
+    finally:
+        pool.stop()
+
+    assert pushed and "global_evolve" in pushed[0]
+
+
+def test_reporting_failure_never_kills_the_pool(q, settings, monkeypatch):
+    """A failure to *report* a failure must not take down the worker."""
+    import assistant.platform.worker as worker_mod
+
+    def exploding_outbox(*a, **kw):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("assistant.platform.delivery.OutboxDB", exploding_outbox)
+    q.max_attempts = 1
+    q.enqueue("alice1", "run", {})
+    pool = WorkerPool(q, settings_for=lambda uid: settings,
+                      dispatch={"run": _boom}, poll_interval=0.02).start()
+    try:
+        _drain(q, pool, 1)
+    finally:
+        pool.stop()
+    assert q.counts() == {"failed": 1}      # still terminal, pool survived
+    assert worker_mod is not None

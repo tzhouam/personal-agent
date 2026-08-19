@@ -54,47 +54,109 @@ class EmailChannel:
 
     def _save_uid(self, uid: int) -> None:
         """Advance the processed-mail watermark to ``uid``, preserving other
-        state keys."""
+        state keys. Atomic tmp+replace (Track D §2: a crash mid-write must
+        not corrupt the rollback shadow old code resumes from)."""
+        import os as _os
+
         state = self._load_state()
         state["email_last_uid"] = uid
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.state_file.write_text(json.dumps(state))
+        tmp = self.state_file.with_name(self.state_file.name + ".tmp")
+        tmp.write_text(json.dumps(state))
+        _os.replace(tmp, self.state_file)
 
-    # ── polling ──────────────────────────────────────────────────────
+    # ── polling (Track D §2: the (UIDVALIDITY, UID) ledger) ──────────
     def poll(self) -> list[dict]:
-        """Fetch new owner messages since the last watermark, newest UIDs only.
-        On first ever run it seeds the watermark to the inbox tail and returns
-        nothing so history is never replayed; otherwise it returns parsed owner
-        messages and advances the watermark past everything seen. The IMAP
-        connection is always logged out, even on error."""
+        """Discover new mail into the outbox ledger and return this cycle's
+        WORK, ascending by UID with head-of-line discipline (the caller stops
+        at the first message that stays nonterminal):
+
+        - `pending` rows come back as parsed message dicts carrying
+          ``uidvalidity``/``uid`` — the caller drives begin_turn →
+          finish_turn → send → ack via this channel's ledger methods.
+        - `processed` rows (a turn already ran; its reply is the outbox)
+          come back as ``{"kind": "email_outbox_retry", …}`` — the caller
+          retries THE SEND ONLY. The old scalar watermark advanced before
+          processing, so one failed turn silently dropped the owner's mail
+          forever (audit F3); the watermark survives only as the rollback
+          shadow, advanced to the settled frontier AFTER ledger commits.
+
+        First ever run imports the legacy watermark (or seeds to the inbox
+        tail) so history is never replayed; a UIDVALIDITY change re-baselines
+        with a visible system note (old-epoch rows are retained)."""
         if not self.enabled:
             return []
-        conn = imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port)
+        from assistant.platform.delivery import OutboxDB
+
+        # timeout is load-bearing, not hygiene: this runs on the daemon's SINGLE
+        # poll thread, which also drives reminders, routines and the daily/weekly
+        # job fan-out for EVERY tenant. imaplib blocks in _get_response() from
+        # construction onward, so a mail host that completes the TLS handshake
+        # and then goes quiet would stall all of that indefinitely — and the
+        # try/except below isolates exceptions, not blocks. Matches the bound
+        # every other network call here already carries (smtplib/httpx: 30s).
+        conn = imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port,
+                                 timeout=30)
         try:
             conn.login(self.settings.smtp_user, self.settings.smtp_password)
             conn.select("INBOX", readonly=True)
+            try:
+                uidvalidity = int((conn.response("UIDVALIDITY")[1] or [None])[0])
+            except (TypeError, ValueError, IndexError):
+                # a transient metadata failure must NEVER look like an epoch
+                # change (that would trigger destructive re-baselining) —
+                # skip this cycle entirely
+                log.warning("email poll: UIDVALIDITY unavailable — skipping cycle")
+                return []
             _, data = conn.uid("search", None, "ALL")
-            uids = [int(u) for u in data[0].split()]
-            if not uids:
-                return []
-            last = self._load_state().get("email_last_uid")
-            if last is None:  # first start: don't replay inbox history
-                self._save_uid(max(uids))
-                return []
-            fresh = [u for u in uids if u > last]
-            if not fresh:
-                return []
-            self._save_uid(max(uids))
-
-            messages = []
-            for uid in fresh:
-                _, fetched = conn.uid("fetch", str(uid), "(RFC822)")
-                if not fetched or not isinstance(fetched[0], tuple):
-                    continue
-                msg = self._parse(fetched[0][1])
-                if msg:
+            uids = sorted(int(u) for u in data[0].split())
+            outbox = OutboxDB(self.settings.data_dir)
+            try:
+                baseline = self._ensure_baseline(outbox, uidvalidity, uids)
+                known = {u for (u,) in outbox.conn.execute(
+                    "SELECT uid FROM email_ledger WHERE uidvalidity=?",
+                    (uidvalidity,))}
+                # Persist EVERY discovered UID before any fetch touches the
+                # network (review round 2): intent lands first, so a fetch
+                # failure or crash can never let the frontier advance past an
+                # unrecorded mail. Content is fetched at PROCESSING time; the
+                # ignored/pending split happens there.
+                for uid in uids:
+                    if uid > baseline and uid not in known:
+                        outbox.email_discover(uidvalidity, uid)
+                messages: list[dict] = []
+                for item in outbox.email_due(uidvalidity):
+                    if item["state"] == "processed":
+                        messages.append({
+                            "channel": self.name, "kind": "email_outbox_retry",
+                            "text": "[outbox retry]", "sender": "",
+                            "subject": "[assistant] chat",
+                            "uidvalidity": item["uidvalidity"],
+                            "uid": item["uid"],
+                            "reply": item["reply"] or "",
+                            "surfaced_ids": item["surfaced_ids"]})
+                        continue
+                    ok, msg = self._fetch_parse(conn, item["uid"])
+                    if not ok:
+                        break   # transient fetch failure: the row STAYS
+                        #         pending; head-of-line stops here this cycle
+                    if msg is None:   # deterministic non-message → settle
+                        outbox.conn.execute(
+                            "UPDATE email_ledger SET state='ignored', updated_at=?"
+                            " WHERE uidvalidity=? AND uid=? AND state='pending'",
+                            (datetime.now(timezone.utc).isoformat(),
+                             uidvalidity, item["uid"]))
+                        outbox.conn.commit()
+                        continue
+                    msg["uidvalidity"] = uidvalidity
+                    msg["uid"] = item["uid"]
                     messages.append(msg)
-            return messages
+                frontier = outbox.email_settled_frontier(uidvalidity, baseline)
+                if frontier > int(self._load_state().get("email_last_uid") or 0):
+                    self._save_uid(frontier)   # rollback shadow, ledger-first
+                return messages
+            finally:
+                outbox.close()
         finally:
             try:
                 conn.logout()
@@ -120,11 +182,119 @@ class EmailChannel:
         text = bare[len(self.settings.chat_subject_prefix):].lstrip(":： ").strip()
         if body:
             text = f"{text}\n{body}".strip()
-        images = _image_attachments(msg, self.settings)
-        if not text and not images:
+        images, rejected = _image_attachments(msg, self.settings)
+        if not text and not images and not rejected:
             return None
         return {"channel": self.name, "text": text[:4000], "subject": subject,
-                "sender": sender, "images": images}
+                "sender": sender, "images": images,
+                "rejected_images": rejected}
+
+    def _fetch_parse(self, conn, uid: int):
+        """Fetch one UID and parse it → (ok, msg). ok=False means a TRANSIENT
+        fetch failure (the row must stay pending — settling it as ignored
+        would turn one IMAP timeout into a silently dropped mail, the exact
+        F3 class this ledger exists to kill); ok=True with msg=None means the
+        mail parsed to not-an-owner-chat-message (genuinely settleable)."""
+        try:
+            _, fetched = conn.uid("fetch", str(uid), "(RFC822)")
+        except Exception:
+            log.exception("email fetch failed for uid %s", uid)
+            return False, None
+        if not fetched or not isinstance(fetched[0], tuple):
+            return False, None   # server said nothing usable: treat transient
+        try:
+            return True, self._parse(fetched[0][1])
+        except OSError:
+            # attachment staging does filesystem I/O — disk-full/permissions
+            # are TRANSIENT environment failures, never grounds to settle
+            log.exception("email parse I/O failed for uid %s", uid)
+            return False, None
+        except Exception:
+            log.exception("email parse crashed for uid %s", uid)
+            return True, None    # deterministic parse crash: settle as ignored
+
+    def _ensure_baseline(self, outbox, uidvalidity: int, uids: list[int]) -> int:
+        """The epoch baseline UID (mail at or below it is settled history).
+        First use imports the legacy watermark paired with the CURRENT
+        UIDVALIDITY; an unnoticed pre-import mailbox reset (highest UID below
+        the watermark) re-baselines to the tail with a visible system note;
+        a later UIDVALIDITY change re-baselines the new epoch (old-epoch
+        rows retained) and says so."""
+        stored_uv = outbox.get_meta("email_uidvalidity")
+        tail = max(uids) if uids else 0
+        if stored_uv is None:
+            legacy = self._load_state().get("email_last_uid")
+            if legacy is None:
+                baseline = tail          # first start: never replay history
+            elif tail < int(legacy):     # mailbox was reset before cutover
+                baseline = tail
+                outbox.add_system_note(
+                    "邮箱状态在切换前被重置过 — 旧水位不可信，已按当前邮箱"
+                    "末尾重新基线（期间的邮件可能被跳过）")
+            else:
+                baseline = int(legacy)
+            outbox.set_meta_many({"email_uidvalidity": str(uidvalidity),
+                                  "email_baseline_uid": str(baseline)})
+            return baseline
+        if int(stored_uv) != uidvalidity:
+            settled = outbox.email_settle_old_epoch_pending(int(stored_uv))
+            outbox.set_meta_many({"email_uidvalidity": str(uidvalidity),
+                                  "email_baseline_uid": str(tail)})
+            outbox.add_system_note(
+                "邮箱 UIDVALIDITY 变化（邮箱被重建/迁移）— 已重新基线"
+                + (f"，{settled} 封未处理邮件已按失败登记" if settled else "")
+                + "；重置窗口内的邮件可能未被处理")
+            return tail
+        return int(outbox.get_meta("email_baseline_uid") or 0)
+
+    # ── ledger transitions the poll-loop caller drives ───────────────
+    def begin_turn(self, message: dict) -> str | None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            return db.email_begin_turn(message["uidvalidity"], message["uid"])
+        finally:
+            db.close()
+
+    def finish_turn(self, message: dict, token: str, reply: str,
+                    surfaced_ids: list[str]) -> bool:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            return db.email_finish_turn(message["uidvalidity"], message["uid"],
+                                        token, reply, surfaced_ids or [])
+        finally:
+            db.close()
+
+    def turn_failed(self, message: dict, token: str, error: str) -> None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            db.email_turn_failed(message["uidvalidity"], message["uid"], token,
+                                 error)
+        finally:
+            db.close()
+
+    def ack(self, message: dict) -> None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            db.email_ack(message["uidvalidity"], message["uid"])
+        finally:
+            db.close()
+
+    def send_failed(self, message: dict, error: str) -> None:
+        from assistant.platform.delivery import OutboxDB
+
+        db = OutboxDB(self.settings.data_dir)
+        try:
+            db.email_send_failed(message["uidvalidity"], message["uid"], error)
+        finally:
+            db.close()
 
     def send(self, text: str, in_reply_to: dict | None = None) -> None:
         """Email ``text`` back to the owner as HTML (each line a paragraph),
@@ -136,27 +306,50 @@ class EmailChannel:
         send_email(self.settings, subject, body)
 
 
-def _image_attachments(msg: email.message.Message, settings: Settings) -> list[str]:
+def _image_attachments(msg: email.message.Message,
+                       settings: Settings) -> tuple[list[str], list[str]]:
     """Save the mail's image attachments into `DATA_DIR/media/` and return
-    their paths (capped at `vision_max_images`), for the vision chain. Only
-    runs for owner mail — `_parse` rejects other senders before we get here."""
+    `(paths, rejection_notes)` for the vision chain. Only runs for owner
+    mail — `_parse` rejects other senders before we get here. Image-typed
+    parts that CANNOT be staged (unsupported suffix, empty, oversized, past
+    the cap) become bracketed notes instead of vanishing — a silently
+    dropped attachment reads to the owner as "the agent ignored my photo"."""
     from assistant.platform.vision import media_type_for
 
     paths: list[str] = []
+    rejected: list[str] = []
+
+    def _clip(name: str) -> str:
+        return name if len(name) <= 80 else name[:77] + "…"
+
     if not msg.is_multipart():
-        return paths
+        return paths, rejected
     media_dir = settings.data_dir / "media"
+    suffix_of = {"image/png": ".png", "image/jpeg": ".jpg",
+                 "image/gif": ".gif", "image/webp": ".webp"}
     for part in msg.walk():
-        if len(paths) >= settings.vision_max_images:
-            break
-        if not part.get_content_type().startswith("image/"):
+        ctype = part.get_content_type()
+        if not ctype.startswith("image/"):
             continue
-        name = part.get_filename() or "attachment.png"
-        suffix = Path(name).suffix.lower() or ".png"
-        if media_type_for(f"x{suffix}") is None:
+        name = part.get_filename() or "attachment"
+        if len(paths) >= settings.vision_max_images:
+            rejected.append(f"[image ignored (max {settings.vision_max_images} "
+                            f"per message): {_clip(Path(name).name)}]")
+            continue
+        # Validate by the declared MIME type, not the filename: an image/tiff
+        # named scan.png must not be staged as a PNG, and an extensionless
+        # JPEG must not default to .png. The suffix is derived FROM the type.
+        suffix = suffix_of.get(ctype)
+        if suffix is None:
+            rejected.append(f"[unsupported image type ({ctype[:40]}): "
+                            f"{_clip(Path(name).name)}]")
             continue
         payload = part.get_payload(decode=True) or b""
-        if not payload or len(payload) > 10 * 1024 * 1024:
+        if not payload:
+            rejected.append(f"[empty image attachment: {_clip(Path(name).name)}]")
+            continue
+        if len(payload) > 10 * 1024 * 1024:
+            rejected.append(f"[image too large to process: {_clip(Path(name).name)}]")
             continue
         media_dir.mkdir(parents=True, exist_ok=True)
         path = media_dir / (
@@ -164,7 +357,7 @@ def _image_attachments(msg: email.message.Message, settings: Settings) -> list[s
             f"{hashlib.sha1(payload).hexdigest()[:8]}{suffix}")
         path.write_bytes(payload)
         paths.append(str(path))
-    return paths
+    return paths, rejected
 
 
 def _text_body(msg: email.message.Message) -> str:

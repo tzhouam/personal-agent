@@ -13,7 +13,7 @@ dependencies = [
     "tenacity>=8.2",
     "qrcode[pil]>=7.4",
     # AES-GCM for the website's encrypted private pages + the WeCom callback
-    # crypto — required in fresh environments and production deployments.
+    # crypto — undeclared until 2026-07-27, which broke a fresh-venv deploy.
     "cryptography>=42",
 ]
 

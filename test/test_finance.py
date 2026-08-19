@@ -231,14 +231,20 @@ def test_similar_warning_on_same_day_amount(settings):
 
 
 def test_category_detail_drilldown(settings):
+    # a FIXED month, not "today's": category_detail is calendar-month scoped,
+    # so seeding "yesterday" breaks on the 1st of every month (found 08-01)
     store = FinanceStore(settings.profile_dir)
-    store.add("expense", 45, category="food", note="美团", time="12:10")
+    store.add("expense", 45, category="food", note="美团", time="12:10",
+              when="2026-06-10")
     store.add("expense", 55, category="food", note="美团", time="12:40",
-              when=_today(-1))
-    store.add("expense", 342, category="food", note="虎东白", time="20:34")
-    store.add("expense", 30, category="food", note="奶茶", time="22:30")
-    store.add("expense", 100, category="shopping", note="MUJI", time="15:00")
-    d = store.category_detail("food")
+              when="2026-06-09")
+    store.add("expense", 342, category="food", note="虎东白", time="20:34",
+              when="2026-06-10")
+    store.add("expense", 30, category="food", note="奶茶", time="22:30",
+              when="2026-06-10")
+    store.add("expense", 100, category="shopping", note="MUJI", time="15:00",
+              when="2026-06-10")
+    d = store.category_detail("food", month="2026-06")
     assert d["count"] == 4 and d["total"] == 472.0 and d["avg"] == 118.0
     assert d["max"]["amount"] == 342.0 and d["max"]["note"] == "虎东白"
     assert d["by_note"]["美团"] == {"total": 100.0, "count": 2}
@@ -350,3 +356,24 @@ def test_reverse_migration_reconstructs_single_file(settings):
     assert len(single["records"]) == 3
     # next_id sits above the max legacy fN suffix so old-code add() won't collide
     assert single["next_id"] == 3
+
+
+def test_reverse_migration_run_twice_is_a_no_op(settings):
+    """A second `migrate-records --to-single-file` must not empty the ledger.
+
+    The day dir is the only source to_single_file reads, and the first run
+    removes it — so the second used to collect zero records, overwrite the
+    reconstructed finance.yaml with `{next_id: 1, records: []}`, and COMMIT it.
+    That hard-deletes every record in a store whose whole discipline is that
+    nothing is ever deleted (wrong entries are voided)."""
+    import yaml
+    p = settings.profile_dir
+    _legacy_finance(p)
+    store = FinanceStore(p)
+    store.add("expense", 10, when="2026-07-19")
+    assert store.to_single_file() == 3
+
+    before = (p / "finance.yaml").read_text()
+    assert FinanceStore(p).to_single_file() == 3      # reports, does not rebuild
+    assert (p / "finance.yaml").read_text() == before  # byte-identical
+    assert len(yaml.safe_load(before)["records"]) == 3

@@ -6,7 +6,11 @@ Loopback-only HTTP (stdlib, zero new deps):
     POST /actions/<name>  {<params>}                                   → {"result"}
     POST /run             {"resume": true?}                            → {"result"}
     GET  /status                                                       → {"status"}
-    GET  /healthz                                                      → {"ok"}
+    GET  /healthz                     → {"ok"}  (pure liveness — restart tooling)
+    GET  /readyz                      → 200/503 {"ready", detail fields} (readiness:
+                                        503 when the poll thread died/stalled, a
+                                        channel that should serve isn't, or the
+                                        health probe failed — point monitors here)
 
 Design invariants (doc/DESIGN_SERVICE_LAYER.md):
 - ``Settings()``/``LLM()`` are rebuilt **per request**, so a `.env` edit (new
@@ -44,10 +48,15 @@ from assistant.platform.identity import Unauthorized, onboarding_candidate, reso
 from assistant.platform.llm import LLM
 from assistant.platform.locks import _path_lock
 from assistant.platform.registry import UserRegistry
+from assistant.platform.secrets import mask_secrets
 
 log = logging.getLogger("assistant")
 
 _MAX_BODY = 12 * 1024 * 1024  # base64 image attachments ride in /chat bodies
+_STALE_FLOOR_SECONDS = 600    # /readyz heartbeat-staleness floor (tests shrink
+#                               it). Deliberately generous: a poll cycle
+#                               legitimately spans multi-minute LLM turns; the
+#                               floor flags a WEDGED loop, not a busy one.
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024  # per-image cap (multi_tenant, §A.4) —
                                     # matches the bridge's encodeBase64Capped
 
@@ -63,12 +72,25 @@ class ServeServices:
     Every callable is agent-owned; the platform only holds the contract."""
 
     run_action: Callable       # (name, params, settings) -> str
-    handle_turn: Callable      # (text, settings, llm, *, history, image_paths) -> turn
+    handle_turn: Callable      # (text, settings, llm, *, history, image_paths,
+    #                              rejected_images) -> turn
     build_channels: Callable   # (settings, *, log_wecom) -> list[channel]
     email_channel: Callable    # (settings) -> channel  (per-user email poller)
     fire_due: Callable         # (settings) -> None     (conditional routines)
     acquire_pid_lock: Callable # (settings) -> bool     (shared inbox pid lock)
     worker_dispatch: dict      # kind -> handler (platform.dispatch.Dispatch)
+    teardown_channels: Callable = staticmethod(lambda: None)
+    #                            () -> None  (daemon-shutdown hook: close any
+    #                            process-lifetime channel state, e.g. the WeCom
+    #                            callback server, without serve importing it)
+    startup_channels: Callable = staticmethod(lambda: None)
+    #                            () -> None  (daemon-startup hook: un-latch
+    #                            channel state a previous shutdown latched, so
+    #                            sequential run_serve lifecycles in one
+    #                            process work)
+    channel_health: Callable = staticmethod(lambda: {})
+    #                            () -> dict  (extra /healthz fields — channel
+    #                            liveness the platform can't see itself)
 
 
 _default_services: "Callable[[], ServeServices] | None" = None
@@ -195,7 +217,8 @@ class SessionStore:
 
     def append(self, session_id: str, owner: str, assistant: str,
                outcome: str | None = None, repaired: bool = False,
-               self_reported: bool = False, prev_verdict: str | None = None) -> None:
+               self_reported: bool = False, prev_verdict: str | None = None,
+               prev_ref: dict | None = None) -> None:
         """Record one owner/assistant exchange (each side capped at 2000 chars)
         into today's shard. Serialized under the per-user write lock; shard
         writes are atomic.
@@ -207,15 +230,28 @@ class SessionStore:
         acknowledgment confirms success, a code-observed fail is never upgraded.
         The previous turn may live in an EARLIER shard, so its shard is rewritten
         in place; a previous turn older than ``retention_days`` is never
-        relabeled."""
+        relabeled. ``prev_ref`` — the turn the caller's history read actually
+        ENDED with — pins the verdict to the turn the model judged; without
+        it, two concurrent turns each labeled whatever happened to be last at
+        append time, systematically mislabeling the wrong turn (audit F13).
+        Conflicts (two turns sharing one predecessor) resolve last-writer-
+        wins: verdicts are noisy labels consumed only in aggregate."""
         self._ensure_migrated()
         with _path_lock(self._lock_file):
             if prev_verdict in ("satisfied", "dissatisfied"):
-                recent = self._within(self._all(session_id), self.retention_days * 24)
-                if recent:
-                    self._finalize_prev(session_id, recent[-1], prev_verdict)
+                target = prev_ref
+                if target is None:
+                    recent = self._within(self._all(session_id),
+                                          self.retention_days * 24)
+                    target = recent[-1] if recent else None
+                if target:  # no-op if the referenced turn was pruned
+                    self._finalize_prev(session_id, target, prev_verdict)
+            # Mask credential-shaped substrings before they touch disk: a pasted
+            # token (e.g. a connect_github turn) must never persist in the
+            # forever-retained history, and an LLM reply must not echo one back.
             turn = {"ts": datetime.now(timezone.utc).isoformat(),
-                    "owner": owner[:2000], "assistant": assistant[:2000]}
+                    "owner": mask_secrets(owner)[:2000],
+                    "assistant": mask_secrets(assistant)[:2000]}
             if outcome:
                 turn["outcome"] = outcome
             if repaired:
@@ -230,20 +266,29 @@ class SessionStore:
             self._enforce_max_turns(session_id)
 
     def _finalize_prev(self, session_id: str, prev: dict, prev_verdict: str) -> None:
-        """Apply the owner's verdict to the previous turn, rewriting the (possibly
-        earlier) shard that holds it — matched by its ts."""
-        was = prev.get("outcome")
-        final = ("fail" if prev_verdict == "dissatisfied"
-                 else ("success" if was != "fail" else was))
+        """Apply the owner's verdict to the previous turn, rewriting the
+        (possibly earlier) shard that holds it — matched by (ts, owner). The
+        transition reads the turn's CURRENT stored outcome, never the
+        caller's (possibly stale) reference: with concurrent verdicts on one
+        predecessor, deciding from a stale snapshot could leave e.g.
+        owner_verdict="satisfied" beside outcome="fail". The FIRST change
+        keeps the original label in outcome_initial; a code-observed fail is
+        never upgraded."""
         shard = self._sdir(session_id) / f"{self._local_day(prev.get('ts', ''))}.json"
         if not shard.exists():
             return
         data = self._read(shard)
         for t in data.get("turns", []):
             if t.get("ts") == prev.get("ts") and t.get("owner") == prev.get("owner"):
+                was = t.get("outcome")
+                initial = t.get("outcome_initial", was)
+                if prev_verdict == "dissatisfied":
+                    final = "fail"
+                else:  # satisfied confirms success unless CODE observed fail
+                    final = initial if initial == "fail" else "success"
                 t["owner_verdict"] = prev_verdict
                 if final and final != was:
-                    if was:
+                    if was and "outcome_initial" not in t:
                         t["outcome_initial"] = was
                     t["outcome"] = final
                 break
@@ -297,7 +342,11 @@ class SessionStore:
         `unknown.json` shards (ts-less legacy turns, treated as expired), and
         now-empty session dirs. Returns counts for the curate log/metrics."""
         self._ensure_migrated()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.retention_days)).date().isoformat()
+        # LOCAL date, matching how shards are named (`_local_day`): a UTC-date
+        # cutoff let a boundary shard survive for the first UTC-offset hours
+        # of every day (found on an Asia/+8 box just after local midnight).
+        cutoff = (datetime.now(timezone.utc).astimezone()
+                  - timedelta(days=self.retention_days)).date().isoformat()
         removed_turns = removed_files = 0
         for sdir in list(self.dir.iterdir()) if self.dir.exists() else []:
             if not sdir.is_dir():
@@ -343,6 +392,18 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_bytes(self, code: int, content_type: str, body: bytes,
+                        extra: dict | None = None) -> None:
+            """Write raw `body` bytes with `content_type` (e.g. the login-QR PNG)
+            plus any `extra` headers."""
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            for key, val in (extra or {}).items():
+                self.send_header(key, val)
             self.end_headers()
             self.wfile.write(body)
 
@@ -407,13 +468,110 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             return data if isinstance(data, dict) else {}
 
         def do_GET(self):
-            """Route GETs: `/healthz` (the only unauthenticated route) and, behind
+            """Route GETs: `/healthz` (always unauthenticated liveness),
+            `/readyz` (readiness — open in single_user, bridge-token-gated
+            fail-closed in multi_tenant) and, behind
             per-user resolution, `/status` → that user's run-status; anything else
             is a 404. In `multi_tenant`, `/status` needs `account_id` in the query
             string (a GET has no body) or it's a 401 — no route bypasses
             `resolve_uid` except `/healthz` (§A.2)."""
             if urlsplit(self.path).path == "/healthz":
+                # LIVENESS, contract unchanged: exactly {"ok": true} while the
+                # daemon is up — the restart tooling (`_healthz`) keys on this,
+                # and a degraded channel must not trigger restart loops. All
+                # degradation detail lives on /readyz.
                 return self._send(200, {"ok": True})
+            if urlsplit(self.path).path == "/readyz":
+                # multi_tenant route invariant: /healthz alone stays
+                # unauthenticated there; /readyz carries channel state, so it
+                # is bridge-token-gated fail-closed in that mode; single_user
+                # (a loopback daemon on the owner's machine) keeps it open.
+                boot = settings_factory()
+                if boot.deployment_mode == "multi_tenant" and (
+                        not boot.serve_token
+                        or self._bearer() != boot.serve_token):
+                    # no configured token in multi_tenant = no access (same
+                    # fail-closed stance as every resolve_uid route)
+                    return self._send(401, {"error": "unauthorized"})
+                # READINESS: 200 only when the proactive machinery is actually
+                # working — 503 when the poll thread died or stalled, a channel
+                # that should be serving isn't, or the health probe itself
+                # failed (fail CLOSED: an unobservable channel is not a ready
+                # channel). The 2026-07 WeCom-rebind outage kept /healthz green
+                # while every poll cycle failed; monitors point HERE.
+                # CONTRACT (stated narrowly): readiness proves the poll
+                # machinery is alive, cycling, and its channels are bound —
+                # per-subsystem failures that cycles deliberately swallow
+                # (one channel's poll error, one message's failure) surface
+                # in logs/metrics, not here; deepening that is follow-up
+                # work, not a hidden promise.
+                try:
+                    fields: dict = {}
+                    probe_ok = True
+                    try:
+                        fields.update(services.channel_health() or {})
+                    except Exception:
+                        probe_ok = False
+                        log.exception("channel health probe failed")
+                    poller = getattr(self.server, "chat_poller", None)
+                    fields["poller_alive"] = poller.is_alive() if poller else None
+                    # Progress, not just liveness: the heartbeat is stamped
+                    # once per COMPLETED cycle (monotonic clock). Standard
+                    # readiness semantics: NOT ready until the first cycle
+                    # completes — a wedged or forever-erroring first cycle is
+                    # 503 from the very first probe, and staleness thereafter
+                    # is measured from the last completed cycle.
+                    hb = getattr(self.server, "poll_heartbeat", None)
+                    stale = None
+                    first_cycle_done = None
+                    if hb is not None:
+                        first_cycle_done = hb.get("ts") is not None
+                        if first_cycle_done:
+                            limit = max(3 * settings_factory().chat_poll_seconds,
+                                        _STALE_FLOOR_SECONDS)
+                            stale = (time.monotonic() - hb["ts"]) > limit
+                    failures = (hb or {}).get("failures", 0)
+                    fields["poll_cycle_stale"] = stale
+                    fields["first_cycle_done"] = first_cycle_done
+                    fields["consecutive_cycle_failures"] = failures
+                    fields["health_probe_ok"] = probe_ok
+                    fields["channel_startup_ok"] = getattr(
+                        self.server, "channel_startup_ok", True)
+                    # Fail CLOSED: no live poll thread (including "none was
+                    # ever attached" — a bare HTTP server is not a ready
+                    # daemon), an incomplete first cycle, a stale cycle,
+                    # ≥3 consecutive failed cycles (the machinery is NOT
+                    # working even if a long-ago cycle once succeeded), a
+                    # failed startup hook, or any channel/probe failure.
+                    degraded = (not probe_ok
+                                or fields["poller_alive"] is not True
+                                or first_cycle_done is not True
+                                or failures >= 3
+                                or stale is True
+                                or any(v is False for k, v in fields.items()
+                                       if k.endswith("_ok")))
+                    return self._send(503 if degraded else 200,
+                                      {"ready": not degraded, **fields})
+                except Exception:
+                    log.exception("readiness probe failed")
+                    return self._send(503, {"ready": False,
+                                            "error": "readiness probe failed"})
+            if urlsplit(self.path).path == "/qr":
+                # Deployment-global operator route (NOT per-user): serve the
+                # current always-on login QR. Gated on the serve token directly —
+                # it must never require a resolved uid. The PNG is held in memory
+                # by the refresher; ?format=json returns just the fallback URL/ts.
+                boot = settings_factory()
+                if boot.serve_token and self._bearer() != boot.serve_token:
+                    return self._send(401, {"error": "unauthorized"})
+                refresher = getattr(self.server, "qr_refresher", None)
+                cur = refresher.current() if refresher is not None else None
+                if not cur:
+                    return self._send(503, {"error": "no login QR available yet"})
+                if self._query().get("format") == "json":
+                    return self._send(200, {"url": cur["url"], "ts": cur["ts"]})
+                return self._send_bytes(200, "image/png", cur["png"],
+                                        extra={"X-QR-URL": cur["url"]})
             try:
                 _uid, settings, _store, _pfx = self._resolve(self._query())
             except Unauthorized as exc:
@@ -451,9 +609,10 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                         from assistant.platform.onboarding import handle
 
                         try:
-                            reply = handle(acct, str(body.get("text", "")), base)
+                            reply = handle(acct, str(body.get("text", "")), base,
+                                           make_llm(base))
                             return self._send(200, {"reply": reply})
-                        except BrokenPipeError:
+                        except (BrokenPipeError, ConnectionResetError):
                             return None
                         except Exception:
                             log.exception("onboarding failed for %s", acct)
@@ -464,21 +623,31 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
             try:
                 if self.path == "/chat":
                     text = str(body.get("text", "")).strip()
-                    images = _staged_images(body, settings)
-                    if not text and not images:
+                    images, img_notes = _staged_images(body, settings)
+                    if not text and not images and not img_notes:
                         return self._send(400, {"error": "missing 'text'"})
                     skey = prefix + str(body.get("session", "") or "default")
+                    history = store.history(skey)
+                    prev_ref = history[-1] if history else None  # the turn the
+                    #             model will judge — captured BEFORE the turn
                     turn = services.handle_turn(text, settings, make_llm(settings),
-                                                history=store.history(skey),
-                                                image_paths=images or None)
+                                                history=history,
+                                                image_paths=images or None,
+                                                rejected_images=img_notes or None)
                     reply = turn.reply
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
                     store.append(skey, noted.strip(), reply, outcome=turn.outcome,
                                  repaired=turn.repaired, self_reported=turn.self_reported,
-                                 prev_verdict=turn.prev_verdict)
+                                 prev_verdict=turn.prev_verdict, prev_ref=prev_ref)
                     try:
-                        return self._send(200, {"reply": reply})
-                    except BrokenPipeError:
+                        self._send(200, {"reply": reply})
+                        from assistant.platform import delivery as _delivery
+
+                        _delivery.mark_surfaced(   # D5 receipt: the reply
+                            settings,              # was transport-accepted
+                            getattr(turn, "surfaced_failure_ids", []) or [])
+                        return
+                    except (BrokenPipeError, ConnectionResetError):
                         # The bridge gave up waiting (its timeout) and already
                         # told the user "still computing" — a finished answer
                         # must never be dropped (2026-07-17 noon incident: an
@@ -520,7 +689,7 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                 log.exception("serve: %s failed", self.path)
                 try:
                     return self._send(500, {"error": str(exc)})
-                except BrokenPipeError:  # caller already gone (bridge timeout)
+                except (BrokenPipeError, ConnectionResetError):  # caller already gone (bridge timeout)
                     return None
 
     server = ThreadingHTTPServer(("127.0.0.1", boot.serve_port if port is None else port),
@@ -529,46 +698,71 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
     return server
 
 
-def _staged_images(body: dict, settings: Settings) -> list[str]:
-    """Image attachments from a /chat body, as verified local paths.
+def _staged_images(body: dict, settings: Settings) -> tuple[list[str], list[str]]:
+    """Image attachments from a /chat body → `(local_paths, rejection_notes)`.
 
-    Two forms, capped at `vision_max_images` total: `image_paths` (existing
-    local files — the OpenClaw bridge passes the gateway's staged media
-    straight through; trusted because the socket is loopback + bearer-token)
-    and `images` (`[{media_type, data(b64)}, …]`), which are decoded into
-    `DATA_DIR/media/` for the vision chain. Bad entries are skipped, never
-    fatal.
+    Two forms: `image_paths` (existing local files — the OpenClaw bridge
+    passes the gateway's staged media straight through; trusted because the
+    socket is loopback + bearer-token) and `images`
+    (`[{media_type, data(b64)}, …]`), decoded into `DATA_DIR/media/`.
+
+    Staging keeps only its TRUST duties (multi-tenant path refusal, byte
+    caps); validity (exists/type/size, the max-images cap) is judged once by
+    the chat arbiter, which receives everything. What staging must drop, it
+    reports as a bracketed note instead of vanishing — a silently discarded
+    attachment reads to the owner as "the agent ignored my photo".
 
     In `multi_tenant`, caller-supplied `image_paths` are **refused** — a
     filesystem path from the network is a traversal / cross-user-reference
     vector (§A.4); such deployments send image **bytes** only. `settings` is
     already the resolved user's, so decoded media lands under that user's
     `data_dir/media/`."""
-    from assistant.platform.vision import media_type_for
-
     out: list[str] = []
+    notes: list[str] = []
+    # Container shapes are enforced FIRST: iterating a non-list (a string
+    # body iterates per character) would amplify one malformed request into
+    # thousands of notes/allocations.
+    supplied_paths = body.get("image_paths") or []
+    if not isinstance(supplied_paths, list):
+        notes.append("[malformed image_paths payload ignored]")
+        supplied_paths = []
+    imgs = body.get("images") or []
+    if not isinstance(imgs, list):
+        notes.append("[malformed images payload ignored]")
+        imgs = []
+    if len(supplied_paths) > 16:
+        notes.append(f"[{len(supplied_paths) - 16} image path(s) ignored]")
+        supplied_paths = supplied_paths[:16]
+    if len(imgs) > 16:
+        notes.append(f"[{len(imgs) - 16} image entr(ies) ignored]")
+        imgs = imgs[:16]
     if settings.deployment_mode != "multi_tenant":
-        for p in body.get("image_paths") or []:
-            path = Path(str(p))
-            if path.is_file() and media_type_for(path):
-                out.append(str(path))
+        out.extend(str(Path(str(p))) for p in supplied_paths)
+    elif supplied_paths:
+        notes.append(f"[{len(supplied_paths)} image path(s) refused — this "
+                     "deployment accepts image bytes only]")
     suffix_of = {"image/png": ".png", "image/jpeg": ".jpg",
                  "image/gif": ".gif", "image/webp": ".webp"}
-    for img in body.get("images") or []:
+    for img in imgs:
         if not isinstance(img, dict):
+            notes.append("[malformed image entry ignored]")
             continue
         suffix = suffix_of.get(str(img.get("media_type", "")))
         if not suffix:
+            notes.append("[unsupported image media type: "
+                         f"{str(img.get('media_type', '?'))[:40]}]")
             continue
         try:
             data = base64.b64decode(str(img.get("data", "")), validate=True)
         except Exception:
+            notes.append("[image with invalid base64 data ignored]")
             continue
         # Defense in depth (§A.4): the bridge already caps per-image size, but in
         # multi_tenant the daemon must not rely on the caller — oversized blobs
         # are dropped here too. single_user keeps today's behavior (bounded by
         # _MAX_BODY anyway).
         if settings.deployment_mode == "multi_tenant" and len(data) > _MAX_IMAGE_BYTES:
+            notes.append("[image too large — over the per-image cap]")
             continue
         media_dir = settings.data_dir / "media"
         media_dir.mkdir(parents=True, exist_ok=True)
@@ -577,7 +771,7 @@ def _staged_images(body: dict, settings: Settings) -> list[str]:
             f"{hashlib.sha1(data).hexdigest()[:8]}{suffix}")
         path.write_bytes(data)
         out.append(str(path))
-    return out[:settings.vision_max_images]
+    return out, notes
 
 
 def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
@@ -609,12 +803,34 @@ def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
         return
     for message in messages:
         log.info("email message for %s from %s: %.80s", user.uid,
-                 message.get("sender", "?"), message["text"])
+                 message.get("sender", "?"), mask_secrets(message["text"]))
+        skey = f"{user.uid}:email:{message.get('sender', '')}"
+        if "uid" in message:   # ledger-tracked (Track D §2)
+            history = store.history(skey)
+            message["_history"] = history
+            prev_ref = history[-1] if history else None
+
+            def _append(m, turn, _s=skey, _p=prev_ref):
+                store.append(_s, m["text"], turn.reply, outcome=turn.outcome,
+                             repaired=turn.repaired,
+                             self_reported=turn.self_reported,
+                             prev_verdict=turn.prev_verdict, prev_ref=_p)
+
+            try:
+                settled = _process_email_ledger(email, message, user,
+                                                make_llm(user), services,
+                                                _append)
+            except Exception:
+                log.exception("email ledger processing failed for %s", user.uid)
+                settled = False
+            if not settled:
+                break   # head-of-line: retry next cycle
+            continue
         try:
-            skey = f"{user.uid}:email:{message.get('sender', '')}"
             turn = services.handle_turn(message["text"], user, make_llm(user),
                                         history=store.history(skey),
-                                        image_paths=message.get("images"))
+                                        image_paths=message.get("images"),
+                                        rejected_images=message.get("rejected_images"))
             reply = turn.reply
             store.append(skey, message["text"], reply, outcome=turn.outcome,
                          repaired=turn.repaired, self_reported=turn.self_reported,
@@ -684,8 +900,52 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
             log.exception("routine firing failed for %s", uid)
 
 
+def _process_email_ledger(channel, message, settings, llm, services,
+                          append_session) -> bool:
+    """Drive one ledger-tracked email message through its transitions (Track
+    D §2). Returns True when the row settled (continue to younger mail) —
+    False means it stayed nonterminal (head-of-line: stop this channel's
+    batch, retry next cycle)."""
+    from assistant.platform import delivery
+
+    if message.get("kind") == "email_outbox_retry":
+        try:   # the turn already ran once: retry THE SEND ONLY
+            channel.send(message["reply"], in_reply_to=message)
+        except Exception as exc:
+            channel.send_failed(message, str(exc))
+            return False
+        channel.ack(message)
+        delivery.mark_surfaced(settings, message.get("surfaced_ids") or [])
+        return True
+    token = channel.begin_turn(message)
+    if token is None:
+        return True   # raced/settled elsewhere
+    try:
+        turn = services.handle_turn(message["text"], settings, llm,
+                                    history=message.pop("_history", None),
+                                    image_paths=message.get("images"),
+                                    rejected_images=message.get("rejected_images"))
+    except Exception as exc:
+        log.exception("email turn failed")
+        channel.turn_failed(message, token, str(exc))
+        return False
+    ids = getattr(turn, "surfaced_failure_ids", []) or []
+    if not channel.finish_turn(message, token, turn.reply, ids):
+        return True   # fenced out (row settled elsewhere): never double-send
+    append_session(message, turn)
+    try:
+        channel.send(turn.reply, in_reply_to=message)
+    except Exception as exc:
+        channel.send_failed(message, str(exc))
+        return False
+    channel.ack(message)
+    delivery.mark_surfaced(settings, ids)
+    return True
+
+
 def _chat_poll_loop(settings_factory, sessions: SessionStore,
-                    stop: threading.Event, llm_factory=None, services=None) -> None:
+                    stop: threading.Event, llm_factory=None, services=None,
+                    heartbeat: dict | None = None) -> None:
     """Email (+WeCom) chat polling, absorbed from the standalone listener.
     Everything is rebuilt each cycle so `.env` edits apply within one poll.
 
@@ -706,6 +966,9 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                              "routines/daily-runs for active users")
                     first = False
                 _tick_tenants(settings, llm_factory=make_llm, services=services)
+                if heartbeat is not None:
+                    heartbeat["ts"] = time.monotonic()
+                    heartbeat["failures"] = 0
                 stop.wait(settings.chat_poll_seconds)
                 continue
             channels = services.build_channels(settings, log_wecom=first)
@@ -717,20 +980,59 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                     log.warning("%s poll failed: %s", channel.name, exc)
                     continue
                 for message in messages:
+                    if message.get("kind") == "unsupported_media":
+                        # deterministic fixed reply, no LLM (audit F8) —
+                        # targeted at the sender via in_reply_to, never @all
+                        try:
+                            channel.send("这个渠道暂时收不到图片，请用微信或"
+                                         "邮件发图片 🙏", in_reply_to=message)
+                        except Exception:
+                            log.exception("unsupported-media ack failed")
+                        continue
                     log.info("%s message from %s: %.80s", channel.name,
-                             message.get("sender", "?"), message["text"])
+                             message.get("sender", "?"),
+                             mask_secrets(message["text"]))
+                    session = f"{channel.name}:{message.get('sender', '')}"
+                    if "uid" in message:   # ledger-tracked email (Track D §2)
+                        history = sessions.history(session)
+                        message["_history"] = history
+                        prev_ref = history[-1] if history else None
+
+                        def _append(m, turn, _s=session, _p=prev_ref):
+                            sessions.append(_s, m["text"], turn.reply,
+                                            outcome=turn.outcome,
+                                            repaired=turn.repaired,
+                                            self_reported=turn.self_reported,
+                                            prev_verdict=turn.prev_verdict,
+                                            prev_ref=_p)
+
+                        try:
+                            settled = _process_email_ledger(
+                                channel, message, settings,
+                                make_llm(settings), services, _append)
+                        except Exception:
+                            log.exception("email ledger processing failed")
+                            settled = False
+                        if not settled:
+                            break   # head-of-line: retry next cycle
+                        continue
                     try:
-                        session = f"{channel.name}:{message.get('sender', '')}"
-                        turn = services.handle_turn(message["text"], settings,
-                                                    make_llm(settings),
-                                                    history=sessions.history(session),
-                                                    image_paths=message.get("images"))
+                        turn = services.handle_turn(
+                            message["text"], settings, make_llm(settings),
+                            history=sessions.history(session),
+                            image_paths=message.get("images"),
+                            rejected_images=message.get("rejected_images"))
                         reply = turn.reply
                         sessions.append(session, message["text"], reply,
                                         outcome=turn.outcome, repaired=turn.repaired,
                                         self_reported=turn.self_reported,
                                         prev_verdict=turn.prev_verdict)
                         channel.send(reply, in_reply_to=message)
+                        from assistant.platform import delivery as _delivery
+
+                        _delivery.mark_surfaced(
+                            settings,
+                            getattr(turn, "surfaced_failure_ids", []) or [])
                         log.info("replied via %s (%d chars)", channel.name, len(reply))
                     except Exception:
                         log.exception("failed to answer %s message", channel.name)
@@ -745,10 +1047,50 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                 services.fire_due(settings)
             except Exception:
                 log.exception("routine firing failed")
+            if heartbeat is not None:  # this cycle ran to completion
+                heartbeat["ts"] = time.monotonic()
+                heartbeat["failures"] = 0
             stop.wait(settings.chat_poll_seconds)
         except Exception:  # the poll thread must never die
             log.exception("chat poll cycle failed")
+            if heartbeat is not None:
+                heartbeat["failures"] = heartbeat.get("failures", 0) + 1
             stop.wait(60)
+
+
+class _MaskingFilter(logging.Filter):
+    """Scrub credential-shaped substrings out of every record the daemon logs.
+
+    `secrets.py` names two sinks a pasted token could persist to — the chat
+    history writer and the trace writer — and concludes "nothing on disk retains
+    it". The daemon's own log was a third: the poll loops logged raw owner text,
+    so a token pasted over email landed verbatim in a never-rotated, 0644
+    `serve.log` (the file the WeChat runbook tells operators to attach), while
+    the masked SessionStore copy made it look like it was never written down.
+
+    Masking at the call sites fixes today's leak; this filter is what stops the
+    next `log.info` of owner text from reintroducing it. Applied to the root
+    logger's handlers, so it covers every module including third-party ones."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = mask_secrets(record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: mask_secrets(v) if isinstance(v, str) else v
+                               for k, v in record.args.items()}
+            else:
+                record.args = tuple(mask_secrets(a) if isinstance(a, str) else a
+                                    for a in record.args)
+        return True
+
+
+def _install_masking_filter() -> None:
+    """Attach `_MaskingFilter` to every root handler exactly once (idempotent —
+    `basicConfig` is a no-op on re-entry but this may be called again)."""
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, _MaskingFilter) for f in handler.filters):
+            handler.addFilter(_MaskingFilter())
 
 
 def run_serve(settings: Settings, services=None) -> int:
@@ -761,6 +1103,7 @@ def run_serve(settings: Settings, services=None) -> int:
     `services` (a `ServeServices`) supplies the agent behaviors and the worker
     dispatch; omitted, it comes from the registered default (`agent.app`)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _install_masking_filter()
     services = _resolve_services(services)
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -768,46 +1111,96 @@ def run_serve(settings: Settings, services=None) -> int:
         return 1
 
     server = make_server(services=services)
-    stop = threading.Event()
-    poller = threading.Thread(
-        target=_chat_poll_loop,
-        args=(Settings, server.sessions, stop),
-        kwargs={"services": services},
-        name="chat-poll", daemon=True)
-    poller.start()
 
-    # multi_tenant background jobs run on the durable in-process queue instead of
-    # detached CLIs (§6); the pool recovers orphaned jobs on start. single_user
-    # keeps the legacy detached-Popen path, so no pool is needed there. The
-    # kind→handler dispatch comes from the injected services (agent-owned) so
-    # this platform module never imports agent code.
+    # Everything after the listener exists runs under one try/finally: a
+    # failure while starting the QR refresher, poll thread, or worker pool
+    # must not leak the loopback listener, threads, or the callback server.
+    qr = None
     pool = None
-    if settings.deployment_mode == "multi_tenant":
-        from assistant.platform.jobs import JobQueue
-        from assistant.platform.worker import WorkerPool
+    poller = None
+    stop = threading.Event()
+    try:
+        # Always-on login-QR refresher (deployment-global): keep a freshly-
+        # rendered WeChat login QR available at loopback GET /qr so an invitee
+        # can scan any time. Off when login_qr_refresh is disabled.
+        if settings.login_qr_refresh:
+            from assistant.platform.login_qr import LoginQRRefresher
 
-        pool = WorkerPool(JobQueue(settings.shared_dir),
-                          dispatch=services.worker_dispatch,
-                          max_workers=settings.job_workers).start()
-        log.info("serve: job worker pool started (%d workers)", settings.job_workers)
+            qr = LoginQRRefresher(settings).start()
+            server.qr_refresher = qr
+            log.info("serve: login-QR refresher started (always-on) → GET /qr")
 
-    def _shutdown(signum, frame):
-        """Signal handler: log the signal and trigger a graceful shutdown."""
-        log.info("serve: signal %d — shutting down", signum)
+        try:
+            services.startup_channels()  # un-latch state a prior shutdown closed
+        except Exception:
+            log.exception("serve: channel startup hook failed")
+            server.channel_startup_ok = False   # /readyz degrades
+        heartbeat = {"ts": None, "failures": 0}   # per-COMPLETED-cycle stamp
+        #                                           + consecutive-failure count
+        poller = threading.Thread(
+            target=_chat_poll_loop,
+            args=(Settings, server.sessions, stop),
+            kwargs={"services": services, "heartbeat": heartbeat},
+            name="chat-poll", daemon=True)
+        poller.start()
+        server.chat_poller = poller       # /readyz reports liveness…
+        server.poll_heartbeat = heartbeat  # …and progress
+
+        # multi_tenant background jobs run on the durable in-process queue
+        # instead of detached CLIs (§6); the pool recovers orphaned jobs on
+        # start. single_user keeps the legacy detached-Popen path, so no pool
+        # is needed there. The kind→handler dispatch comes from the injected
+        # services (agent-owned) so this platform module never imports agent
+        # code.
+        if settings.deployment_mode == "multi_tenant":
+            from assistant.platform.jobs import JobQueue
+            from assistant.platform.worker import WorkerPool
+
+            pool = WorkerPool(JobQueue(settings.shared_dir),
+                              dispatch=services.worker_dispatch,
+                              max_workers=settings.job_workers)
+            pool.start()   # instance retained first: a partial start is still
+            #                stoppable by the cleanup path
+            log.info("serve: job worker pool started (%d workers)",
+                     settings.job_workers)
+
+        def _shutdown(signum, frame):
+            """Signal handler: log the signal and trigger a graceful shutdown."""
+            log.info("serve: signal %d — shutting down", signum)
+            stop.set()
+            if qr is not None:
+                qr.stop()
+            if pool is not None:
+                pool.stop()
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
+
+        log.info("serve: listening on 127.0.0.1:%d (chat poll every %ds)",
+                 server.server_address[1], settings.chat_poll_seconds)
+        server.serve_forever()
+    finally:
+        # Every cleanup step is independently guarded: one failing step must
+        # never skip the rest (a raising qr.stop() abandoning the listener
+        # socket would be its own leak bug).
         stop.set()
-        if pool is not None:
-            pool.stop()
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    log.info("serve: listening on 127.0.0.1:%d (chat poll every %ds)",
-             server.server_address[1], settings.chat_poll_seconds)
-    server.serve_forever()
-    stop.set()
-    if pool is not None:
-        pool.stop()
+        for label, action in (
+                ("qr refresher stop", lambda: qr.stop() if qr else None),
+                ("worker pool stop", lambda: pool.stop() if pool else None),
+                # Bounded, best-effort orderly stop: join the poller so a
+                # normal cycle can't race the channel teardown; join only a
+                # STARTED thread (join on an unstarted one raises). A poller
+                # stuck in a slow LLM call may outlive the timeout — the
+                # teardown latch makes any late re-acquire a no-op.
+                ("poller join", lambda: poller.join(timeout=10)
+                 if poller is not None and poller.ident is not None else None),
+                ("channel teardown", services.teardown_channels),
+                ("listener close", server.server_close)):
+            try:
+                action()
+            except Exception:
+                log.exception("serve: cleanup step failed: %s", label)
     return 0
 
 
@@ -857,6 +1250,7 @@ def reboot(settings: Settings, delay: float = 0.0, timeout: float = 20.0,
     start, and the per-job side-effect guards (delivery ledger) keep the replay
     from double-sending (§6)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _install_masking_filter()
     if delay > 0:
         time.sleep(delay)
     pid_file = settings.data_dir / "chat_listener.pid"

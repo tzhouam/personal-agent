@@ -1,0 +1,78 @@
+{
+  "manifest": {
+    "track": "golden-dedup",
+    "layer": "A",
+    "label": "golden",
+    "scorer": "end-state on scratch stores after ALL turns: expected record counts per store (the never-twice guarantees)",
+    "clock": "scenarios are same-day by construction (all turns run in one process tick); TZ is pinned by the runner; identity is driven by STATED times, not the wall clock, so scoring is clock-independent"
+  },
+  "scenarios": [
+    {
+      "id": "gd01",
+      "note": "same meal, reworded, same stated time → one record",
+      "turns": [
+        "记一下，12点半吃了牛肉面",
+        "补充一下：中午12:30那顿是牛肉面，别漏了"
+      ],
+      "expect": {
+        "health_meals": 1
+      }
+    },
+    {
+      "id": "gd02",
+      "note": "same amount, same day, different stated times → two records",
+      "turns": [
+        "下午4点花了45买咖啡",
+        "中午12点吃饭花了45"
+      ],
+      "expect": {
+        "finance_active": 2
+      }
+    },
+    {
+      "id": "gd03",
+      "note": "duplicate bill (kind+amount+date+stated time) reworded → one record",
+      "turns": [
+        "今天18:40在面点王花了68",
+        "晚上6点40那笔68块的餐饮再记一下"
+      ],
+      "expect": {
+        "finance_active": 1
+      }
+    },
+    {
+      "id": "gd04",
+      "note": "same weight twice in one day, timeless → one record",
+      "turns": [
+        "今天体重71.5公斤",
+        "对了，早上称是71.5kg"
+      ],
+      "expect": {
+        "health_weights": 1
+      }
+    },
+    {
+      "id": "gd05",
+      "note": "two different meals same day → two records",
+      "turns": [
+        "中午12点吃了牛肉面",
+        "晚上7点吃了饺子"
+      ],
+      "expect": {
+        "health_meals": 2
+      }
+    },
+    {
+      "id": "gd06",
+      "note": "voided expense stays (never-delete) but is excluded from totals",
+      "turns": [
+        "今天13:00午饭花了45",
+        "刚那笔45记错了，作废"
+      ],
+      "expect": {
+        "finance_active": 0,
+        "finance_voided": 1
+      }
+    }
+  ]
+}

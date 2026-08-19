@@ -14,6 +14,16 @@ mkdir -p "$HOME/.personal-agent"
 } >>"$LOG" 2>&1
 rc=$?
 
+# Self-evolution: distill behavior lessons from the week. This sat BELOW the
+# `exit $rc` below and so never ran — the single-user cron has had no weekly
+# lessons pass at all. It runs regardless of the consolidate outcome (an
+# independent pass over chat/task history) and never changes rc. Output goes
+# to the log because stdout is reserved for the one-line WeChat announce.
+{
+  echo "=== $(date -Is) weekly self-evolution (cron) ==="
+  "$ASSISTANT" evolve
+} >>"$LOG" 2>&1 || true
+
 if [ $rc -eq 0 ]; then
   summary=$(tail -5 "$LOG" | grep -Eo '[0-9]+ ops applied[^"]*' | tail -1)
   echo "Weekly profile consolidation done${summary:+ ($summary)}. Diff in your email."
@@ -21,6 +31,3 @@ else
   echo "Weekly consolidation failed (rc=$rc) — check ~/.personal-agent/consolidate.log"
 fi
 exit $rc
-
-# self-evolution: distill behavior lessons from the week
-"$ASSISTANT" evolve || true

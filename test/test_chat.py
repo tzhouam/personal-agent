@@ -311,3 +311,30 @@ def test_handle_turn_hard_llm_failure_is_fail(settings):
 
     turn = handle_turn("你好", settings, DeadLLM())
     assert turn.outcome == "fail" and "稍后再试" in turn.reply
+
+
+def test_context_states_undelivered_reminders(settings):
+    """The failing channel cannot carry its own failure notice, so the context
+    must. Without it the model assured the owner a reminder had been pushed
+    while it had not (2026-07-24 — a missed interview)."""
+    from datetime import datetime
+
+    from assistant.agent.chat.agent import build_context
+    from assistant.platform.notify import ReminderStore, _MAX_DELIVERY_ATTEMPTS
+
+    store = ReminderStore(settings.data_dir)
+    store.add("11:00 MiniMax 面试", datetime(2026, 7, 24, 10, 30))
+    for _ in range(_MAX_DELIVERY_ATTEMPTS):
+        store.deliver_due(settings, now=datetime(2026, 7, 24, 10, 31),
+                          send=lambda s, t: "failed: No such file")
+
+    ctx = build_context(settings)
+    assert "## Delivery failures" in ctx
+    assert "11:00 MiniMax 面试" in ctx
+    assert "dfremm1" in ctx        # D5 typed id the ack action accepts
+
+
+def test_context_omits_delivery_failures_when_all_is_well(settings):
+    from assistant.agent.chat.agent import build_context
+
+    assert "## Delivery failures" not in build_context(settings)

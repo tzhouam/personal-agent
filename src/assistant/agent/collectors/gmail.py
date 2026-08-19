@@ -47,7 +47,11 @@ class GmailCollector:
         """
         if not self.enabled:
             return []
-        conn = imaplib.IMAP4_SSL(self.host, self.port)
+        # Bounded like every other network call in the pipeline: an unbounded
+        # IMAP read here stalls the collect phase (and, under the job worker, a
+        # pool slot) with no way to interrupt it — cancel_check only runs at
+        # phase boundaries.
+        conn = imaplib.IMAP4_SSL(self.host, self.port, timeout=30)
         try:
             conn.login(self.user, self.password)
             conn.select("INBOX", readonly=True)

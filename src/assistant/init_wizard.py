@@ -119,8 +119,14 @@ def probe_website(s: Settings):
             return FAIL, f"{s.website_repo}: HTTP {r.status_code}"
         if not r.json().get("permissions", {}).get("push"):
             return FAIL, f"no push access to {s.website_repo}"
-        note = "" if s.website_password else " (WEBSITE_PASSWORD unset — todos/reading pages will be public)"
-        return (WARN if note else OK), f"push access ok{note}"
+        if not s.website_password:
+            # Was a WARN saying the pages "will be public" — they no longer are:
+            # render_site refuses to emit them and sync deletes any published
+            # copy. FAIL because the private surface is entirely missing until
+            # a password is set, which is a configuration error, not a nuance.
+            return FAIL, ("push access ok, but WEBSITE_PASSWORD unset — "
+                          "todos/reading/routines pages will NOT publish")
+        return OK, "push access ok"
     except Exception as exc:
         return FAIL, str(exc)[:120]
 

@@ -92,3 +92,15 @@ def test_single_user_inheritance_unchanged(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "owner-secret")
     s = Settings.for_user()
     assert s.github_token == "owner-secret"   # today's behavior, byte-identical
+
+
+def test_repo_root_resolves_to_the_real_repo():
+    """`_REPO_ROOT` is derived by counting parents, so any future package move
+    silently breaks it — as the phase-4 move did, leaving `Settings.for_user()`
+    reading no repo .env at all (dead WeChat sends, empty research feeds for
+    three days). Anchor the depth on a file that only the repo root has."""
+    from assistant.platform.config import _REPO_ROOT
+
+    assert (_REPO_ROOT / "pyproject.toml").exists(), _REPO_ROOT
+    assert (_REPO_ROOT / "src" / "assistant").is_dir(), _REPO_ROOT
+    assert Settings(_env_file=None).sources_file.exists()

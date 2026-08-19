@@ -52,3 +52,43 @@ def test_send_wechat_disabled_without_target(settings):
     from assistant.platform.notify import send_wechat
 
     assert send_wechat(settings, "hi").startswith("disabled")
+
+
+def test_parse_when_accepts_iso8601():
+    """The chat model emits ISO-8601 for an absolute time; rejecting it cost a
+    repair round on every such reminder (2026-07-24)."""
+    assert parse_when("2026-07-24T20:55:00", NOW) == datetime(2026, 7, 24, 20, 55)
+    assert parse_when("2026-07-24", NOW) == datetime(2026, 7, 24, 0, 0)
+    # offset-aware → converted to system local, stored naive (reminders fire
+    # against the system clock)
+    aware = parse_when("2026-07-24T20:55:00+08:00", NOW)
+    assert aware is not None and aware.tzinfo is None
+
+
+def test_reminder_delivery_gives_up_after_max_attempts(settings):
+    """An always-failing send must dead-letter instead of retrying forever: one
+    broken send path produced 752 identical failures in a day while the owner
+    saw nothing (2026-07-24)."""
+    from assistant.platform.notify import _MAX_DELIVERY_ATTEMPTS
+
+    store = ReminderStore(settings.data_dir)
+    store.add("interview at 11:00", datetime(2026, 7, 9, 21, 0))
+    for _ in range(_MAX_DELIVERY_ATTEMPTS):
+        assert store.deliver_due(settings, now=NOW,
+                                 send=lambda s, t: "failed: no such file") == []
+    assert store.pending() == []                      # no longer retried
+    failed = store.failed()
+    assert [r["id"] for r in failed] == ["m1"]
+    assert failed[0]["attempts"] == _MAX_DELIVERY_ATTEMPTS
+    assert "no such file" in failed[0]["last_error"]
+
+
+def test_reminder_recovers_before_giving_up(settings):
+    """A transient failure still retries — give-up is only at the cap."""
+    store = ReminderStore(settings.data_dir)
+    store.add("ping", datetime(2026, 7, 9, 21, 0))
+    assert store.deliver_due(settings, now=NOW, send=lambda s, t: "failed: blip") == []
+    assert [r["id"] for r in store.pending()] == ["m1"]
+    delivered = store.deliver_due(settings, now=NOW, send=lambda s, t: "sent")
+    assert [r["id"] for r in delivered] == ["m1"]
+    assert store.failed() == [] and store.pending() == []

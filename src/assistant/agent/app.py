@@ -23,9 +23,11 @@ def _run_action(name, params, settings):
     return run_action(name, params, settings)
 
 
-def _handle_turn(text, settings, llm, *, history=None, image_paths=None):
+def _handle_turn(text, settings, llm, *, history=None, image_paths=None,
+                 rejected_images=None):
     from assistant.agent.chat.agent import handle_turn
-    return handle_turn(text, settings, llm, history=history, image_paths=image_paths)
+    return handle_turn(text, settings, llm, history=history,
+                       image_paths=image_paths, rejected_images=rejected_images)
 
 
 def _build_channels(settings, *, log_wecom=False):
@@ -49,6 +51,21 @@ def _acquire_pid_lock(settings):
     return acquire(settings)
 
 
+def _teardown_channels():
+    from assistant.agent.chat.wecom import teardown_callback_server
+    teardown_callback_server()
+
+
+def _startup_channels():
+    from assistant.agent.chat.wecom import reopen_callback_server
+    reopen_callback_server()
+
+
+def _channel_health():
+    from assistant.agent.chat.wecom import callback_health
+    return callback_health()
+
+
 def build_services() -> ServeServices:
     """Assemble the agent behaviors + job dispatch the serve daemon needs."""
     return ServeServices(
@@ -59,6 +76,9 @@ def build_services() -> ServeServices:
         fire_due=_fire_due,
         acquire_pid_lock=_acquire_pid_lock,
         worker_dispatch=build_dispatch(),
+        teardown_channels=_teardown_channels,
+        startup_channels=_startup_channels,
+        channel_health=_channel_health,
     )
 
 

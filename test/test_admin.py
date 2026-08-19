@@ -24,6 +24,15 @@ def test_add_bind_list(root):
     assert "alice1" in listed and "active" in listed and "weixin:wx-A" in listed
 
 
+def test_set_display_renames(root):
+    settings, data_dir = root
+    admin.add_user(settings, "alice1", "可以叫我 Alice")
+    admin.set_display(settings, "alice1", "Alice")
+    assert UserRegistry(data_dir).get("alice1")["display"] == "Alice"
+    with pytest.raises(ValueError):
+        admin.set_display(settings, "alice1", "   ")     # empty rejected
+
+
 def test_add_user_requires_multi_tenant(tmp_path, monkeypatch):
     monkeypatch.setenv("DEPLOYMENT_MODE", "single_user")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -153,3 +162,19 @@ def test_shared_lessons_require_multi_tenant(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     with pytest.raises(ValueError):
         admin.list_shared_lessons(Settings(_env_file=None))
+
+
+def test_legacy_scheduleless_records_count_as_daily(settings, tmp_path):
+    """F20a: a record with NO schedule field predates the opt-in change (its
+    user was being run daily) — it must stay in the fan-out, and the listing
+    must not display it as on_demand."""
+    from assistant.platform.registry import UserRegistry
+
+    reg = UserRegistry(settings.data_dir)
+    reg.add_user("newbie")                      # new users: explicit on_demand
+    data = reg._load()
+    data["users"].append({"uid": "veteran", "status": "active",
+                          "channels": []})     # legacy shape: no schedule key
+    reg._save(data)
+    assert "veteran" in reg.scheduled()
+    assert "newbie" not in reg.scheduled()

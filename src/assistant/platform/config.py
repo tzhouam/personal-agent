@@ -12,7 +12,7 @@ from typing import Annotated
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]  # src/assistant/config.py → repo root
+_REPO_ROOT = Path(__file__).resolve().parents[3]  # src/assistant/platform/config.py → repo root
 
 # The implicit owner in single-user mode. In multi_tenant there is no default —
 # a missing uid is rejected (doc/DESIGN_MULTI_USER.md §6.1).
@@ -177,6 +177,16 @@ class Settings(BaseSettings):
     # local processes out.
     serve_port: int = 8377
     serve_token: str = ""
+    # Always-on WeChat login-QR refresher (platform.login_qr): the daemon keeps a
+    # freshly-rendered login QR available at loopback GET /qr so an invitee can
+    # scan any time (openclaw's own login gives up after 3 refreshes). Deployment-
+    # global infra, NOT a per-user field. ⚠️ Exercises the unverified A.8 path
+    # continuously against the live account — the QR is a join credential, so the
+    # /qr route is serve-token-gated and the image is NEVER written to a repo.
+    login_qr_refresh: bool = True
+    bench_enabled: bool = False    # PA-Mix harness (doc/BENCHMARKS.md) —
+    #                                CLI-only, off by default; nothing in the
+    #                                daemon or pipeline ever reads this
     job_workers: int = 2            # in-process worker threads draining the durable
                                     # job queue in multi_tenant (§6)
     moa_chat_proposer_timeout_s: int = 60   # chat-role MoA: abandon a proposer
@@ -204,6 +214,9 @@ class Settings(BaseSettings):
     # Deliver-phase WeChat announce (best-effort, OFF by default — enable only
     # after removing --announce from the OpenClaw cron job, or 07:00 pings twice)
     wechat_announce: bool = False
+    notify_max_bytes: int = 4000   # per-part UTF-8 budget for openclaw sends
+    #                                (conservative; verify against the
+    #                                gateway's real limit before raising)
     announce_channel: str = "openclaw-weixin"
     announce_account: str = ""     # gateway account id (…-im-bot)
     announce_to: str = ""          # owner's WeChat im id

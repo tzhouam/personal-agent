@@ -26,17 +26,24 @@ _RETRYABLE = (
 _CHEAP_ROLES = frozenset({"cheap", "bulk", "research", "score"})
 
 
-# Injected MoA metrics sink `(settings, run_id, step, values) -> None`. The
-# durable events.db is agent-owned, so llm.py never imports it — the agent
-# registers a default here (`agent.observability`) and any LLM without an
-# explicit `metrics_sink` uses it. None → MoA metrics are skipped.
+# Injected metrics sink `(settings, run_id, step, values) -> None`. The durable
+# events.db is agent-owned, so llm.py never imports it — the agent registers a
+# default here (`agent.observability`) and any LLM without an explicit
+# `metrics_sink` uses it. None → metrics are skipped. This module holds the
+# registration for the whole platform layer: `notify.py` reads it too, so a
+# reminder give-up lands in the same events.db as the MoA rows.
 _default_metrics_sink = None
 
 
 def set_default_metrics_sink(sink) -> None:
-    """Register the agent-side MoA metrics sink. Keeps llm.py agent-free."""
+    """Register the agent-side metrics sink. Keeps llm.py agent-free."""
     global _default_metrics_sink
     _default_metrics_sink = sink
+
+
+def get_default_metrics_sink():
+    """The registered sink, or None when no composition root wired one up."""
+    return _default_metrics_sink
 
 
 # ── provider circuit breaker (module-level: LLM is rebuilt per request) ──────

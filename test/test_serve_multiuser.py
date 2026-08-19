@@ -21,6 +21,9 @@ class FakeLLM:
         self.prompts.append(prompt)
         return self.result
 
+    def complete(self, prompt, system=None, **kw):
+        return ""   # onboarding name-extraction: empty → deterministic fallback
+
 
 BRIDGE = "bridge-secret-token"
 
@@ -60,6 +63,12 @@ def _auth(tok=BRIDGE):
 def test_healthz_open_but_everything_else_needs_the_bridge_token(mt_server):
     base, _, _ = mt_server
     assert httpx.get(f"{base}/healthz").json() == {"ok": True}
+    # /readyz carries channel state → bridge-token-gated in multi_tenant:
+    # no token → 401; wrong token → 401; valid token → real readiness
+    # (200 or 503 — this bare test server has no poll thread, so 503)
+    assert httpx.get(f"{base}/readyz").status_code == 401
+    assert httpx.get(f"{base}/readyz",
+                     headers={"Authorization": "Bearer wrong"}).status_code == 401
     # no token → 401 on chat, actions, run, status
     assert httpx.post(f"{base}/chat", json={"account_id": "wx-A", "text": "hi"}).status_code == 401
     assert httpx.post(f"{base}/actions/list_todos", json={"account_id": "wx-A"}).status_code == 401
@@ -173,8 +182,8 @@ def test_tick_tenants_per_user_and_daily_fanout(tmp_path, monkeypatch):
     monkeypatch.setenv("SMTP_USER", "")
     monkeypatch.setenv("SMTP_PASSWORD", "")
     reg = UserRegistry(data_dir)
-    reg.add_user("alice1")
-    reg.add_user("bob123")
+    reg.add_user("alice1", schedule="daily")
+    reg.add_user("bob123", schedule="daily")
     reg.add_user("carol1")
     reg.set_status("carol1", "disabled")
 
@@ -198,7 +207,9 @@ def test_tick_tenants_per_user_and_daily_fanout(tmp_path, monkeypatch):
     assert [u for u, _ in ticked] == ["alice1", "bob123"]     # disabled skipped
     assert all(d.name == u for u, d in ticked)                # per-user data dirs
     assert fired == ["alice1", "bob123"]
-    # past the hour: one deduped daily run per active user, repeat ticks no-op
+    # past the hour: one deduped daily run per SCHEDULED user, repeat ticks no-op
+    # (reminders/routines above still tick for every active user, independent of
+    # the run schedule — on_demand suppresses runs, not per-user reminders)
     _tick_tenants(root, now=datetime(2026, 7, 16, 8, 0))
     _tick_tenants(root, now=datetime(2026, 7, 16, 9, 0))
     assert JobQueue(root.shared_dir).counts() == {"queued": 2}
@@ -369,6 +380,7 @@ def test_tick_tenants_weekly_gate(tmp_path, monkeypatch):
 
     monkeypatch.setattr("assistant.platform.notify.ReminderStore", NoStore)
     monkeypatch.setattr("assistant.agent.routines.fire_due", lambda s: None)
+    reg.set_schedule("alice1", "daily")   # scheduled → swept into daily+weekly fan-out
     root = Settings(_env_file=None)
     q = JobQueue(root.shared_dir)
 

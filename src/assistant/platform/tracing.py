@@ -36,6 +36,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from assistant.platform.secrets import mask_secrets
+
 _ENABLED = os.environ.get("AGENT_TRACE", "1").strip().lower() not in ("0", "false", "no", "off", "")
 _current: "contextvars.ContextVar[Optional[Span]]" = contextvars.ContextVar("trace_span", default=None)
 
@@ -131,7 +133,7 @@ class Tracer:
             "dur_ms": round(((span.end or span.start) - span.start) * 1000, 1),
             "attr": span.attr,
         }
-        line = json.dumps(rec, ensure_ascii=False, default=str)
+        line = mask_secrets(json.dumps(rec, ensure_ascii=False, default=str))
         with self._lock, self.path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 

@@ -23,9 +23,16 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(str(token).encode()).hexdigest()
 
 
+SCHEDULES = ("daily", "on_demand")
+
+
 class UserRegistry:
     """`users.yaml`: `{bridge_token_hash, users: [{uid, display, status,
-    channels: [{channel, id}]}]}`. Status is `active | deleting | disabled`."""
+    schedule, channels: [{channel, id}]}]}`. Status is
+    `active | deleting | disabled`; `schedule` is `daily | on_demand` (default
+    `on_demand`) — only `daily` users are swept into the automated daily/weekly
+    fan-out (`scheduled()`), so a self-serve tenant incurs no recurring runs
+    until they opt in."""
 
     def __init__(self, data_dir: Path):
         """Bind to `data_dir/users.yaml` (the roster is deployment-global)."""
@@ -72,8 +79,19 @@ class UserRegistry:
         return bool(token) and bool(stored) and hmac.compare_digest(hash_token(token), stored)
 
     def active(self) -> list[str]:
-        """uids of all `active` users (what the scheduler fans out over)."""
+        """uids of all `active` users (the identity/auth read path)."""
         return [u["uid"] for u in self._load()["users"] if u.get("status") == "active"]
+
+    def scheduled(self) -> list[str]:
+        """uids of `active` users whose `schedule` is `daily` — what the daily
+        and weekly fan-outs iterate. A MISSING `schedule` counts as `daily`:
+        schedule-less records can only predate the opt-in field (current code
+        always writes one at creation), and those legacy users were all being
+        run daily — the earlier `on_demand` default silently dropped every
+        pre-existing tenant from the fan-out on deploy (audit F20). New users
+        still get an explicit `on_demand` written at creation."""
+        return [u["uid"] for u in self._load()["users"]
+                if u.get("status") == "active" and u.get("schedule", "daily") == "daily"]
 
     def users(self) -> list[dict]:
         """All user records (uid, display, status, channels) — the read API for
@@ -90,16 +108,31 @@ class UserRegistry:
         return u.get("status") if u else None
 
     # ── administration (write paths) ─────────────────────────────────
-    def add_user(self, uid: str, display: str = "") -> str:
-        """Register a new `active` user; raise if the uid already exists."""
+    def add_user(self, uid: str, display: str = "", schedule: str = "on_demand") -> str:
+        """Register a new `active` user; raise if the uid already exists. New
+        users default to `on_demand` (no automated runs) — the owner is promoted
+        to `daily` explicitly via `set_schedule`."""
         uid = validate_uid(uid)
+        if schedule not in SCHEDULES:
+            raise ValueError(f"schedule must be one of {SCHEDULES}, got {schedule!r}")
         data = self._load()
         if any(u["uid"] == uid for u in data["users"]):
             raise ValueError(f"uid already registered: {uid!r}")
         data["users"].append({"uid": uid, "display": str(display),
-                              "status": "active", "channels": []})
+                              "status": "active", "schedule": schedule, "channels": []})
         self._save(data)
         return uid
+
+    def set_schedule(self, uid: str, schedule: str) -> None:
+        """Set a user's automated-run cadence (`daily` | `on_demand`)."""
+        if schedule not in SCHEDULES:
+            raise ValueError(f"schedule must be one of {SCHEDULES}, got {schedule!r}")
+        data = self._load()
+        u = next((x for x in data["users"] if x["uid"] == uid), None)
+        if u is None:
+            raise KeyError(uid)
+        u["schedule"] = schedule
+        self._save(data)
 
     def bind_channel(self, uid: str, channel: str, external_id: str) -> None:
         """Bind `(channel, external_id)` to `uid`. Enforces global uniqueness:
@@ -120,6 +153,27 @@ class UserRegistry:
             chans.append({"channel": channel, "id": ext})
         self._save(data)
 
+    def unbind_channel(self, uid: str, channel: str, external_id: str) -> bool:
+        """Drop one `(channel, external_id)` binding from `uid`; True if it was
+        there. The precise counterpart to `bind_channel` — a host migration
+        leaves the old accountId bound alongside the live one, and dropping it
+        must not disturb the bindings that still route (which is what
+        `clear_channels` would do)."""
+        ext = str(external_id).strip()
+        if channel == "email":
+            ext = ext.lower()
+        data = self._load()
+        u = next((x for x in data["users"] if x["uid"] == uid), None)
+        if u is None:
+            raise KeyError(uid)
+        kept = [c for c in u.get("channels", [])
+                if not (c["channel"] == channel and str(c["id"]) == ext)]
+        if len(kept) == len(u.get("channels", [])):
+            return False
+        u["channels"] = kept
+        self._save(data)
+        return True
+
     def clear_channels(self, uid: str) -> None:
         """Drop **all** of a user's channel bindings — the credential-revocation
         step of the deletion protocol (§14), so nothing can re-authenticate to
@@ -138,6 +192,15 @@ class UserRegistry:
         if u is None:
             raise KeyError(uid)
         u["status"] = status
+        self._save(data)
+
+    def set_display(self, uid: str, display: str) -> None:
+        """Set a user's human display name (metadata only — never identity)."""
+        data = self._load()
+        u = next((x for x in data["users"] if x["uid"] == uid), None)
+        if u is None:
+            raise KeyError(uid)
+        u["display"] = str(display)
         self._save(data)
 
     def remove_user(self, uid: str) -> None:

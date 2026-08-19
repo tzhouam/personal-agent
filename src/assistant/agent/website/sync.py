@@ -7,6 +7,7 @@ status dict — the caller (website phase) records it, never raises.
 """
 
 import base64
+import shutil
 import subprocess
 from datetime import date
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 import httpx
 
 from assistant.platform.config import Settings
-from assistant.agent.website.render import render_site
+from assistant.agent.website.render import _PROTECTED_PAGES, render_site
 
 _API = "https://api.github.com"
 
@@ -39,11 +40,17 @@ def _git(workdir: Path, settings: Settings, *args: str,
 def sync_website(settings: Settings, profile: dict, todos: list[dict],
                  reading: list[dict] | None = None,
                  routines: list[dict] | None = None,
-                 reminders: list[dict] | None = None) -> dict:
+                 reminders: list[dict] | None = None,
+                 replace: bool = False) -> dict:
     """Render the site from `profile`/`todos` (+ reading/routines/reminders,
     defaulting to the live stores) and publish it to `settings.website_repo`'s
     default branch. Clones/updates a working checkout under the data dir, writes
     the rendered files, and commits+rebases+pushes only when something changed.
+
+    `replace=True` clears the working tree (except `.git`) before writing, so the
+    published site is exactly the freshly rendered files — used when a fresh
+    `<login>.github.io` is provisioned (drop the auto-init README) or a user
+    confirms overwriting an existing site (clean slate, no stray leftovers).
 
     Returns a status dict: `not_configured` (no repo/token), `no_change`,
     `failed` (remote had conflicting edits — rebase aborted), or `pushed` (with
@@ -77,13 +84,30 @@ def sync_website(settings: Settings, profile: dict, todos: list[dict],
     _git(workdir, settings, "checkout", "-q", "-B", default_branch,
          f"origin/{default_branch}")
 
+    if replace:  # clean slate — drop the auto-init README / any prior site files
+        for item in workdir.iterdir():
+            if item.name == ".git":
+                continue
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink()
+
     marks_cfg = ({"repo": settings.marks_repo, "token": settings.marks_push_token}
                  if settings.marks_repo and settings.marks_push_token else None)
-    for filename, content in render_site(profile, todos, reading=reading,
-                                         routines=routines, reminders=reminders,
-                                         password=settings.website_password,
-                                         marks_cfg=marks_cfg).items():
+    rendered = render_site(profile, todos, reading=reading,
+                           routines=routines, reminders=reminders,
+                           password=settings.website_password,
+                           marks_cfg=marks_cfg)
+    for filename, content in rendered.items():
         (workdir / filename).write_text(content)
+
+    # A page that stops being rendered must also stop being PUBLISHED. Only the
+    # `replace` path clears the workdir, so without this an existing plaintext
+    # todos.html would survive on the public site after WEBSITE_PASSWORD was
+    # unset — the render-side fix alone would protect only a fresh repo.
+    for stale in _PROTECTED_PAGES - set(rendered):
+        (workdir / stale).unlink(missing_ok=True)
 
     if not _git(workdir, settings, "status", "--porcelain").stdout.strip():
         return {"status": "no_change"}
