@@ -359,11 +359,19 @@ phases), reviews each result, adapts after failures, and messages you the
 report on WeChat when done (`/task`, or just ask). Each run's full step
 trace is kept under `~/.personal-agent/tasks/` for audit.
 
+For older information, ask naturally (*"从历史对话里找 Project Phoenix 的面试
+记录"*): the agent searches the retained conversation shards and durable
+personal stores before reasoning, and cites `P-…` evidence ids. Multi-query web
+research is batched in parallel and reports exact source URLs with `W-…` ids.
+
 Effort matches the task: a trivial ask runs a couple of quick steps with no
 planning overhead; a multi-step one gets a short plan first; a genuinely
 complex one tracks plan milestones as it works and verifies before
 reporting. Budgets stay hard: at most 12 steps (3 for trivial tasks), and
-three consecutive failures stop it with a partial report.
+three consecutive failures stop it. Reports distinguish verified full
+completion (`done`) from useful but incomplete progress (`partial`) and work
+that could not proceed (`blocked`); reaching the budget never silently claims
+success.
 
 **Outward steps wait for you.** If a task reaches something with outside
 effects — publishing the website, restarting the agent — it pauses instead

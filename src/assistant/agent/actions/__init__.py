@@ -12,8 +12,9 @@ and `registry` (the `ACTIONS` table + `execute`/`run_action`/`prompt_block`
 dispatch). The public surface is re-exported so importers are unchanged.
 """
 
-from assistant.agent.actions.base import Action, validate
-from assistant.agent.actions.registry import ACTIONS, RETRIEVAL_ACTIONS, execute, is_risky, looks_failed, prompt_block, run_action
+from assistant.agent.actions.base import Action, ActionResult, validate
+from assistant.agent.actions.registry import ACTIONS, RETRIEVAL_ACTIONS, execute, execute_results, is_risky, looks_failed, prompt_block, run_action
 
-__all__ = ["Action", "validate", "ACTIONS", "RETRIEVAL_ACTIONS", "execute",
-           "is_risky", "looks_failed", "prompt_block", "run_action"]
+__all__ = ["Action", "ActionResult", "validate", "ACTIONS", "RETRIEVAL_ACTIONS",
+           "execute", "execute_results", "is_risky", "looks_failed",
+           "prompt_block", "run_action"]

@@ -61,7 +61,7 @@ def test_run_task_adapts_after_failure(settings):
 
 
 def test_run_task_budgets_and_exclusions(settings):
-    # excluded action + junk moves → 3 consecutive failures → aborted
+    # excluded action + junk moves → 3 consecutive failures → blocked
     llm = ScriptedLLM([
         _SIMPLE,
         {"thought": "recurse!", "action": {"type": "execute_task", "request": "x"}},
@@ -70,14 +70,15 @@ def test_run_task_budgets_and_exclusions(settings):
         {"thought": "never reached", "finish": "nope"},
     ])
     record = run_task("weird task", settings, llm=llm, notify=False)
-    assert record["status"] == "aborted"
+    assert record["status"] == "blocked"
     assert "not available inside a task" in record["steps"][0]["outcome"]
     assert len(record["steps"]) == 3
     # turn budget: model never finishes (simple tier caps at 3 turns)
     llm = ScriptedLLM([_SIMPLE] + [{"thought": "todo", "action":
                        {"type": "add_todo", "title": f"t{i}"}} for i in range(5)])
     record = run_task("loop forever", settings, llm=llm, max_turns=4, notify=False)
-    assert record["status"] == "aborted" and "budget" in record["report"]
+    assert record["status"] == "partial" and "budget" in record["report"]
+    assert record["completion"] == "partial"
 
 
 def test_execute_task_handler_spawns_detached(settings, monkeypatch):

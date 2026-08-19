@@ -190,8 +190,10 @@ class Observation(TypedDict):
 The chat surface is a **typed action registry** (`actions.py`) — one table that
 is the single source of truth for what the agent can *do*. It drives three
 consumers: the chat LLM's prompt (which actions it may emit), the executor, and
-the CLI/HTTP entry points. Handlers return one human-readable line describing
-what the code actually did — replies are built from those, never from LLM claims.
+the CLI/HTTP entry points. Handlers may return a structured `ActionResult`
+(`ok`, text, data, confidence, provenance); legacy text handlers are normalized
+at dispatch. Chat/CLI retain their text API, while autonomous tasks steer from
+the machine-readable verdict and evidence rather than guessing from prose.
 
 Action outcomes are **reviewed, not just appended**: when an outcome reports a
 failure (bad parameters, wrong id, unknown action), the model is shown exactly
@@ -200,7 +202,8 @@ correct and re-execute — retried outcomes appear as "(retry) …" in the reply
 Duplicate rejections never retry: that's dedup working as intended.
 
 Actions: todo/reading management, `trigger_run`, `run_phase`, `plan_task`,
-`execute_task`, `web_search`, reminders, routines, the finance ledger
+`execute_task`, `web_search`, batched `web_research`, tenant-scoped
+`search_personal_data`, reminders, routines, the finance ledger
 (log/void/recategorize/summary), the health log (meals/exercise/weight/
 profile/needs/summary), and status/profile queries.
 
@@ -278,22 +281,38 @@ profile, routines, finance, health) into any single-domain analysis.
 ### Agentic task execution
 
 `task_runner.py` handles requests with no built-in pipeline (the copilot
-pattern): a bounded ReAct loop — one registry action per turn, real outcome
-fed back with the same `looks_failed` review as chat, adapt on failure,
-finish with a report. Runs detached (`assistant task` via Popen, like
+pattern): a bounded plan-and-execute loop — one registry action per controller
+turn, structured outcomes and source ids fed back, adapt on failure, finish
+with an evidence-backed report. Validated first read-only plan steps execute
+directly, exact duplicate actions are suppressed, and controller context is
+bounded while the full result stays in the artifact. Runs detached (`assistant task` via Popen, like
 trigger_run), persists every turn atomically to `DATA_DIR/tasks/<id>.json`
 (collision-safe ids), writes its own trace (`<id>-trace.jsonl`) and a numeric
 `task` metrics row, and delivers the report over WeChat.
 `execute_task`/`plan_task`/`trigger_run`/`approve_task` are excluded from its
 action set (no recursion, no surprise pipeline runs, no self-approval).
 
-**Execution depth adapts to difficulty.** Each task is first assessed (one
+**Execution depth adapts to difficulty.** Known older-history requests route
+deterministically through `search_personal_data` before the first model call;
+other tasks are first assessed (one
 cheap single-model call + deterministic keyword clamps that only raise the
 tier): *simple* → no plan, a 3-turn budget, every call single-model (no MoA);
 *medium* → a short persisted plan (drafted single-model), 12 turns, still no
 MoA; *complex* → the plan is drafted on the configured `task` role (the one
-MoA-worthy spot) and carries per-milestone status the model ticks each turn
-plus a verify check the finish report must address.
+MoA-worthy spot). Plans name concrete registry actions and required outputs;
+they are validated against the live capability set before execution and carry
+per-milestone status plus a verify check. Execution control is always
+single-model, including complex tasks.
+
+External research uses one `web_research` action with up to eight deduplicated
+queries run concurrently. It returns exact URLs/snippets and stable `W-…`
+source ids without a second synthesis call per query. Personal retrieval scans
+only the active tenant's retained session shards, all todo/reminder statuses,
+task records, and observations, returning stable `P-…` ids. A finish after
+retrieval must cite at least one gathered id. Terminal truth is explicit:
+`done/full`, `partial`, or `blocked`; budget exhaustion salvages verified
+progress instead of labelling it a generic abort. Task metrics record coverage,
+evidence, failed steps, and duplicate suppression alongside latency/status.
 
 **Approval is gated at action dispatch, at every tier.** The registry's
 `risky` metadata (`run_phase website` publishes; `reboot`) is the boundary —

@@ -86,6 +86,18 @@ LLM-judge metrics need one cheap extra LLM call per artifact.
 - **Decay activity**: entries decayed per run + reactivation rate (decayed then reactivated within 30d = premature decay — the consolidator-marked-interest-dormant incident is the motivating example).
 - **Consolidation acceptance**: weekly consolidate ops applied/rejected + owner reverts of consolidation commits in the profile repo (git history = free audit label).
 
+## 10. autonomous tasks
+
+- **Full success / partial / blocked rate**: terminal task status, with `done`
+  reserved for verified full coverage rather than merely producing a report.
+- **Requirement coverage**: completed plan milestones / total milestones.
+- **Evidence use**: stable personal/web source ids gathered per task; a
+  retrieval-backed full report must cite at least one.
+- **Control efficiency**: steps, failed steps, and duplicate actions suppressed;
+  task traces separately count LLM and typed-tool spans.
+- **Latency/cost**: wall time and LLM calls per task. Read-only plan bootstrap
+  and batched web queries should lower both versus sequential ReAct searches.
+
 ## Implementation sketch (when instrumented)
 
 One `metrics.py` writing a row per (run, step, metric, value) into `events.db`

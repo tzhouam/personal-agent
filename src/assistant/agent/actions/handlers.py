@@ -10,6 +10,7 @@ are lazy so importing the registry stays cheap.
 import subprocess
 import sys
 
+from assistant.agent.actions.base import ActionResult
 from assistant.platform.config import Settings
 from assistant.agent.state import load_state
 from assistant.agent.todo_store import ReadingList, TodoStore
@@ -36,14 +37,38 @@ def _done_todo(settings: Settings, p: dict) -> str:
     return f"todo {item_id} marked done" if ok else f"no open todo {item_id!r}"
 
 
-def _list_todos(settings: Settings, p: dict) -> str:
+def _list_todos(settings: Settings, p: dict) -> ActionResult:
     """List open todos (id, title, source, since, due) — one per line."""
     lines = []
     for t in TodoStore(settings.profile_dir).open_items():
         due = f" due:{t['due']}" if t.get("due") else ""
         lines.append(f"[{t['id']}] {t['title']} ({t.get('source', '')}, "
                      f"since {t.get('created', '')}{due})")
-    return "\n".join(lines) or "(no open todos)"
+    return ActionResult(True, "\n".join(lines) or "(no open todos)",
+                        data={"count": len(lines)})
+
+
+def _search_personal_data(settings: Settings, p: dict) -> ActionResult:
+    """Search this tenant's retained chats and durable personal stores.
+
+    Unlike the small automatic context window, this explicitly searches older
+    session shards plus all todo/reminder statuses, task records, and collected
+    observations. Hits carry stable ``P-…`` ids for evidence-backed replies.
+    """
+    from assistant.agent.personal_search import render_hits, search_personal_data
+
+    query = str(p.get("query", "")).strip()
+    try:
+        limit = int(p.get("limit") or 12)
+    except (TypeError, ValueError):
+        limit = 12
+    hits = search_personal_data(settings, query, sources=p.get("sources"), limit=limit)
+    text = render_hits(query, hits)
+    provenance = [{"id": hit["id"], "source": hit["source"],
+                   "ts": hit.get("ts", "")} for hit in hits]
+    return ActionResult(ok=bool(hits), text=text, data={"query": query, "hits": hits},
+                        error="no matching personal records" if not hits else "",
+                        confidence=1.0 if hits else 0.0, provenance=provenance)
 
 
 # ── reading list ─────────────────────────────────────────────────────
@@ -316,6 +341,89 @@ def _web_search(settings: Settings, p: dict) -> str:
     return answer or "top results:\n" + format_results(results)
 
 
+def _web_research(settings: Settings, p: dict) -> ActionResult:
+    """Run up to eight independent web queries concurrently, without an LLM
+    synthesis per query.  The task loop receives exact search evidence/URLs and
+    performs one final synthesis, avoiding the 2× call pattern of ``web_search``.
+    """
+    import contextvars
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timezone
+    from urllib.parse import urlparse
+
+    from assistant.platform.search import web_search_answer
+
+    raw = p.get("queries")
+    if isinstance(raw, str):
+        queries = [raw]
+    elif isinstance(raw, (list, tuple)):
+        queries = [str(q) for q in raw]
+    else:
+        queries = [str(p.get("query", ""))]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        query = query.strip()
+        key = query.casefold()
+        if query and key not in seen:
+            seen.add(key)
+            deduped.append(query)
+    deduped = deduped[:8]
+    if not deduped:
+        return ActionResult(False, "web_research needs query or queries",
+                            error="missing query", confidence=0.0)
+
+    def one(query: str) -> dict:
+        out = web_search_answer(query, max_results=8, settings=settings)
+        return {"query": query, "answer": str(out.get("answer") or "")[:1800],
+                "results": list(out.get("results") or [])[:8]}
+
+    contexts = [contextvars.copy_context() for _ in deduped]
+    with ThreadPoolExecutor(max_workers=min(4, len(deduped))) as pool:
+        batches = list(pool.map(lambda item: item[0].run(one, item[1]),
+                                zip(contexts, deduped)))
+
+    hits: list[dict] = []
+    for batch in batches:
+        for result in batch["results"]:
+            url = str(result.get("url") or "")
+            if not url:
+                continue
+            source_id = "W-" + hashlib.sha1(url.encode()).hexdigest()[:8]
+            hits.append({"id": source_id, "query": batch["query"],
+                         "title": str(result.get("title") or "")[:300],
+                         "url": url, "domain": urlparse(url).netloc.casefold(),
+                         "snippet": str(result.get("snippet") or "")[:600]})
+    retrieved = datetime.now(timezone.utc).isoformat()
+    lines = [f"web research evidence ({len(deduped)} queries; retrieved {retrieved}):"]
+    rendered_hits: list[dict] = []
+    for batch in batches:
+        lines.append(f"\nQUERY: {batch['query']}")
+        if batch["answer"]:
+            lines.append("Grounded-backend answer (use only with the source ids below; "
+                         "do not infer missing years):\n" + batch["answer"])
+        related = [hit for hit in hits if hit["query"] == batch["query"]][:5]
+        rendered_hits.extend(related)
+        if not related:
+            lines.append("(no source results)")
+        for hit in related:
+            lines.append(f"[{hit['id']}] {hit['title']}\n{hit['snippet']}\n{hit['url']}")
+    # An answer without a returned source is not auditable evidence and cannot
+    # support an autonomous task's completion claim.
+    ok = bool(hits)
+    unique_sources = {h["id"]: h for h in rendered_hits}
+    provenance = [{"id": h["id"], "title": h["title"], "url": h["url"],
+                   "domain": h["domain"], "retrieved_at": retrieved}
+                  for h in unique_sources.values()]
+    return ActionResult(ok=ok, text="\n".join(lines),
+                        data={"retrieved_at": retrieved, "queries": batches,
+                              "sources": rendered_hits},
+                        error="web research returned no evidence" if not ok else "",
+                        confidence=0.75 if hits else 0.0,
+                        provenance=provenance)
+
+
 # ── reminders ────────────────────────────────────────────────────────
 
 def _set_reminder(settings: Settings, p: dict) -> str:
@@ -337,13 +445,14 @@ def _set_reminder(settings: Settings, p: dict) -> str:
             "I'll ping you on WeChat")
 
 
-def _list_reminders(settings: Settings, p: dict) -> str:
+def _list_reminders(settings: Settings, p: dict) -> ActionResult:
     """List pending reminders (id, due time, message) — one per line."""
     from assistant.platform.notify import ReminderStore
 
     pending = ReminderStore(settings.data_dir).pending()
-    return "\n".join(f"[{r['id']}] {r['due_at']} — {r['message']}"
+    text = "\n".join(f"[{r['id']}] {r['due_at']} — {r['message']}"
                      for r in pending) or "(no pending reminders)"
+    return ActionResult(True, text, data={"count": len(pending)})
 
 
 def _cancel_reminder(settings: Settings, p: dict) -> str:

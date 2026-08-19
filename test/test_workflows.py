@@ -201,7 +201,7 @@ def test_workflow_risky_step_pauses_each_time(settings, monkeypatch, sent):
     ])
     final = run_task("", settings, llm=llm3, approved_task_id=task_id, notify=False)
     assert [f["n"] for f in fired] == [1, 2]
-    assert final["status"] == "done" and final["completion"] == "partial"
+    assert final["status"] == "partial" and final["completion"] == "partial"
 
 
 def test_finish_nudge_once_for_unticked_milestones(settings, monkeypatch, sent):
@@ -217,7 +217,7 @@ def test_finish_nudge_once_for_unticked_milestones(settings, monkeypatch, sent):
         {"thought": "ok fine", "finish": "done, s2/s3 not needed because X"},
     ])
     record = run_task("", settings, llm=llm, approved_task_id=task_id, notify=False)
-    assert record["status"] == "done" and record["completion"] == "partial"
+    assert record["status"] == "partial" and record["completion"] == "partial"
     assert any("finish rejected once" in str(s.get("outcome"))
                for s in record["steps"])
     assert WorkflowStore(settings.profile_dir).get(wf["id"])["last_status"] == "partial"
@@ -251,7 +251,7 @@ def test_retired_workflow_task_cancels_and_crash_recovery_resumes(settings, monk
                        {"thought": "again", "finish": "ok (step 2 explained)"}])
     resumed = run_task("", settings, llm=llm, approved_task_id=task2,
                        notify=False, force_resume=True)
-    assert resumed["status"] == "done"
+    assert resumed["status"] == "partial"
 
 
 def test_routine_binding_fires_deterministically(settings, monkeypatch, sent):

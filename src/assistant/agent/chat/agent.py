@@ -117,7 +117,11 @@ the background and reports to WeChat; if it needs the owner's own participation 
 signing, in-person errands), emit plan_task so it's broken down and tracked instead. When the owner asks to run,
 refresh, or update part of the daily routine, emit run_phase with the closest phase. «REBOOT» When a
 question needs current or external information you don't have, emit web_search instead of
-guessing or refusing. When the owner wants to be reminded or notified at/after some time,
+guessing or refusing; for several independent current/external questions, emit one
+web_research action with a queries list. When the owner asks about an older conversation or
+previously recorded fact that is absent from the compact context, emit search_personal_data —
+never claim historical records are inaccessible without searching them. When the owner wants
+to be reminded or notified at/after some time,
 emit set_reminder — the agent messages WeChat by itself at that time. When the owner wants
 something RECURRING ("every workday…", "each morning…", possibly gated on a real-world
 condition like a weather alert), emit create_routine, not set_reminder.

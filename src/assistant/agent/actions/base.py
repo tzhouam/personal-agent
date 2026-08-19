@@ -4,9 +4,28 @@ and the metadata that drives the three surfaces (chat prompt, executor, CLI/HTTP
 """
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from assistant.platform.config import Settings
+
+
+@dataclass
+class ActionResult:
+    """Machine-readable result from one action execution.
+
+    Handlers may return this directly when they have structured data or a
+    reliable success verdict.  Legacy handlers may keep returning strings;
+    the registry wraps them so chat/CLI callers retain their existing text
+    API while the task runner no longer has to steer solely from prose.
+    ``provenance`` contains compact source descriptors/ids, never credentials.
+    """
+
+    ok: bool
+    text: str
+    data: Any = None
+    error: str = ""
+    confidence: float | None = None
+    provenance: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -24,13 +43,14 @@ class Action:
 
     name: str
     description: str
-    handler: Callable[[Settings, dict], str]
+    handler: Callable[[Settings, dict], str | ActionResult]
     # param name -> {"required": bool, "desc": str}; values are strings
     params: dict = field(default_factory=dict)
     llm: bool = False            # exposed to the chat LLM as an emittable action
     prompt_example: str = ""     # exact line shown in the chat system prompt
     slash: str | None = None     # OpenClaw slash-command family ("todo", …)
     risky: "bool | Callable[[dict], bool]" = False  # outward/irreversible in a task
+    read_only: bool = False      # safe to run without the per-user mutation lock
 
 
 def validate(action: Action, params: dict) -> str | None:
