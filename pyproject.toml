@@ -11,6 +11,10 @@ dependencies = [
     "pydantic-settings>=2.2",
     "PyYAML>=6.0",
     "tenacity>=8.2",
+    "qrcode[pil]>=7.4",
+    # AES-GCM for the website's encrypted private pages + the WeCom callback
+    # crypto — required in fresh environments and production deployments.
+    "cryptography>=42",
 ]
 
 [project.scripts]
