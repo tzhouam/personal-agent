@@ -305,7 +305,11 @@ def report(trace_path: os.PathLike | str) -> str:
         prompts = [s["attr"].get("prompt_tokens", 0) for s in llm]
         comps = [s["attr"].get("completion_tokens", 0) for s in llm]
         cache_read = sum(s["attr"].get("cache_read_tokens", 0) for s in llm)
-        total_in = sum(prompts) or 1
+        cache_create = sum(s["attr"].get("cache_creation_tokens", 0) for s in llm)
+        # Anthropic reports uncached input, cache reads, and cache creation as
+        # disjoint counters. Dividing cache reads by only uncached input can
+        # therefore produce impossible ratios above 100%.
+        total_in = sum(prompts) + cache_read + cache_create or 1
         inflight = [s["attr"].get("inflight", 1) for s in llm]
         lines.append("\nLLM (inference-engine view)")
         lines.append(f"  calls              {len(llm)}")

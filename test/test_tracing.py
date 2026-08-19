@@ -72,6 +72,19 @@ def test_report_smoke(monkeypatch, tmp_path):
     assert "inference-engine view" in tr.report(path)
 
 
+def test_cache_ratio_uses_all_input_token_buckets(monkeypatch, tmp_path):
+    tr = _fresh(monkeypatch)
+    path = tmp_path / "cache.jsonl"
+    tr.init("r-cache", path)
+    with tr.span("llm", model="m") as sp:
+        tr.set_usage(sp, {"input_tokens": 20, "output_tokens": 1,
+                          "cache_read_input_tokens": 80,
+                          "cache_creation_input_tokens": 0})
+    report = tr.report(path)
+    assert "prompt-cache read  80.0%" in report
+    assert "400.0%" not in report
+
+
 def test_tracer_is_context_scoped(monkeypatch, tmp_path):
     # Concurrent runs must not overwrite each other's tracer (§3) — a module
     # global would make interleaved inits clobber, so B's tracer would capture

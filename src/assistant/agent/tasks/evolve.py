@@ -22,8 +22,9 @@ log = logging.getLogger("assistant")
 
 _EVOLVE_SYSTEM = """You improve a personal assistant by studying its recent conversations and
 task runs. Propose durable BEHAVIOR rules ("when X, do Y") that would have prevented observed
-friction: failed/retried actions, misunderstandings the owner had to correct, repeated manual
-steps, wrong defaults. Rules must be about HOW the assistant behaves — never facts about the
+friction: failed/retried actions, partial or blocked tasks, unsupported completion claims,
+repeated retrieval, missing citations, misunderstandings the owner had to correct, repeated
+manual steps, wrong defaults. Rules must be about HOW the assistant behaves — never facts about the
 world, never one-off reminders, never anything contradicting an existing lesson.
 Respond with ONLY JSON: {"lessons": [{"rule": "<one imperative sentence>",
 "why": "<the observed evidence, quoted short>"}], "note": "<one line on what you reviewed>"}
@@ -100,30 +101,47 @@ def _gather_evidence(settings: Settings) -> str:
                 record = json.loads(path.read_text())
             except ValueError:
                 continue
-            failed = [s for s in record.get("steps", [])
-                      if s.get("outcome") and "fail" in str(s["outcome"]).lower()]
+            steps = record.get("steps", [])
+            failed = [s for s in steps
+                      if ((isinstance(s.get("result"), dict)
+                           and not s["result"].get("ok"))
+                          or (s.get("outcome")
+                              and any(word in str(s["outcome"]).lower()
+                                      for word in ("fail", "rejected", "duplicate action"))))]
+            milestones = (record.get("plan") or {}).get("milestones", [])
+            coverage = (sum(bool(m.get("done")) for m in milestones) / len(milestones)
+                        if milestones else (1.0 if record.get("completion") == "full" else 0.0))
+            actions = [str(s.get("action", {}).get("type")) for s in steps
+                       if isinstance(s.get("action"), dict)]
             parts.append(f"task {record.get('id')}: status={record.get('status')} "
+                         f"completion={record.get('completion', 'unknown')} "
                          f"request={record.get('request', '')[:120]} "
-                         f"steps={len(record.get('steps', []))} "
+                         f"steps={len(steps)} coverage={coverage:.2f} "
+                         f"evidence={len(record.get('evidence_ids', []))} "
+                         f"citation_repairs={record.get('citation_corrections', 0)} "
+                         f"year_repairs={record.get('unsupported_year_corrections', 0)} "
+                         f"url_repairs={record.get('unsupported_url_corrections', 0)} "
+                         f"actions={','.join(actions[:12]) or 'none'} "
                          f"failed_steps={len(failed)}"
-                         + (f" first_failure={failed[0]['outcome'][:150]}" if failed else ""))
+                         + (f" first_failure={str(failed[0].get('outcome', ''))[:150]}"
+                            if failed else "")
+                         + (f" report={str(record.get('report', ''))[:200]}"
+                            if record.get("status") in ("partial", "blocked", "aborted", "error")
+                            else ""))
     return "\n---\n".join(parts)
 
 
 def _trace_evidence(settings: Settings, days: int = 7) -> str:
-    """Pipeline-trace signals for the evolve passes: one compact line per recent
-    run — total wall, the slowest phases, LLM volume, and suspicious spans
-    (>45s LLM calls, `max_tokens` truncations). Only full daily runs produce
-    `trace.jsonl` (chat/task turns record to events.db/tasks instead), so this
-    is the operations view of the agent, per user."""
+    """Trace signals for evolution: compact daily-run and autonomous-task
+    latency, LLM volume, tool use, and suspicious spans."""
     from assistant.platform import tracing
 
     runs_dir = settings.runs_dir
-    if not runs_dir.exists():
-        return ""
     cutoff = (datetime.now() - timedelta(days=days)).strftime("run-%Y%m%d")
     lines: list[str] = []
-    for run_dir in sorted(p for p in runs_dir.glob("run-*") if p.is_dir()):
+    run_dirs = (sorted(p for p in runs_dir.glob("run-*") if p.is_dir())
+                if runs_dir.exists() else [])
+    for run_dir in run_dirs:
         if run_dir.name[:len(cutoff)] < cutoff:
             continue
         spans = tracing.load_spans(run_dir / "trace.jsonl")
@@ -150,4 +168,25 @@ def _trace_evidence(settings: Settings, days: int = 7) -> str:
         lines.append(f"run {run_dir.name}: wall={wall_s:.0f}s slowest[{phase_txt}] "
                      f"llm_calls={len(llm_spans)} tokens={tok_in}->{tok_out}"
                      + (f" SUSPECT[{'; '.join(suspicious[:4])}]" if suspicious else ""))
+    tasks_dir = settings.data_dir / "tasks"
+    task_cutoff = (datetime.now() - timedelta(days=days)).strftime("task-%Y%m%d")
+    if tasks_dir.exists():
+        for path in sorted(tasks_dir.glob("task-*-trace.jsonl")):
+            task_id = path.name.removesuffix("-trace.jsonl")
+            if task_id[:len(task_cutoff)] < task_cutoff:
+                continue
+            spans = tracing.load_spans(path)
+            if not spans:
+                continue
+            wall_s = max(s.get("end", 0) for s in spans) - min(
+                s.get("start", 0) for s in spans)
+            llm_spans = [s for s in spans if s.get("name") == "llm"]
+            tool_spans = [s for s in spans if s.get("name") == "tool"]
+            slow = sum(s.get("dur_ms", 0) > 45_000 for s in llm_spans)
+            failed_tools = sum(not s.get("attr", {}).get("ok", True)
+                               for s in tool_spans)
+            lines.append(
+                f"task-trace {task_id}: wall={wall_s:.0f}s llm_calls={len(llm_spans)} "
+                f"tool_calls={len(tool_spans)} failed_tools={failed_tools} "
+                f"slow_llm={slow}")
     return "\n".join(lines)

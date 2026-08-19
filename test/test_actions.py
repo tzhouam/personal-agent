@@ -1,4 +1,6 @@
-from assistant.agent.actions import ACTIONS, execute, prompt_block, run_action, validate
+from datetime import date
+
+from assistant.agent.actions import ACTIONS, execute, execute_results, prompt_block, run_action, validate
 from assistant.agent.state import persist_state
 from assistant.agent.todo_store import ReadingList, TodoStore
 
@@ -7,7 +9,8 @@ def test_registry_covers_the_llm_action_set():
     llm_actions = {name for name, a in ACTIONS.items() if a.llm}
     assert llm_actions == {"add_todo", "done_todo", "done_reading", "trigger_run",
                            "run_phase", "reboot", "plan_task", "web_search",
-                           "set_reminder", "cancel_reminder",
+                           "web_research", "search_personal_data", "list_todos",
+                           "set_reminder", "list_reminders", "cancel_reminder",
                            "create_routine", "cancel_routine", "unrelated_reading",
                            "log_transaction", "void_transaction", "finance_summary",
                            "recategorize_transaction", "query_transactions",
@@ -24,7 +27,7 @@ def test_registry_covers_the_llm_action_set():
     for name in llm_actions:
         assert name in block
     # non-LLM actions never appear in the chat prompt
-    assert "list_todos" not in block and "run_status" not in block
+    assert "run_status" not in block
 
 
 def test_run_phase_validation_and_dispatch(settings, monkeypatch):
@@ -124,19 +127,26 @@ def test_run_action_unknown_and_invalid(settings):
 def test_execute_llm_surface_only(settings):
     outcomes = execute(
         [{"type": "add_todo", "title": "Review PR"},
-         {"type": "list_todos"},           # registered but not llm-exposed
+         {"type": "list_todos"},           # read-only retrieval is LLM-exposed
          {"type": "delete_profile"},       # unregistered
          {"type": "done_todo"},            # missing required id
          "not-a-dict"],
         settings)
     assert outcomes == [
         "added todo t1: Review PR",
-        "unknown action 'list_todos' ignored",
+        "[t1] Review PR (chat, since " + date.today().isoformat() + ")",
         "unknown action 'delete_profile' ignored",
         "action done_todo: missing required 'id'",
     ]
     assert [t["title"] for t in TodoStore(settings.profile_dir).open_items()] \
         == ["Review PR"]
+
+
+def test_structured_executor_distinguishes_empty_read_from_failure(settings):
+    result = execute_results([{"type": "list_todos"}], settings)[0]
+    assert result.ok is True
+    assert result.text == "(no open todos)"
+    assert result.data == {"count": 0}
 
 
 def test_execute_caps_action_count(settings):

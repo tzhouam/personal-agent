@@ -7,8 +7,8 @@ never lets one bad action eat the reply; `run_action` invokes any registry entry
 directly.
 """
 
-from assistant.agent.actions.base import Action, validate
-from assistant.agent.actions.handlers import _acknowledge_failure, _add_health_need, _add_todo, _approve_task, _build_personal_website, _connect_github, _create_workflow, _retire_workflow, _run_workflow, _show_workflow, _update_workflow, _cancel_reminder, _cancel_routine, _create_routine, _done_health_need, _done_reading, _done_todo, _execute_task, _finance_summary, _health_summary, _learn_preference, _list_preferences, _list_reading, _list_reminders, _list_routines, _list_todos, _list_transactions, _log_exercise, _log_meal, _log_transaction, _log_weight, _plan_task, _query_health, _query_transactions, _reboot, _recategorize_transaction, _run_phase, _retire_preference, _run_status, _self_evolve, _set_health_profile, _set_reminder, _show_profile, _trigger_run, _unrelated_reading, _void_transaction, _web_search
+from assistant.agent.actions.base import Action, ActionResult, validate
+from assistant.agent.actions.handlers import _acknowledge_failure, _add_health_need, _add_todo, _approve_task, _build_personal_website, _connect_github, _create_workflow, _retire_workflow, _run_workflow, _show_workflow, _update_workflow, _cancel_reminder, _cancel_routine, _create_routine, _done_health_need, _done_reading, _done_todo, _execute_task, _finance_summary, _health_summary, _learn_preference, _list_preferences, _list_reading, _list_reminders, _list_routines, _list_todos, _list_transactions, _log_exercise, _log_meal, _log_transaction, _log_weight, _plan_task, _query_health, _query_transactions, _reboot, _recategorize_transaction, _run_phase, _retire_preference, _run_status, _search_personal_data, _self_evolve, _set_health_profile, _set_reminder, _show_profile, _trigger_run, _unrelated_reading, _void_transaction, _web_research, _web_search
 from assistant.platform.config import Settings
 
 ACTIONS: dict[str, Action] = {a.name: a for a in [
@@ -46,7 +46,25 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         name="list_todos",
         description="list open todos",
         handler=_list_todos,
+        llm=True,
+        prompt_example='{"type": "list_todos"}',
         slash="todo",
+        read_only=True,
+    ),
+    Action(
+        name="search_personal_data",
+        description="search retained conversations and durable personal records "
+                    "(all todo/reminder statuses, tasks, observations) with evidence ids",
+        handler=_search_personal_data,
+        params={"query": {"required": True, "desc": "literal names/terms to find"},
+                "sources": {"required": False,
+                            "desc": "comma-separated sessions,todos,reminders,tasks,observations"},
+                "limit": {"required": False, "desc": "1-30, default 12"}},
+        llm=True,
+        prompt_example='{"type": "search_personal_data", "query": "Project Phoenix", '
+                       '"sources": "sessions,todos,reminders"}   # older chats or '
+                       'anything the owner previously recorded',
+        read_only=True,
     ),
     Action(
         name="done_reading",
@@ -155,6 +173,21 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         prompt_example='{"type": "web_search", "query": "<what to look up>"}   # for '
                        'questions needing current/external information',
         slash="search",
+        read_only=True,
+    ),
+    Action(
+        name="web_research",
+        description="batch up to 8 independent web queries in parallel and return exact "
+                    "source snippets/URLs with W evidence ids; no per-query LLM synthesis",
+        handler=_web_research,
+        params={"query": {"required": False, "desc": "one query"},
+                "queries": {"required": False, "desc": "list of independent queries"}},
+        llm=True,
+        prompt_example='{"type": "web_research", "queries": ["official query 1", '
+                       '"official query 2"]}   # batch independent current/external research; '
+                       'cite returned [W…] ids and never infer a missing year',
+        slash="search",
+        read_only=True,
     ),
     Action(
         name="set_reminder",
@@ -172,7 +205,10 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
         name="list_reminders",
         description="list pending reminders (cancel: set_reminder is one-shot)",
         handler=_list_reminders,
+        llm=True,
+        prompt_example='{"type": "list_reminders"}',
         slash="remind",
+        read_only=True,
     ),
     Action(
         name="cancel_reminder",
@@ -561,7 +597,8 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
 
 # Actions whose outcome is retrieved data to answer FROM (the chat loop runs a
 # compose pass feeding the result back), not a mutation to confirm with a "✔".
-RETRIEVAL_ACTIONS = frozenset({"query_health", "query_transactions"})
+RETRIEVAL_ACTIONS = frozenset({"query_health", "query_transactions",
+                               "search_personal_data", "web_research"})
 
 
 def is_risky(name: str, params: dict) -> bool:
@@ -591,7 +628,8 @@ def _tenant_forbidden(name: str, settings: Settings) -> bool:
     return settings.deployment_mode == "multi_tenant" and name in SHARED_ADMIN_ACTIONS
 
 
-def prompt_block(settings: Settings | None = None) -> str:
+def prompt_block(settings: Settings | None = None,
+                 include: set[str] | frozenset[str] | None = None) -> str:
     """The chat system prompt's action list, generated from the registry.
 
     With `settings`, shared/admin actions a tenant may not run are omitted
@@ -601,6 +639,8 @@ def prompt_block(settings: Settings | None = None) -> str:
     acts = [a for a in ACTIONS.values() if a.llm]
     if settings is not None:
         acts = [a for a in acts if not _tenant_forbidden(a.name, settings)]
+    if include is not None:
+        acts = [a for a in acts if a.name in include]
     return "\n".join(f"  {a.prompt_example}" for a in acts)
 
 
@@ -616,47 +656,90 @@ _executor_override: contextvars.ContextVar = contextvars.ContextVar(
     "actions_executor_override", default=None)
 
 
-def execute(actions: list, settings: Settings, max_actions: int = 5) -> list[str]:
-    """Apply LLM-emitted typed actions; return what actually happened, one
-    line each. Only registry entries marked ``llm`` are honored here."""
+def _result(raw, *, fallback_error: str = "") -> ActionResult:
+    """Normalize a new structured or legacy string handler result."""
+    if isinstance(raw, ActionResult):
+        return raw
+    text = str(raw)
+    failed = looks_failed(text)
+    return ActionResult(ok=not failed, text=text,
+                        error=(fallback_error or text) if failed else "")
+
+
+def execute_results(actions: list, settings: Settings,
+                    max_actions: int = 5) -> list[ActionResult]:
+    """Structured executor used by autonomous tasks.
+
+    Existing chat callers use :func:`execute`, which projects these results
+    back to their legacy strings.  Tool spans live here so task traces finally
+    distinguish model time from retrieval/mutation time.
+    """
     override = _executor_override.get()
     if override is not None:
-        return override(actions, settings, max_actions)
+        return [_result(item) for item in override(actions, settings, max_actions)]
     import logging
+    from contextlib import nullcontext
 
     from assistant.platform.locks import user_write_lock
+    from assistant.platform import tracing
 
     log = logging.getLogger("assistant")
-    results = []
+    results: list[ActionResult] = []
+    requested = [raw for raw in (actions or [])[:max_actions] if isinstance(raw, dict)]
+    # Preserve the old batch-atomicity rule whenever any mutation is present.
+    # A purely read-only batch must not monopolize the user's write lock while
+    # waiting on web/network retrieval.
+    resolved = [ACTIONS.get(raw.get("type")) for raw in requested if raw.get("type")]
+    read_only_batch = bool(resolved) and all(a is not None and a.read_only for a in resolved)
+    lock = nullcontext() if read_only_batch else user_write_lock(settings)
     # Serialize this user's writes for the whole batch (chat action / routine /
     # task): the stores load→mutate→git-commit with no lock of their own, and the
     # daemon is multi-threaded, so concurrent turns would race the YAML/git repo.
     # Per-user lock — other users proceed in parallel; reentrant so it's safe if
     # a handler itself takes the lock (locks.py, DESIGN §8).
-    with user_write_lock(settings):
-        for raw in (actions or [])[:max_actions]:
-            if not isinstance(raw, dict):
-                continue
+    with lock:
+        for raw in requested:
             kind = raw.get("type")
             if not kind:
                 continue
             action = ACTIONS.get(kind)
             if action is None or not action.llm:
-                results.append(f"unknown action {kind!r} ignored")
+                text = f"unknown action {kind!r} ignored"
+                results.append(ActionResult(False, text, error=text))
                 continue
             if _tenant_forbidden(kind, settings):
-                results.append(f"action {kind!r} is admin-only (use `assistant admin`)")
+                text = f"action {kind!r} is admin-only (use `assistant admin`)"
+                results.append(ActionResult(False, text, error=text))
                 continue
             error = validate(action, raw)
             if error:
-                results.append(error)
+                results.append(ActionResult(False, error, error=error))
                 continue
             try:
-                results.append(action.handler(settings, raw))
+                with tracing.span("tool", tool=kind, read_only=action.read_only) as span:
+                    try:
+                        result = _result(action.handler(settings, raw))
+                    except Exception as exc:
+                        span.set(ok=False, error=type(exc).__name__)
+                        raise
+                    span.set(ok=result.ok, evidence=len(result.provenance),
+                             confidence=result.confidence)
+                    if isinstance(result.data, dict):
+                        rows = (result.data.get("hits") or result.data.get("sources")
+                                or result.data.get("queries"))
+                        if isinstance(rows, list):
+                            span.set(result_count=len(rows))
+                results.append(result)
             except Exception as exc:  # one bad action must not eat the reply
                 log.exception("chat action %s failed", kind)
-                results.append(f"action {kind} failed: {exc}")
+                text = f"action {kind} failed: {exc}"
+                results.append(ActionResult(False, text, error=str(exc)))
     return results
+
+
+def execute(actions: list, settings: Settings, max_actions: int = 5) -> list[str]:
+    """Backward-compatible text projection of :func:`execute_results`."""
+    return [result.text for result in execute_results(actions, settings, max_actions)]
 
 
 def run_action(name: str, params: dict, settings: Settings) -> str:
@@ -672,7 +755,8 @@ def run_action(name: str, params: dict, settings: Settings) -> str:
     error = validate(action, params)
     if error:
         raise ValueError(error)
-    return action.handler(settings, params)
+    result = action.handler(settings, params)
+    return result.text if isinstance(result, ActionResult) else result
 
 
 # Failure markers in handler outcomes — the chat agent's review loop retries
