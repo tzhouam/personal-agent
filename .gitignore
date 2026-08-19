@@ -14,6 +14,7 @@ dist/
 # local artifacts
 nohup.out
 *.log
+.deployed-commit
 
 # WeChat login QR — a live credential; must NEVER be committed (served in-memory
 # over loopback /qr; this is a backstop if one is ever written under the repo)
