@@ -22,6 +22,7 @@ import yaml
 
 from assistant.platform.config import Settings
 from assistant.platform.locks import locked_transaction
+from assistant.platform.timeutil import local_naive_now, to_local_naive
 
 log = logging.getLogger("assistant")
 
@@ -168,7 +169,7 @@ def parse_when(when: str, now: datetime | None = None) -> datetime | None:
     an absolute time ('2026-07-24T20:55:00+08:00'); rejecting it cost a repair
     round on every such reminder. An offset-aware value is converted to system
     local time and stored naive, since reminders fire against the system clock."""
-    now = now or datetime.now()
+    now = now or local_naive_now()
     when = str(when).strip()
     match = _RELATIVE.match(when)
     if match:
@@ -177,7 +178,7 @@ def parse_when(when: str, now: datetime | None = None) -> datetime | None:
         return now + timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[unit]: amount})
     try:
         parsed = datetime.fromisoformat(when)
-        return (parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo else parsed)
+        return to_local_naive(parsed)
     except ValueError:
         pass
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):

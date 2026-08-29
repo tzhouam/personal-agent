@@ -1,5 +1,7 @@
 from datetime import date, timedelta
 
+import pytest
+
 from assistant.platform.llm import _parse_json
 from assistant.agent.profile_store import ProfileStore
 from assistant.agent.tasks.curate import curate
@@ -24,11 +26,123 @@ def test_digest_deterministic_fallback():
     assert [i["id"] for i in digest["sections"]["red"]] == ["1"]
     assert [i["id"] for i in digest["sections"]["white"]] == ["2"]
     assert digest["total"] == 2 and digest["llm_triaged"] == 0
+    assert digest["llm_requested"] == 2
+    assert digest["fallback_count"] == 2
+    assert digest["degraded"] is True
+    assert digest["fallback_reason_code"] == "llm_error"
 
 
 def test_digest_empty():
     digest = build_digest(BrokenLLM(), {}, [], [])
     assert digest["total"] == 0
+    assert digest["llm_requested"] == 0
+    assert digest["llm_triaged"] == 0
+    assert digest["fallback_count"] == 0
+    assert digest["degraded"] is False
+    assert digest["fallback_reason_code"] == "none"
+
+
+def test_digest_partial_response_accounts_only_missing_ids():
+    class PartialLLM:
+        def complete_json(self, *a, **k):
+            return [{"id": "1", "priority": "yellow", "summary": "LLM summary"}]
+
+    notifications = [
+        {"id": "1", "repo": "o/r", "reason": "mention", "type": "Issue",
+         "title": "Mentioned", "updated_at": "t", "url": "u1"},
+        {"id": "2", "repo": "o/r", "reason": "subscribed", "type": "Issue",
+         "title": "FYI", "updated_at": "t", "url": "u2"},
+    ]
+    digest = build_digest(PartialLLM(), {}, notifications, [])
+
+    assert digest["llm_requested"] == 2
+    assert digest["llm_triaged"] == 1
+    assert digest["fallback_count"] == 1
+    assert digest["degraded"] is True
+    assert digest["fallback_reason_code"] == "partial_response"
+    assert digest["sections"]["yellow"][0]["summary"] == "LLM summary"
+    assert digest["sections"]["white"][0]["summary"] == "[subscribed] FYI"
+
+
+def test_digest_missing_summary_is_malformed_fallback():
+    class MissingSummaryLLM:
+        def complete_json(self, *a, **k):
+            return [{"id": "1", "priority": "red", "summary": ""}]
+
+    notifications = [
+        {"id": "1", "repo": "o/r", "reason": "mention", "type": "Issue",
+         "title": "Mentioned", "updated_at": "t", "url": "u1"},
+    ]
+    digest = build_digest(MissingSummaryLLM(), {}, notifications, [])
+    assert digest["llm_triaged"] == 0 and digest["fallback_count"] == 1
+    assert digest["degraded"] is True
+    assert digest["fallback_reason_code"] == "malformed_response"
+    assert digest["sections"]["red"][0]["summary"] == "[mention] Mentioned"
+
+
+def test_digest_overflow_is_counted_as_deterministic_fallback():
+    class CompleteLLM:
+        def complete_json(self, *a, **k):
+            return [{"id": str(i), "priority": "white", "summary": f"s{i}"}
+                    for i in range(60)]
+
+    notifications = [
+        {"id": str(i), "repo": "o/r", "reason": "subscribed", "type": "Issue",
+         "title": f"n{i}", "updated_at": "t", "url": f"u{i}"}
+        for i in range(61)
+    ]
+    digest = build_digest(CompleteLLM(), {}, notifications, [])
+    assert digest["llm_requested"] == 60 and digest["llm_triaged"] == 60
+    assert digest["overflow"] == 1 and digest["fallback_count"] == 1
+    assert digest["degraded"] is True
+    assert digest["fallback_reason_code"] == "overflow"
+
+
+def test_digest_parseable_malformed_response_has_stable_reason():
+    class MalformedLLM:
+        def complete_json(self, *a, **k):
+            return [None]
+
+    notifications = [
+        {"id": "1", "repo": "o/r", "reason": "mention", "type": "Issue",
+         "title": "Mentioned", "updated_at": "t", "url": "u1"},
+    ]
+    digest = build_digest(MalformedLLM(), {}, notifications, [])
+    assert digest["fallback_count"] == 1
+    assert digest["fallback_reason_code"] == "malformed_response"
+
+
+def test_digest_nested_malformed_priority_falls_back():
+    class MalformedLLM:
+        def complete_json(self, *a, **k):
+            return [{"id": "1", "priority": [], "summary": "looks valid"}]
+
+    notifications = [
+        {"id": "1", "repo": "o/r", "reason": "mention", "type": "Issue",
+         "title": "Mentioned", "updated_at": "t", "url": "u1"},
+    ]
+    digest = build_digest(MalformedLLM(), {}, notifications, [])
+    assert digest["fallback_count"] == 1
+    assert digest["fallback_reason_code"] == "malformed_response"
+
+
+@pytest.mark.parametrize("field,value", [("action", ["bad"]),
+                                           ("todo", {"bad": True})])
+def test_digest_nested_optional_text_falls_back_safely(field, value):
+    class MalformedLLM:
+        def complete_json(self, *a, **k):
+            return [{"id": "1", "priority": "yellow", "summary": "ok",
+                     field: value}]
+
+    notifications = [
+        {"id": "1", "repo": "o/r", "reason": "mention", "type": "Issue",
+         "title": "Mentioned", "updated_at": "t", "url": "u1"},
+    ]
+    digest = build_digest(MalformedLLM(), {}, notifications, [])
+    rendered = digest["sections"]["red"][0]
+    assert digest["llm_triaged"] == 0 and digest["fallback_count"] == 1
+    assert digest["fallback_reason_code"] == "malformed_response"
+    assert rendered["action"] is None and rendered["todo"] is None
 
 
 def test_curator_decay(tmp_path):

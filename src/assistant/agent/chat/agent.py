@@ -11,13 +11,13 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date
 from pathlib import Path
 
 from assistant.agent.actions import RETRIEVAL_ACTIONS, execute, looks_failed, prompt_block, run_action
 from assistant.platform.secrets import find_github_token
 from assistant.platform.config import Settings
 from assistant.platform.llm import LLM
+from assistant.platform.timeutil import local_today
 from assistant.agent.profile_store import ProfileStore, render_summary
 from assistant.agent.state import load_state
 from assistant.agent.todo_store import ReadingList, TodoStore
@@ -250,7 +250,7 @@ def system_prompt(settings: Settings) -> str:
 
 def build_context(settings: Settings) -> str:
     """Read-only snapshot the agent answers from."""
-    parts = [f"Today is {date.today().isoformat()}."]
+    parts = [f"Today is {local_today().isoformat()}."]
     profile_store = ProfileStore(settings.profile_dir)
     if profile_store.exists():
         parts.append("## Owner profile\n" + render_summary(profile_store.load()))
@@ -502,7 +502,7 @@ def handle_turn(text: str, settings: Settings, llm: LLM | None = None,
             from assistant.agent.events_store import EventsStore
 
             events = EventsStore(settings.events_db)
-            events.record_metrics(f"chat-{date.today().isoformat()}", "chat_turn", {
+            events.record_metrics(f"chat-{local_today().isoformat()}", "chat_turn", {
                 "duration_s": round(time.monotonic() - turn_start, 2),
                 "prompt_chars": len(prompt), "actions": actions_n,
                 "repair_rounds": repair_rounds, "failures_left": failures_left,

@@ -4,8 +4,8 @@
     "layer": "A",
     "label": "golden",
     "language": "zh-majority",
-    "scorer": "first expected action executed with equivalent params; no-action items pass iff nothing executed or faked",
-    "equivalence": "amounts compare as floats; params not listed in expect_params are unconstrained; time/date compare verbatim",
+    "scorer": "an expected action must execute successfully with equivalent params; harmful extra mutations fail; designated historical lookups must also complete retrieval-compose; no-action items pass iff nothing mutating or faked ran",
+    "equivalence": "amounts compare as floats; params not listed in expect_params are unconstrained; relative date/time descriptors resolve against the benchmark day",
     "seed": "items may carry a `seed` (todos/reading/finance) applied to the scratch stores before the turn, so actions on existing entities can SUCCEED (scored on execution, not attempt); a `github` seed sets a dummy connected GitHub identity so credential-gated routing (website build) is reachable — the action is faked, so no real call is made"
   },
   "items": [
@@ -91,7 +91,15 @@
       "id": "ga09",
       "text": "提醒我明天上午11点有面试",
       "expect": {
-        "action": "set_reminder"
+        "action": "set_reminder",
+        "expect_params": {
+          "when": {
+            "$relative_datetime": {
+              "days": 1,
+              "time": "11:00"
+            }
+          }
+        }
       }
     },
     {
@@ -129,9 +137,78 @@
     },
     {
       "id": "ga13",
-      "text": "六月份我在交通上花了多少？",
+      "text": "今年六月份我在交通上花了多少？",
       "expect": {
-        "action": "query_transactions"
+        "action": "query_transactions",
+        "expect_params": {
+          "start": {
+            "$current_year_date": {
+              "month": 6,
+              "day": 1
+            }
+          },
+          "end": {
+            "$current_year_date": {
+              "month": 6,
+              "day": 30
+            }
+          },
+          "category": "transport"
+        },
+        "require_retrieval_compose": true,
+        "expect_reply_total": 96
+      },
+      "seed": {
+        "finance": [
+          {
+            "kind": "expense",
+            "amount": 40,
+            "category": "transport",
+            "note": "地铁",
+            "when": {
+              "$current_year_date": {
+                "month": 6,
+                "day": 5
+              }
+            }
+          },
+          {
+            "kind": "expense",
+            "amount": 56,
+            "category": "transport",
+            "note": "打车",
+            "when": {
+              "$current_year_date": {
+                "month": 6,
+                "day": 20
+              }
+            }
+          },
+          {
+            "kind": "expense",
+            "amount": 88,
+            "category": "food",
+            "note": "范围内但类别不同",
+            "when": {
+              "$current_year_date": {
+                "month": 6,
+                "day": 12
+              }
+            }
+          },
+          {
+            "kind": "expense",
+            "amount": 120,
+            "category": "transport",
+            "note": "类别相同但月份不同",
+            "when": {
+              "$current_year_date": {
+                "month": 5,
+                "day": 31
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -257,7 +334,13 @@
         "action": "log_transaction",
         "expect_params": {
           "amount": 60,
-          "category": "shopping"
+          "category": "shopping",
+          "date": {
+            "$relative_weekday": {
+              "weeks_ago": 1,
+              "weekday": 2
+            }
+          }
         }
       }
     },
@@ -265,7 +348,10 @@
       "id": "ga27",
       "text": "把刚记的那笔打车的改成交通类",
       "expect": {
-        "action": "recategorize_transaction"
+        "action": "recategorize_transaction",
+        "expect_params": {
+          "category": "transport"
+        }
       },
       "seed": {
         "finance": [

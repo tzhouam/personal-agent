@@ -14,13 +14,13 @@ the vision chain reads off receipt screenshots) or the `/fin` slash command.
 import re
 import shutil
 import subprocess
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 import yaml
 
 from assistant.platform.locks import _path_lock, locked_transaction
-from assistant.platform.timeutil import weekday_cn
+from assistant.platform.timeutil import local_naive_now, local_today, weekday_cn
 
 CATEGORIES = ["food", "transport", "housing", "utilities", "entertainment",
               "shopping", "health", "education", "travel", "salary", "bonus",
@@ -145,7 +145,7 @@ class FinanceStore:
             return "invalid", None
         if amount <= 0:
             return "invalid", None
-        when = str(when or date.today().isoformat()).strip()
+        when = str(when or local_today().isoformat()).strip()
         try:
             datetime.strptime(when, "%Y-%m-%d")
         except ValueError:
@@ -173,7 +173,7 @@ class FinanceStore:
             if _signature(r["type"], r["amount"], r["currency"], r["date"],
                           _stated_time(r), r.get("note", "")) == signature:
                 return "duplicate", r
-        now = datetime.now()
+        now = local_naive_now()
         record = {"id": f"f-{when.replace('-', '')}-{_next_n(day_data['records'], when)}",
                   "date": when,
                   # full YYYY-MM-DD HH:MM identity: stated time when known, else clock
@@ -309,7 +309,7 @@ class FinanceStore:
         """Deterministic totals for `month` (default: current month): income,
         expense, net, savings rate, expense-by-category (descending), record
         count, and the previous recorded month's net for trend talk."""
-        month = month or date.today().isoformat()[:7]
+        month = month or local_today().isoformat()[:7]
         recs = self.records(month)
         income = round(sum(r["amount"] for r in recs if r["type"] == "income"), 2)
         expense = round(sum(r["amount"] for r in recs if r["type"] == "expense"), 2)
@@ -333,7 +333,7 @@ class FinanceStore:
         merchant groups, and a time-of-day split (from each record's time
         identity). Deterministic drill-down for the dominant categories in an
         analysis."""
-        month = month or date.today().isoformat()[:7]
+        month = month or local_today().isoformat()[:7]
         recs = [r for r in self.records(month)
                 if r["type"] == "expense" and r["category"] == str(category).lower()]
         if not recs:

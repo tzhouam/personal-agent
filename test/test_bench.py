@@ -7,6 +7,7 @@ results run + report card."""
 
 import json
 import socket
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -46,6 +47,14 @@ class ScriptedLLM:
         owner = self._owner_message(prompt)
         import re as _re
 
+        if "六月份" in owner and "## Records you just retrieved" in prompt:
+            # The compose pass must answer from the actual scratch-store result,
+            # rather than returning the generic acknowledgement used elsewhere.
+            records = prompt.split("## Records you just retrieved", 1)[1]
+            total = _re.search(r"\bexpense\s+([\d,.]+)", records)
+            reply = (f"六月份交通支出共 {total.group(1)} 元。" if total else
+                     "六月份没有交通支出记录。")
+            return {"reply": reply, "actions": []}
         fid = _re.search(r"\[(f-[0-9-]+)\]", prompt)
         if "改成交通类" in owner and fid:
             return {"reply": "好", "actions": [
@@ -173,44 +182,52 @@ def test_paired_delta_detects_regression_and_small_n():
 
 # ── golden tracks end-to-end (fake LLMs, isolated results) ───────────
 
-_PERFECT_SCRIPT = {
-    "帮我记一下待办": [{"type": "add_todo", "title": "周五交房租"}],
-    "把待办 t3": [{"type": "done_todo", "id": "t3"}],
-    "午饭花了45": [{"type": "log_transaction", "kind": "expense", "amount": 45}],
-    "下午3点打车": [{"type": "log_transaction", "kind": "expense",
-                    "amount": 32, "time": "15:00"}],
-    "发工资": [{"type": "log_transaction", "kind": "income", "amount": 21000}],
-    "牛肉面": [{"type": "log_meal", "description": "牛肉面"}],
-    "跑了5公里": [{"type": "log_exercise", "activity": "跑步",
-                  "duration_min": 30}],
-    "称了体重": [{"type": "log_weight", "weight_kg": 71.5}],
-    "提醒我明天": [{"type": "set_reminder", "message": "面试", "when": "+1d"}],
-    "每个工作日早上": [{"type": "create_routine", "task": "发天气",
-                      "time": "07:30", "days": "workdays"}],
-    "取消提醒 m2": [{"type": "cancel_reminder", "id": "m2"}],
-    "伙食花了多少": [{"type": "finance_summary"}],
-    "六月份": [{"type": "query_transactions", "month": "2026-06"}],
-    "体重趋势": [{"type": "health_summary"}],
-    "以后记账默认": [{"type": "learn_preference", "rule": "记账默认港币"}],
-    "忘掉那条": [{"type": "retire_preference", "id": "L1"}],
-    "维生素D加到": [{"type": "add_health_need", "item": "维生素D"}],
-    "r2 那篇": [{"type": "done_reading", "id": "r2"}],
-    "重启": [{"type": "reboot"}],
-    "完整的日常流程": [{"type": "trigger_run"}],
-    "重新发布": [{"type": "build_personal_website"}],
-    "面点王花了88": [{"type": "log_transaction", "kind": "expense",
-                      "amount": 88}],
-    "算购物": [{"type": "log_transaction", "kind": "expense", "amount": 60,
-               "category": "shopping"}],
+def _perfect_script() -> dict:
+    """Build clock-sensitive actions after ``run_tracks`` freezes its clock."""
+    from assistant.bench.tracks import _today
 
-    "知道了 dfremm1": [{"type": "acknowledge_failure", "id": "dfremm1"}],
-}
+    today = _today()
+    return {
+        "帮我记一下待办": [{"type": "add_todo", "title": "周五交房租"}],
+        "把待办 t3": [{"type": "done_todo", "id": "t3"}],
+        "午饭花了45": [{"type": "log_transaction", "kind": "expense", "amount": 45}],
+        "下午3点打车": [{"type": "log_transaction", "kind": "expense",
+                        "amount": 32, "time": "15:00"}],
+        "发工资": [{"type": "log_transaction", "kind": "income", "amount": 21000}],
+        "牛肉面": [{"type": "log_meal", "description": "牛肉面"}],
+        "跑了5公里": [{"type": "log_exercise", "activity": "跑步",
+                      "duration_min": 30}],
+        "称了体重": [{"type": "log_weight", "weight_kg": 71.5}],
+        "提醒我明天": [{"type": "set_reminder", "message": "面试",
+                        "when": f"{today + timedelta(days=1):%Y-%m-%d} 11:00"}],
+        "每个工作日早上": [{"type": "create_routine", "task": "发天气",
+                          "time": "07:30", "days": "workdays"}],
+        "取消提醒 m2": [{"type": "cancel_reminder", "id": "m2"}],
+        "伙食花了多少": [{"type": "finance_summary"}],
+        "六月份": [{"type": "query_transactions",
+                    "start": f"{today.year}-06-01", "end": f"{today.year}-06-30",
+                    "category": "transport"}],
+        "体重趋势": [{"type": "health_summary"}],
+        "以后记账默认": [{"type": "learn_preference", "rule": "记账默认港币"}],
+        "忘掉那条": [{"type": "retire_preference", "id": "L1"}],
+        "维生素D加到": [{"type": "add_health_need", "item": "维生素D"}],
+        "r2 那篇": [{"type": "done_reading", "id": "r2"}],
+        "重启": [{"type": "reboot"}],
+        "完整的日常流程": [{"type": "trigger_run"}],
+        "重新发布": [{"type": "build_personal_website"}],
+        "面点王花了88": [{"type": "log_transaction", "kind": "expense",
+                          "amount": 88}],
+        "算购物": [{"type": "log_transaction", "kind": "expense", "amount": 60,
+                   "category": "shopping",
+                   "date": f"{today - timedelta(days=today.weekday() + 5):%Y-%m-%d}"}],
+        "知道了 dfremm1": [{"type": "acknowledge_failure", "id": "dfremm1"}],
+    }
 
 
 def test_golden_actions_track_end_to_end(settings, tmp_path):
     summary = run_tracks(
         ["golden-actions"], settings, reps=1,
-        llm_factory=lambda s: ScriptedLLM(_PERFECT_SCRIPT),
+        llm_factory=lambda s: ScriptedLLM(_perfect_script()),
         results_root=tmp_path / "results", guard_network=False)
     row = summary["tracks"]["golden-actions"]
     assert row["valid"] and row["coverage"] == 1.0
@@ -273,14 +290,25 @@ def test_golden_dedup_track_end_to_end(settings, tmp_path):
     assert row["score"] == 1.0, json.dumps(row["item_means"], ensure_ascii=False)
 
 
-def test_results_run_isolated_and_report_renders(settings, tmp_path):
+def test_results_run_isolated_and_report_renders(settings, tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("TZ", "UTC")
     summary = run_tracks(
         ["golden-actions"], settings, reps=3,
-        llm_factory=lambda s: ScriptedLLM(_PERFECT_SCRIPT),
+        llm_factory=lambda s: ScriptedLLM(_perfect_script()),
         results_root=tmp_path / "results", guard_network=False)
     run_dir = tmp_path / "results" / summary["run_id"]
     assert (run_dir / "summary.json").exists()
     assert (run_dir / "golden-actions.items.jsonl").exists()
+    assert summary["benchmark_now"]
+    persisted = json.loads((run_dir / "summary.json").read_text())
+    assert persisted["benchmark_now"] == summary["benchmark_now"]
+    first_item = json.loads(
+        (run_dir / "golden-actions.items.jsonl").read_text().splitlines()[0])
+    assert first_item["reps"][0]["raw"]["benchmark_date"] == \
+        summary["benchmark_now"][:10]
+    assert os.environ["TZ"] == "UTC"  # runner never mutates process-global TZ
     assert run_dir.stat().st_mode & 0o777 == 0o700
     card = render_report(summary)
     assert "golden-actions" in card and "PA-Mix" in card
@@ -327,7 +355,7 @@ def test_reps_get_fresh_state_no_leak(settings, tmp_path):
     records (e.g. a dedup/void starting from a dirty store)."""
     summary = run_tracks(
         ["golden-actions"], settings, reps=2,
-        llm_factory=lambda s: ScriptedLLM(_PERFECT_SCRIPT),
+        llm_factory=lambda s: ScriptedLLM(_perfect_script()),
         results_root=tmp_path / "results", guard_network=False)
     # ga28 voids "刚记的那笔" — with a leaked store, rep 2 would find TWO
     # seeded records and the natural reference would be ambiguous
@@ -372,6 +400,159 @@ def test_unexpected_fakes_rejected(settings, tmp_path):
     bad = TurnRecord("", "", faked=[{"action": {"type": "reboot"}},
                                     {"action": {"type": "trigger_run"}}])
     assert _score_action_item(item, bad) == 0.0   # extra risky fake → fail
+
+
+def test_golden_oracle_rejects_wrong_relative_time_date_and_category(monkeypatch):
+    """Demonstrated false positives must score zero even when the action itself
+    executes: ga09 once fired at 11:09, ga26 picked Thursday, and ga27 emitted
+    the non-canonical category ``transportation``."""
+    from assistant.bench import tracks
+    from assistant.bench.surfaces import TurnRecord
+    from assistant.bench.tracks import _load_fixture, _score_action_item
+
+    monkeypatch.setattr(tracks, "_today", lambda: date(2026, 8, 1))  # Saturday
+    items = {i["id"]: i for i in _load_fixture("golden_actions.json")[0]["items"]}
+
+    def rec(action, reply="done"):
+        return TurnRecord(reply, "success",
+                          executed=[{"action": action, "outcome": "ok", "ok": True}])
+
+    assert _score_action_item(items["ga09"], rec({
+        "type": "set_reminder", "when": "2026-08-02 11:00"})) == 1.0
+    assert _score_action_item(items["ga09"], rec({
+        "type": "set_reminder", "when": "2026-08-02 11:09"})) == 0.0
+    assert _score_action_item(items["ga09"], rec({
+        "type": "set_reminder", "when": "+17h"})) == 0.0
+
+    assert _score_action_item(items["ga26"], rec({
+        "type": "log_transaction", "amount": 60, "category": "shopping",
+        "date": "2026-07-22"})) == 1.0
+    assert _score_action_item(items["ga26"], rec({
+        "type": "log_transaction", "amount": 60, "category": "shopping",
+        "date": "2026-07-23"})) == 0.0
+
+    seeded_id = "f-20260801-1"
+    assert _score_action_item(items["ga27"], rec({
+        "type": "recategorize_transaction", "id": seeded_id,
+        "category": "transport"})) == 1.0
+    assert _score_action_item(items["ga27"], rec({
+        "type": "recategorize_transaction", "id": seeded_id,
+        "category": "transportation"})) == 0.0
+
+
+def test_golden_retrieval_requires_filtered_grounded_compose(monkeypatch):
+    """ga13 requires a real June range and an answer grounded in its result."""
+    from assistant.bench import tracks
+    from assistant.bench.surfaces import TurnRecord
+    from assistant.bench.tracks import _load_fixture, _score_action_item
+
+    monkeypatch.setattr(tracks, "_today", lambda: date(2026, 8, 1))
+    item = {i["id"]: i for i in _load_fixture("golden_actions.json")[0]["items"]}["ga13"]
+    action = {"type": "query_transactions", "start": "2026-06-01",
+              "end": "2026-06-30", "category": "transport"}
+    outcome = ("2 record(s) · 2026-06-01~2026-06-30 transport · "
+               "income 0 expense 96.0 net -96.0 CNY")
+    executed = [{"action": action, "outcome": outcome, "ok": True},
+                {"action": {"type": "list_todos"},
+                 "outcome": "(no open todos)", "ok": True}]
+    assert _score_action_item(
+        item, TurnRecord("六月份交通支出共 96 元。\n\n✔ (no open todos)",
+                         "success", executed=executed)) == 1.0
+
+    # ``query_transactions`` does not implement ``month``; accepting it was a
+    # false positive because the handler silently queried every date.
+    unsupported_month = [{"action": {
+        "type": "query_transactions", "month": "2026-06",
+        "category": "transport"}, "outcome": outcome, "ok": True}]
+    assert _score_action_item(
+        item, TurnRecord("六月份交通支出共 96 元。", "success",
+                         executed=unsupported_month)) == 0.0
+
+    # A successful query plus a generic acknowledgement is not a composed answer.
+    assert _score_action_item(
+        item, TurnRecord("好的", "success", executed=executed)) == 0.0
+
+    # Presence alone is not grounding: reject a contradiction and a net amount.
+    assert _score_action_item(
+        item, TurnRecord("交通支出不是 96 元，是 0 元。", "success",
+                         executed=executed)) == 0.0
+    assert _score_action_item(
+        item, TurnRecord("六月份净额 -96 元。", "success",
+                         executed=executed)) == 0.0
+
+    # The owner-facing answer may naturally spell the amount in Chinese.
+    assert _score_action_item(
+        item, TurnRecord("今年六月份交通支出共九十六元。", "success",
+                         executed=executed)) == 1.0
+    assert _score_action_item(
+        item, TurnRecord("今年六月份交通支出共一百九十六元。", "success",
+                         executed=executed)) == 0.0
+
+    for reply in (
+        "今年六月份交通一共九十六元。",
+        "打车和地铁合计九十六元。",
+        "两笔交通记录合计金额为 96 元。",
+        "合计96元。",
+        "总计96元。",
+        "今年六月份交通费用为96元。",
+        "交通支出共96元，实际是两笔交易。",
+        "交通支出共96元，实际为40元地铁加56元打车。",
+    ):
+        assert _score_action_item(
+            item, TurnRecord(reply, "success", executed=executed)) == 1.0, reply
+
+    for reply in (
+        "交通支出负九十六元。",
+        "交通支出不止九十六元。",
+        "交通支出不是大约 96 元，而是 0 元。",
+        "交通支出 96 元不是正确答案，实际是 0 元。",
+        "交通支出并非人民币96元，而是0元。",
+        "96元不是交通支出，是收入。",
+        "交通支出96元，但这不对，实际是0元。",
+        "交通支出96元，实际是0元。",
+        "交通支出不到96元。",
+        "交通支出至少96元。",
+        "交通支出最多96元。",
+    ):
+        assert _score_action_item(
+            item, TurnRecord(reply, "success", executed=executed)) == 0.0, reply
+
+    assert _score_action_item(
+        item, TurnRecord("交通支出不是0元，而是96元。", "success",
+                         executed=executed)) == 1.0
+
+    # A failed compose preserves this retrieval's raw dump behind a ✔ marker.
+    assert _score_action_item(
+        item, TurnRecord(f"让我查一下\n\n✔ {outcome}\n✔ (no open todos)",
+                         "success", executed=executed)) == 0.0
+
+
+def test_frozen_benchmark_clock_aligns_prompt_oracle_and_store_defaults(settings):
+    """Even when the live clock is years away, every benchmark-facing seam
+    observes one configured-zone instant."""
+    from assistant.agent.chat.agent import build_context
+    from assistant.agent.finance_store import FinanceStore
+    from assistant.agent.health_store import HealthStore
+    from assistant.agent.todo_store import TodoStore
+    from assistant.bench.tracks import _today
+    from assistant.platform.notify import parse_when
+    from assistant.platform.timeutil import frozen_now, temporal_anchor
+
+    frozen = datetime(2000, 1, 2, 23, 59,
+                      tzinfo=timezone(timedelta(hours=8), "HKT"))
+    with frozen_now(frozen):
+        assert build_context(settings).startswith("Today is 2000-01-02.")
+        assert "Now: 2000-01-02 23:59 +0800" in temporal_anchor()
+        assert _today() == date(2000, 1, 2)
+        assert parse_when("+1d") == datetime(2000, 1, 3, 23, 59)
+        assert parse_when("2000-01-02T12:00:00+00:00") == \
+            datetime(2000, 1, 2, 20, 0)
+
+        _, finance = FinanceStore(settings.profile_dir).add("expense", 1)
+        _, health = HealthStore(settings.profile_dir).add(
+            "meal", description="test meal")
+        todo = TodoStore(settings.profile_dir).upsert("clock-test", title="clock")
+        assert finance["date"] == health["date"] == todo["created"] == "2000-01-02"
 
 
 def test_changed_fixture_not_comparable():

@@ -65,6 +65,27 @@ def test_parse_when_accepts_iso8601():
     assert aware is not None and aware.tzinfo is None
 
 
+def test_parse_when_aware_future_uses_target_dates_dst_rule():
+    """Do not reuse today's fixed EDT/EST offset for a future target date."""
+    import os
+    import time
+
+    if not hasattr(time, "tzset"):
+        return
+    prior = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        assert parse_when("2027-01-15T12:00:00+00:00", NOW) == \
+            datetime(2027, 1, 15, 7, 0)
+    finally:
+        if prior is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = prior
+        time.tzset()
+
+
 def test_reminder_delivery_gives_up_after_max_attempts(settings):
     """An always-failing send must dead-letter instead of retrying forever: one
     broken send path produced 752 identical failures in a day while the owner

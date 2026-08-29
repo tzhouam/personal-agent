@@ -22,10 +22,16 @@ def test_extractors_cover_all_phases():
         "notifications": [{}],
         "profile_ops": [{}, {}],
         "digest": {"sections": {"red": [{}], "yellow": [], "white": [{}, {}]},
-                   "suppressed_seen": 4},
+                   "suppressed_seen": 4, "llm_requested": 5, "llm_triaged": 3,
+                   "fallback_count": 2, "degraded": True,
+                   "fallback_reason_code": "partial_response"},
         "todos": {"open_count": 7, "added": ["t1"], "closed": [{}]},
         # production shape: feed rows are tagged ok:/FAILED, the rest are notes
         "research": {"papers": [{}, {}], "industry": [{}],
+                     "score_requested": 9, "score_completed": 7,
+                     "score_fallback": 2, "summary_requested": 4,
+                     "summary_completed": 3, "summary_fallback": 1,
+                     "degraded": True,
                      "source_health": {"OpenAI Blog": "ok: 15 items",
                                        "机器之心": "FAILED: HTTPStatusError",
                                        "arxiv": "39 candidates from 5 queries",
@@ -37,12 +43,21 @@ def test_extractors_cover_all_phases():
     assert EXTRACTORS["collect"](out) == {"observations": 3, "notifications": 1,
                                           "obs_github": 2, "obs_gmail": 1}
     assert EXTRACTORS["profile"](out) == {"ops_applied": 2}
-    assert EXTRACTORS["digest"](out) == {"red": 1, "yellow": 0, "white": 2, "suppressed": 4}
+    assert EXTRACTORS["digest"](out) == {
+        "red": 1, "yellow": 0, "white": 2, "suppressed": 4,
+        "llm_requested": 5, "llm_triaged": 3, "fallback_count": 2,
+        "degraded": 1,
+    }
     assert EXTRACTORS["todos"](out) == {"wip": 7, "added": 1, "auto_closed": 1}
     # only the ok:/FAILED rows count as sources — the free-text arxiv and quota
     # notes used to inflate `sources_total` while `sources_ok` sat at 0 forever
-    assert EXTRACTORS["research"](out) == {"papers": 2, "paper_quota": 0, "industry": 1,
-                                           "sources_ok": 1, "sources_total": 2}
+    assert EXTRACTORS["research"](out) == {
+        "papers": 2, "paper_quota": 0, "industry": 1,
+        "sources_ok": 1, "sources_total": 2,
+        "score_requested": 9, "score_completed": 7, "score_fallback": 2,
+        "summary_requested": 4, "summary_completed": 3, "summary_fallback": 1,
+        "degraded": 1,
+    }
     assert EXTRACTORS["website"](out) == {"pushed": 1}
     assert EXTRACTORS["deliver"](out) == {"email_sent": 1}
     assert EXTRACTORS["curate"](out) == {"decayed": 1}

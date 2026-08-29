@@ -3,7 +3,7 @@ prompt tail (deterministic: frozen datetimes, never the live clock)."""
 from datetime import datetime, timedelta, timezone
 
 from assistant.platform import timeutil
-from assistant.platform.timeutil import temporal_anchor
+from assistant.platform.timeutil import _now, frozen_now, temporal_anchor
 
 _HKT = timezone(timedelta(hours=8), "HKT")
 _FROZEN = datetime(2026, 7, 17, 9, 32, 41, tzinfo=_HKT)   # a Friday
@@ -32,6 +32,15 @@ def test_anchor_tolerates_platform_tzname_forms():
 def test_default_clock_is_aware_local(monkeypatch):
     monkeypatch.setattr(timeutil, "_now", lambda: _FROZEN)
     assert "2026-07-17 09:32" in temporal_anchor()
+
+
+def test_frozen_now_is_context_local_and_restores():
+    before = _now()
+    with frozen_now(_FROZEN):
+        assert _now() == _FROZEN
+        assert "2026-07-17 09:32" in temporal_anchor()
+    assert _now() != _FROZEN
+    assert abs((_now() - before).total_seconds()) < 5
 
 
 # ── event-day resolution (per-day records: "昨天" must become an absolute date) ──

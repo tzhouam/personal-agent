@@ -15,13 +15,66 @@ and the schedulers together.
 """
 
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
+
+
+_NOW_OVERRIDE: ContextVar[datetime | None] = ContextVar(
+    "assistant_timeutil_now_override", default=None)
 
 
 def _now() -> datetime:
     """The module's single clock read (aware, system-local) — a seam so tests
     monkeypatch this instead of comparing against the live clock."""
-    return datetime.now().astimezone()
+    return _NOW_OVERRIDE.get() or datetime.now().astimezone()
+
+
+def local_now() -> datetime:
+    """Aware system-local now, or the context-local benchmark clock."""
+    return _now()
+
+
+def local_naive_now() -> datetime:
+    """Naive local now for legacy stores that persist wall-clock strings."""
+    return _now().replace(tzinfo=None)
+
+
+def local_today() -> date:
+    """System-local calendar day, sharing the benchmark clock when active."""
+    return _now().date()
+
+
+def to_local_naive(value: datetime) -> datetime:
+    """Convert an aware timestamp to the active local wall clock.
+
+    Production must use no-arg ``astimezone()`` so the target date's DST rule
+    is applied; ``datetime.now().astimezone().tzinfo`` is often only today's
+    fixed offset. A frozen benchmark instead uses its configured ZoneInfo.
+    Naive values already represent local wall time and pass through unchanged.
+    """
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value
+    frozen = _NOW_OVERRIDE.get()
+    localized = value.astimezone(frozen.tzinfo) if frozen else value.astimezone()
+    return localized.replace(tzinfo=None)
+
+
+@contextmanager
+def frozen_now(now: datetime):
+    """Context-local clock override for hermetic benchmark runs.
+
+    Runtime callers never set this. ContextVar scoping prevents a benchmark or
+    test from changing another thread/task's clock, and the MoA worker path
+    already propagates its context explicitly.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        now = now.astimezone()
+    token = _NOW_OVERRIDE.set(now)
+    try:
+        yield
+    finally:
+        _NOW_OVERRIDE.reset(token)
 
 
 _WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")

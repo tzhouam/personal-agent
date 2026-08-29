@@ -15,6 +15,8 @@ due) regardless of commitment.
 
 from datetime import date, datetime
 
+from assistant.platform.timeutil import local_today
+
 _PRIORITY_W = {"red": 1.0, "yellow": 0.5}
 # someone is waiting on the owner — the strongest non-deadline signal
 _BLOCKING_W = {"review_requested": 1.0, "mention": 0.6, "assign": 0.6, "assigned": 0.6}
@@ -73,7 +75,7 @@ def is_committed(todo: dict, today: date | None = None) -> bool:
     if _priority(todo) >= 1.0 or _blocking(todo) > 0:
         return True
     due = _day(todo.get("due"))
-    return due is not None and ((today or date.today()) - due).days <= FADE_END
+    return due is not None and ((today or local_today()) - due).days <= FADE_END
 
 
 def staleness(todo: dict, today: date | None = None) -> float:
@@ -83,7 +85,7 @@ def staleness(todo: dict, today: date | None = None) -> float:
     month past due. Activity anchor is the creation date (todos are
     write-once today; a `touched` field would slot in here if editing is
     ever added)."""
-    today = today or date.today()
+    today = today or local_today()
     due = _day(todo.get("due"))
     if due is not None:
         # scheduled work lives by its date, committed or not: alive until a
@@ -104,7 +106,7 @@ def staleness(todo: dict, today: date | None = None) -> float:
 def going_stale(todo: dict, today: date | None = None) -> bool:
     """True while an item is fading (its window's warn threshold up to death)
     but not yet dead. Dated items never warn — the due ramp handles them."""
-    today = today or date.today()
+    today = today or local_today()
     if _day(todo.get("due")) is not None:
         return False
     created = _day(todo.get("created"))
@@ -120,7 +122,7 @@ def urgency(todo: dict, today: date | None = None) -> float:
     """The score: higher = more urgent. Reference points: red review-request
     due today ≈ 23; fresh yellow manual note ≈ 3.5; day-25 untouched manual
     note ≈ 1.2 and about to expire."""
-    today = today or date.today()
+    today = today or local_today()
     due = _day(todo.get("due"))
     created = _day(todo.get("created"))
     age_days = max(0, (today - created).days) if created else 0

@@ -107,6 +107,32 @@ def _classify_failure(exc) -> str | None:
     return None
 
 
+def _failure_span_attrs(exc) -> dict:
+    """Return bounded, privacy-safe metadata for a failed provider call.
+
+    Exception messages, response bodies, prompts, and credentials are
+    deliberately excluded: they may contain owner data or secrets.  Failure
+    classification is best-effort so observability can never mask the original
+    provider exception.
+    """
+    classification = None
+    try:
+        classification = _classify_failure(exc)
+    except Exception:
+        pass
+    attrs = {
+        "error_type": type(exc).__name__,
+        "breaker_classification": classification or "none",
+    }
+    try:
+        status = getattr(exc, "status_code", None)
+    except Exception:
+        status = None
+    if isinstance(status, int) and not isinstance(status, bool):
+        attrs["status_code"] = int(status)
+    return attrs
+
+
 def _entry(key: tuple) -> dict:
     e = _BREAKER.get(key)
     if e is None:
@@ -315,7 +341,11 @@ class LLM:
 
         with tracing.span("llm", model=model_id, max_tokens=max_tokens,
                           **(span_attrs or {})) as _sp:
-            resp = client.messages.create(**kwargs)
+            try:
+                resp = client.messages.create(**kwargs)
+            except Exception as exc:
+                _sp.set(**_failure_span_attrs(exc))
+                raise
             tracing.set_usage(_sp, getattr(resp, "usage", None),
                               stop_reason=getattr(resp, "stop_reason", "") or "")
         if resp.stop_reason == "max_tokens":
@@ -336,13 +366,23 @@ class LLM:
         from assistant.platform import tracing
 
         stats = {"members_total": len(self.mixture.get("members", [])),
-                 "proposals_ok": 0, "aggregator_ok": 0, "fallback_used": 0,
-                 "abandoned": 0}
+                 "members_attempted": 0, "members_skipped": 0,
+                 "members_failed": 0, "proposals_ok": 0,
+                 "proposals_final": 0,
+                 "aggregator_attempted": 0, "aggregator_skipped": 0,
+                 "aggregator_failed": 0, "aggregator_ok": 0,
+                 "fallback_used": 0, "abandoned": 0, "degraded": 1}
         start = _time.monotonic()
         with tracing.span("mixture", role=role or "") as sp:
             try:
                 return self._mixture_run(content, system, max_tokens, role, stats)
             finally:
+                # A useful MoA result requires both independent evidence and a
+                # successful synthesis.  Compute this once at finalization so
+                # every exit path emits the same deterministic health signal.
+                stats["degraded"] = int(
+                    stats["proposals_final"] < 2
+                    or stats["aggregator_ok"] != 1)
                 sp.set(**stats)
                 self._record_moa_metrics(stats, _time.monotonic() - start)
 
@@ -407,8 +447,8 @@ class LLM:
                 _breaker_record(scopes, gens, claimed,
                                 "ok" if out.strip() else None, threshold, cooldown)
                 if out.strip():
-                    stats["proposals_ok"] += 1
-                return out if out.strip() else None   # empty = dropped, uncounted
+                    return out, False
+                return None, True                   # empty = failed proposal
             except Exception as exc:
                 cls = _classify_failure(exc)
                 _breaker_record(scopes, gens, claimed, cls, threshold, cooldown)
@@ -416,7 +456,7 @@ class LLM:
                 if cls == "prov":
                     call_failed.add(scopes[0])        # whole endpoint+credential
                 log_.warning("mixture proposer %s failed: %s", member.get("model"), exc)
-                return None
+                return None, True
 
         responses: list[str] = []
         for _ in range(layers):
@@ -431,6 +471,7 @@ class LLM:
                 if mode == "open":
                     log_.warning("mixture: skipping %s (provider cooling down "
                                  "after repeated failures)", m.get("model"))
+                    stats["members_skipped"] += 1
                     continue
                 runnable.append((m, scopes, gens, claimed))
             if not runnable:
@@ -438,6 +479,7 @@ class LLM:
                     break                 # keep the prior layer's proposals
                 return self._mixture_fallback(content, system, max_tokens, role,
                                               agg, call_failed, log_, stats)
+            stats["members_attempted"] += len(runnable)
             # Propagate the current context into each worker (a raw pool thread
             # starts with a fresh context, which would drop the ContextVar-scoped
             # tracer — so proposer llm spans would vanish). One copy per member,
@@ -454,10 +496,10 @@ class LLM:
                 futs = [ex.submit(ctx.run, propose, m, sc, ge, cl, layer_input)
                         for ctx, (m, sc, ge, cl) in zip(ctxs, runnable)]
                 done, pending = wait(futs, timeout=timeout_s)
-                results = [f.result() for f in done]
-                while not any(results) and pending:
+                outcomes = [f.result() for f in done]
+                while not any(out for out, _failed in outcomes) and pending:
                     done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                    results += [f.result() for f in done]
+                    outcomes += [f.result() for f in done]
                 for f in pending:
                     f.cancel()
                 ex.shutdown(wait=False)
@@ -465,13 +507,19 @@ class LLM:
                     stats["abandoned"] += len(pending)
                     log_.warning("mixture: abandoned %d proposer(s) still running "
                                  "after %ds (chat latency bound)", len(pending), timeout_s)
-                fresh = [r for r in results if r]
+                stats["members_failed"] += sum(
+                    1 for _out, failed in outcomes if failed)
+                fresh = [out for out, _failed in outcomes if out]
             else:
                 with ThreadPoolExecutor(max_workers=min(8, len(runnable))) as ex:
-                    fresh = [r for r in ex.map(
+                    outcomes = list(ex.map(
                         lambda a: a[0].run(propose, a[1][0], a[1][1], a[1][2],
                                            a[1][3], layer_input),
-                        zip(ctxs, runnable)) if r]
+                        zip(ctxs, runnable)))
+                stats["members_failed"] += sum(
+                    1 for _out, failed in outcomes if failed)
+                fresh = [out for out, _failed in outcomes if out]
+            stats["proposals_ok"] += len(fresh)
             if fresh:
                 responses = fresh
             elif responses:
@@ -480,6 +528,10 @@ class LLM:
                 return self._mixture_fallback(content, system, max_tokens, role,
                                               agg, call_failed, log_, stats)
 
+        # `proposals_ok` is total successful proposer work across every layer;
+        # health depends on how many independent answers actually reach the
+        # final synthesis after later-layer failures narrow the set.
+        stats["proposals_final"] = len(responses)
         # The aggregator is otherwise a single point of failure: if it dies
         # after every proposer succeeded, fall back to the first surviving
         # proposal (itself a complete answer to the original prompt) rather
@@ -488,10 +540,13 @@ class LLM:
                                    agg.get("api_key"), agg["model"])
         agg_mode, agg_gens, agg_claimed = _breaker_check(agg_scopes, cooldown)
         if agg_mode == "open":
+            stats["aggregator_skipped"] = 1
+            stats["fallback_used"] = 1
             log_.warning("mixture aggregator %s cooling down — returning a "
                          "proposer answer", agg.get("model"))
             return responses[0]
         agg_client = self._client(agg.get("base_url"), agg.get("api_key"))
+        stats["aggregator_attempted"] = 1
         try:
             synthesis = self._call(agg_client, agg["model"],
                                    _augment(content, responses), system, max_tokens,
@@ -500,6 +555,8 @@ class LLM:
             _breaker_record(agg_scopes, agg_gens, agg_claimed,
                             "ok" if synthesis.strip() else None, threshold, cooldown)
         except Exception as exc:
+            stats["aggregator_failed"] = 1
+            stats["fallback_used"] = 1
             _breaker_record(agg_scopes, agg_gens, agg_claimed,
                             _classify_failure(exc), threshold, cooldown)
             logging.getLogger("assistant").warning(
@@ -510,6 +567,8 @@ class LLM:
         # aggregator that spends its whole budget on hidden thinking emits no
         # text. Don't hand back "" when a good proposal exists.
         if not synthesis.strip():
+            stats["aggregator_failed"] = 1
+            stats["fallback_used"] = 1
             logging.getLogger("assistant").warning(
                 "mixture aggregator %s returned empty output — returning a "
                 "proposer answer", agg.get("model"))
@@ -529,6 +588,7 @@ class LLM:
         Exhausted → the original RuntimeError (genuinely nothing is up)."""
         if stats is not None:
             stats["fallback_used"] = 1
+            stats["aggregator_skipped"] = 1
         threshold = self.settings.moa_member_fail_threshold
         cooldown = self.settings.moa_member_cooldown_s
         role_spec = self.roles.get(role) if role else None

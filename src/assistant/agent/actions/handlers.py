@@ -583,14 +583,12 @@ def _log_date(p: dict) -> tuple[str, str | None]:
     gave an explicit date we could not parse — the caller must **reject** the log
     (never silently record today). Already-absolute and relative days
     (今天/昨天/前天/N天前/…) both resolve via `resolve_day`."""
-    from datetime import date as _date
-
-    from assistant.platform.timeutil import resolve_day
+    from assistant.platform.timeutil import local_today, resolve_day
 
     raw = str(p.get("date", "")).strip()
     if not raw:
         return "", None
-    resolved = resolve_day(raw, _date.today())
+    resolved = resolve_day(raw, local_today())
     if resolved is None:
         return "", f'没听懂日期"{raw}"，请用「昨天／前天／2026-07-20」这样的说法重说'
     return resolved, None

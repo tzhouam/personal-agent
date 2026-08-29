@@ -130,9 +130,12 @@ END-STATE on scratch stores (the WorkBench idea) plus action-trace checks:
   (b) contains no fabricated value and states it doesn't have/can't recall
   it (judged by string rules first, pinned judge only for the honesty arm).
 
-Golden determinism rules: every scenario runs on a frozen clock + pinned TZ
-(the temporal-identity oracle depends on it), resets scratch state per
-scenario, and scores actions under explicit parameter-equivalence rules
+Golden determinism rules: every run captures and persists one aware
+`benchmark_now` in the configured `ZoneInfo` (without mutating process-global
+TZ), injects it into temporal anchors, context/store defaults, and relative
+fixture oracles, and retains the derived benchmark date beside each golden raw
+turn for later re-scoring. Every scenario resets scratch state and scores
+actions under explicit parameter-equivalence rules
 (e.g. amount 45 == 45.0; date defaulting per the store's stated-or-auto
 semantics).
 
