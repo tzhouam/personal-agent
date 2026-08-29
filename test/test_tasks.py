@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -13,6 +14,11 @@ class BrokenLLM:
 
     def complete_json(self, *a, **k):
         raise RuntimeError("llm down")
+
+
+def _digest_prompt_ids(prompt):
+    payload = prompt.split("## Notifications to triage\n", 1)[1]
+    return [str(json.loads(line)["id"]) for line in payload.splitlines()]
 
 
 def test_digest_deterministic_fallback():
@@ -80,22 +86,164 @@ def test_digest_missing_summary_is_malformed_fallback():
     assert digest["sections"]["red"][0]["summary"] == "[mention] Mentioned"
 
 
-def test_digest_overflow_is_counted_as_deterministic_fallback():
+@pytest.mark.parametrize("count,fallback,reason", [
+    (60, 0, "none"),
+    (61, 1, "overflow"),
+])
+def test_digest_cap_batches_and_overflow_accounting(count, fallback, reason):
     class CompleteLLM:
-        def complete_json(self, *a, **k):
-            return [{"id": str(i), "priority": "white", "summary": f"s{i}"}
-                    for i in range(60)]
+        def __init__(self):
+            self.calls = []
+
+        def complete_json(self, prompt, **kwargs):
+            ids = _digest_prompt_ids(prompt)
+            self.calls.append((ids, kwargs))
+            # Response order must not become digest order.
+            return [{"id": item_id, "priority": "white", "summary": f"s{item_id}"}
+                    for item_id in reversed(ids)]
 
     notifications = [
         {"id": str(i), "repo": "o/r", "reason": "subscribed", "type": "Issue",
          "title": f"n{i}", "updated_at": "t", "url": f"u{i}"}
-        for i in range(61)
+        for i in range(count)
     ]
-    digest = build_digest(CompleteLLM(), {}, notifications, [])
+    llm = CompleteLLM()
+    digest = build_digest(llm, {}, notifications, [])
     assert digest["llm_requested"] == 60 and digest["llm_triaged"] == 60
-    assert digest["overflow"] == 1 and digest["fallback_count"] == 1
-    assert digest["degraded"] is True
-    assert digest["fallback_reason_code"] == "overflow"
+    assert digest["overflow"] == fallback and digest["fallback_count"] == fallback
+    assert digest["degraded"] is bool(fallback)
+    assert digest["fallback_reason_code"] == reason
+    assert [len(ids) for ids, _ in llm.calls] == [15, 15, 15, 15]
+    assert [item_id for ids, _ in llm.calls for item_id in ids] == [
+        str(i) for i in range(60)
+    ]
+    assert all(kwargs["max_tokens"] == 8000 and kwargs["mixture"] is False
+               for _, kwargs in llm.calls)
+    assert [item["id"] for item in digest["sections"]["white"]] == [
+        str(i) for i in range(count)
+    ]
+
+
+def test_digest_batch_failure_and_partial_response_fallback_only_their_ids():
+    class BatchLLM:
+        def complete_json(self, prompt, **kwargs):
+            ids = _digest_prompt_ids(prompt)
+            if ids[0] == "15":
+                raise RuntimeError("only this batch failed")
+            if ids[0] == "30":
+                ids = ids[:-1]
+            return [{"id": item_id, "priority": "white", "summary": f"ok-{item_id}"}
+                    for item_id in ids]
+
+    notifications = [
+        {"id": str(i), "repo": "o/r", "reason": "subscribed", "type": "Issue",
+         "title": f"n{i}", "updated_at": "t", "url": f"u{i}"}
+        for i in range(45)
+    ]
+    digest = build_digest(BatchLLM(), {}, notifications, [])
+
+    assert digest["llm_requested"] == 45
+    assert digest["llm_triaged"] == 29
+    assert digest["fallback_count"] == 16
+    assert digest["fallback_reason_code"] == "llm_error"
+    by_id = {item["id"]: item for item in digest["sections"]["white"]}
+    assert by_id["14"]["summary"] == "ok-14"
+    assert by_id["15"]["summary"] == "[subscribed] n15"
+    assert by_id["30"]["summary"] == "ok-30"
+    assert by_id["44"]["summary"] == "[subscribed] n44"
+
+
+def test_digest_duplicate_rows_first_valid_wins_without_count_inflation():
+    class DuplicateLLM:
+        def complete_json(self, prompt, **kwargs):
+            first, second = _digest_prompt_ids(prompt)
+            return [
+                {"id": first, "priority": "white", "summary": "first"},
+                {"id": first, "priority": "red", "summary": "duplicate"},
+                {"id": second, "priority": "white", "summary": "second"},
+            ]
+
+    notifications = [
+        {"id": str(i), "repo": "o/r", "reason": "subscribed", "type": "Issue",
+         "title": f"n{i}", "updated_at": "t", "url": f"u{i}"}
+        for i in range(2)
+    ]
+    digest = build_digest(DuplicateLLM(), {}, notifications, [])
+
+    assert digest["llm_triaged"] == 2
+    assert digest["fallback_count"] == 0
+    assert digest["fallback_reason_code"] == "none"
+    assert [(item["id"], item["summary"])
+            for item in digest["sections"]["white"]] == [
+        ("0", "first"), ("1", "second"),
+    ]
+
+
+def test_digest_dedupes_input_ids_within_batch_and_keeps_newest_first():
+    class CompleteLLM:
+        def __init__(self):
+            self.prompt_ids = []
+
+        def complete_json(self, prompt, **kwargs):
+            self.prompt_ids.extend(_digest_prompt_ids(prompt))
+            return [
+                {"id": item_id, "priority": "white", "summary": f"ok-{item_id}"}
+                for item_id in self.prompt_ids
+            ]
+
+    notifications = [
+        {"id": "same", "repo": "o/r", "reason": "subscribed", "type": "Issue",
+         "title": "newest", "updated_at": "new", "url": "new-url"},
+        {"id": "same", "repo": "o/r", "reason": "subscribed", "type": "Issue",
+         "title": "older duplicate", "updated_at": "old", "url": "old-url"},
+        {"id": "other", "repo": "o/r", "reason": "subscribed", "type": "Issue",
+         "title": "other", "updated_at": "new", "url": "other-url"},
+    ]
+    llm = CompleteLLM()
+    digest = build_digest(llm, {}, notifications, [])
+
+    assert llm.prompt_ids == ["same", "other"]
+    assert digest["total"] == digest["llm_requested"] == digest["llm_triaged"] == 2
+    assert digest["fallback_count"] == digest["overflow"] == 0
+    rendered = digest["sections"]["white"]
+    assert [item["id"] for item in rendered] == ["same", "other"]
+    assert rendered[0]["title"] == "newest" and rendered[0]["url"] == "new-url"
+
+
+def test_digest_dedupes_across_raw_batch_boundary_before_unique_cap():
+    """A duplicate at raw position 15 must not shift a unique item past 60."""
+    class CompleteLLM:
+        def __init__(self):
+            self.calls = []
+
+        def complete_json(self, prompt, **kwargs):
+            ids = _digest_prompt_ids(prompt)
+            self.calls.append(ids)
+            return [{"id": item_id, "priority": "white", "summary": f"ok-{item_id}"}
+                    for item_id in ids]
+
+    def notification(item_id, title=None):
+        return {"id": str(item_id), "repo": "o/r", "reason": "subscribed",
+                "type": "Issue", "title": title or f"n{item_id}",
+                "updated_at": "t", "url": f"u{item_id}"}
+
+    # Unique IDs 0..14 fill the first batch. An older duplicate of 0 sits at
+    # the raw batch boundary, followed by 15..60: 61 unique notifications.
+    notifications = ([notification(i) for i in range(15)]
+                     + [notification(0, "older duplicate")]
+                     + [notification(i) for i in range(15, 61)])
+    llm = CompleteLLM()
+    digest = build_digest(llm, {}, notifications, [])
+
+    assert [len(ids) for ids in llm.calls] == [15, 15, 15, 15]
+    assert [item_id for ids in llm.calls for item_id in ids] == \
+        [str(i) for i in range(60)]
+    assert digest["total"] == 61
+    assert digest["llm_requested"] == digest["llm_triaged"] == 60
+    assert digest["overflow"] == digest["fallback_count"] == 1
+    rendered = digest["sections"]["white"]
+    assert [item["id"] for item in rendered] == [str(i) for i in range(61)]
+    assert rendered[0]["title"] == "n0"
 
 
 def test_digest_parseable_malformed_response_has_stable_reason():

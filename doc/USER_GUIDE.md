@@ -556,12 +556,12 @@ directly.
 | Symptom | Likely cause / fix |
 |---|---|
 | No digest email arrived | Check delivery: `assistant send-test-email`. If that works, check the run: `assistant run --dry-run` and read the console. |
-| LLM errors ("authentication", "no JSON found") | Bad/expired key → `assistant init --check`. "No JSON / truncated" on a reasoning model means the token budget was too low — already tuned, but see the `llm-json-truncation-reasoning-models` skill if you hit it in new code. |
+| LLM errors ("authentication", "no JSON found") | Bad/expired key → fix it, then run `assistant init --check`; a successful probe clears that route's durable quarantine immediately. Structured calls automatically distinguish malformed JSON from truncation and retry once with the appropriate repair/budget. |
 | `LLM_ROLES`/`LLM_MIXTURE` seems ignored | Probably malformed JSON — the config deliberately degrades to "feature off" rather than crashing. `assistant init --check` (the **Model routing** line) names the broken variable and its source; the usual cause is a multi-line value not wrapped in 'single quotes'. It also warns when the mixture covers the `chat` role (MoA ~doubles reply latency). |
 | Run crashed midway | `assistant run --resume` re-enters the exact phase it stopped at, reusing saved artifacts. |
 | Profile learned something wrong | It's git: `git -C ~/.personal-agent/profile revert HEAD`. Then fix `aliases.yaml` or the protected sections if needed. |
 | A collector returns nothing | Chrome: the History file is locked while Chrome runs / may not exist on this machine (the agent skips it gracefully). Gmail: needs SMTP creds. GitHub: check the token. `--check` shows each collector's status. |
-| Chinese media / a feed is empty | Feeds are flaky by nature; the digest footer lists any source dead 3 days running. Point `config/sources.yaml` at a working mirror. |
+| Chinese media / a feed is empty | The digest footer lists affected source names; the run's `research.json` `source_health` entries distinguish a failed fetch from a cooling/half-open source. After three failures a source waits 72 hours before one probe; point `config/sources.yaml` at a working mirror to bypass the old fingerprint immediately. Set `RESEARCH_FEED_COOLDOWN_HOURS=0` only as a temporary rollback. |
 | Website didn't update | `assistant run-phase website` runs it standalone and prints the result; check `WEBSITE_REPO` push access with `--check`. |
 | WeChat replies stopped | The gateway is down — see the restart runbook in [WECHAT_OPENCLAW.md](WECHAT_OPENCLAW.md). |
 | Résumé sync fails with "no git access" | Overleaf git bridge needs premium, and the token must own the project — see [§3.5](#35-résumé). |

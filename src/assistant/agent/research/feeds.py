@@ -9,6 +9,7 @@ import httpx
 import yaml
 
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
+_FETCH_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=2.0)
 
 
 def load_sources(sources_file: Path) -> list[dict]:
@@ -21,9 +22,10 @@ def load_sources(sources_file: Path) -> list[dict]:
     return [s for s in data.get("sources", []) if s.get("enabled", True)]
 
 
-def fetch_feed(url: str, timeout: int = 30) -> list[dict]:
-    """Parse RSS 2.0 or Atom into a uniform item list."""
-    resp = httpx.get(url, timeout=timeout, follow_redirects=True,
+def fetch_feed(url: str, timeout=None) -> list[dict]:
+    """Fetch once, with short defaults or a caller-supplied timeout override."""
+    request_timeout = _FETCH_TIMEOUT if timeout is None else timeout
+    resp = httpx.get(url, timeout=request_timeout, follow_redirects=True,
                      headers={"User-Agent": "personal-agent/0.1 (+rss reader)"})
     resp.raise_for_status()
     return parse_feed(resp.text)

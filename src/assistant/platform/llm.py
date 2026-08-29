@@ -1,29 +1,153 @@
 """Thin Anthropic client wrapper for the agent.
 
-Exports the ``LLM`` class: a traced ``messages.create`` call with exponential
-retry on transient API errors and a JSON-coercing convenience method. Keeps
+Exports the ``LLM`` class: traced provider calls with platform-owned bounded
+retry, durable route quarantine, and a JSON-coercing convenience method. Keeps
 every call site provider-agnostic and degrade-friendly.
 """
 
-import hashlib
 import json
 import re
 import threading
 import time as _time
 
 import anthropic
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from assistant.platform.config import Settings
+from assistant.platform.llm_health import RouteHealthStore
+from assistant.platform.llm_health import route_scopes as _durable_route_scopes
 
-_RETRYABLE = (
-    anthropic.APIConnectionError,
-    anthropic.RateLimitError,
-    anthropic.InternalServerError,
-)
+_RETRY_DELAYS_S = (1, 4)
+_STRUCTURED_TOKEN_CAP = 16_000
+_AUTH_PROVIDER_CODES = frozenset({"authentication_error", "invalid_api_key"})
+_sleep = _time.sleep
 
 
 _CHEAP_ROLES = frozenset({"cheap", "bulk", "research", "score"})
+_DEFAULT_MIXTURE_ROLES = ("pipeline", "research", "task", "evolve")
+_INTERACTIVE_TIMEOUT_S = 45
+_OFFLINE_TIMEOUT_S = 120
+_SENSITIVE_IDENTIFIER = re.compile(
+    r"(?i)(?:://|^sk[-_]|api[_-]?key|password|credential|bearer|"
+    r"(?:^|[-_])token(?:$|[-_])|(?:^|[-_])secret(?:$|[-_])|"
+    r"(?:^|[-_])key(?:$|[-_]))")
+
+
+def _bounded_identifier(value, *, redacted: str) -> str:
+    """Return a bounded control-free label, redacting secret-like values."""
+    raw = str(value or "")
+    if _SENSITIVE_IDENTIFIER.search(raw):
+        return redacted
+    safe = re.sub(r"[^A-Za-z0-9_.+/-]", "?", raw)[:64]
+    return safe or "unknown"
+
+
+def _bounded_error_type(exc) -> str:
+    """Return useful exception-class metadata without trusting its name."""
+    return _bounded_identifier(type(exc).__name__, redacted="redacted_error")
+
+
+def _bounded_route_label(value) -> str:
+    """Return a privacy-safe model label for durable warning logs."""
+    return _bounded_identifier(value, redacted="redacted_route")
+
+
+def _normalized_route_spec(value) -> dict | None:
+    """Return one safe model route spec, or None for malformed structure."""
+    if not isinstance(value, dict):
+        return None
+    model = value.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    normalized = {"model": model.strip()}
+    for field in ("base_url", "api_key"):
+        item = value.get(field)
+        if item is not None and not isinstance(item, str):
+            return None
+        if item is not None:
+            normalized[field] = item
+    return normalized
+
+
+def normalize_mixture(value, settings: Settings | None = None) -> dict:
+    """Normalize tolerant JSON into a runtime-safe MoA configuration.
+
+    Invalid members are dropped; when ``settings`` is supplied, canonical-
+    equivalent model routes are also deduplicated. Fewer than two surviving
+    members naturally keeps MoA disabled. Invalid roles/aggregator/layers use
+    their documented defaults so a syntactically valid but structurally
+    malformed optional knob can never crash LLM construction or a later call.
+    """
+    if not isinstance(value, dict):
+        return {}
+    raw_members = value.get("members")
+    raw_members = raw_members if isinstance(raw_members, list) else []
+    members = [spec for item in raw_members
+               if (spec := _normalized_route_spec(item)) is not None]
+    if settings is not None:
+        unique = []
+        seen = set()
+        for spec in members:
+            scope = _route_scopes(
+                settings, spec.get("base_url"), spec.get("api_key"),
+                spec["model"])[1]
+            if scope in seen:
+                continue
+            seen.add(scope)
+            unique.append(spec)
+        members = unique
+
+    raw_roles = value.get("roles")
+    if isinstance(raw_roles, list):
+        roles = [role.strip() for role in raw_roles
+                 if isinstance(role, str) and role.strip()]
+    else:
+        roles = []
+    if not roles:
+        roles = list(_DEFAULT_MIXTURE_ROLES)
+
+    aggregator = _normalized_route_spec(value.get("aggregator"))
+    if aggregator is None and members:
+        aggregator = dict(members[0])
+
+    try:
+        raw_layers = value.get("layers", 1)
+        if isinstance(raw_layers, (dict, list, bool)):
+            raise ValueError("invalid layers")
+        layers = max(1, int(raw_layers))
+    except (TypeError, ValueError, OverflowError):
+        layers = 1
+
+    normalized = {"members": members, "roles": roles, "layers": layers}
+    if aggregator is not None:
+        normalized["aggregator"] = aggregator
+    return normalized
+
+
+class CompletionText(str):
+    """String-compatible completion carrying provider termination metadata."""
+
+    def __new__(cls, value: str, stop_reason: str = ""):
+        """Attach ``stop_reason`` without changing callers' string contract."""
+        result = super().__new__(cls, value)
+        result.stop_reason = stop_reason
+        return result
+
+
+class StructuredOutputTruncatedError(ValueError):
+    """Structured output stayed truncated at the platform's safe token cap."""
+
+
+class RouteQuarantinedError(RuntimeError):
+    """A durable auth/permission quarantine prevented a provider call."""
+
+    def __init__(self, scope: str):
+        """Expose only bounded scope metadata, never route configuration."""
+        self.scope = scope
+        super().__init__(f"LLM route quarantined at {scope} scope")
+
+
+class RouteHealthPersistenceError(RuntimeError):
+    """A successful route probe could not durably clear its quarantine."""
 
 
 # Injected metrics sink `(settings, run_id, step, values) -> None`. The durable
@@ -54,9 +178,9 @@ def get_default_metrics_sink():
 # on it), 5xx only the one model:
 #     ("prov",  resolved_base_url, cred_fp)
 #     ("model", resolved_base_url, cred_fp, model)
-# cred_fp = full sha256 of the resolved api key (in-memory only, never logged),
-# so different tenants' credentials on the same endpoint never poison each
-# other. State machine is generation-guarded: every recorded outcome carries
+# cred_fp is a credential-keyed HMAC shared with the durable quarantine (never
+# the credential itself), so different tenants on one endpoint do not poison
+# each other. State machine is generation-guarded: every recorded outcome carries
 # the gen snapshot from when its call STARTED, so a stale in-flight completion
 # can neither close nor re-open a newer state. After a cooldown expires exactly
 # one caller claims the half-open probe lease (no retry stampede); a neutral
@@ -73,25 +197,98 @@ def _reset_breaker() -> None:
         _BREAKER.clear()
 
 
+def _breaker_clear_route(scopes: tuple) -> None:
+    """Close both route scopes after an explicit successful health probe.
+
+    Generations advance instead of deleting entries, so stale in-flight calls
+    that started before the probe cannot re-open the freshly verified route.
+    """
+    with _BREAKER_LOCK:
+        for key in scopes:
+            entry = _entry(key)
+            entry.update(fails=0, open=False, until=0.0,
+                         gen=entry["gen"] + 1, lease=None, lease_ts=0.0)
+
+
 def _route_scopes(settings: Settings, base_url, api_key, model) -> tuple:
     """(provider_key, model_key) for the RESOLVED route — blanks resolve to the
     settings defaults exactly like `_client` does, so an omitted and an explicit
     default URL/key are the same route."""
-    url = base_url or settings.anthropic_base_url or "<anthropic>"
+    url = base_url or settings.anthropic_base_url
     key = api_key or settings.anthropic_api_key or ""
-    fp = hashlib.sha256(str(key).encode()).hexdigest()
-    return ("prov", url, fp), ("model", url, fp, str(model))
+    return _durable_route_scopes(url, key, model)
+
+
+def _status_code(exc) -> int | None:
+    """Return a real integer HTTP status without trusting status-like text."""
+    try:
+        status = getattr(exc, "status_code", None)
+    except Exception:
+        return None
+    return int(status) if isinstance(status, int) and not isinstance(status, bool) else None
+
+
+def _normalize_provider_code(value) -> str | None:
+    """Normalize one bounded provider error code for exact policy matching."""
+    if not isinstance(value, str) or not value or len(value) > 100:
+        return None
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    return normalized or None
+
+
+def _provider_error_code(exc) -> str | None:
+    """Extract a structured provider code without retaining body/message data."""
+    candidates = []
+    try:
+        body = getattr(exc, "body", None)
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        candidates.append(body)
+    try:
+        response = getattr(exc, "response", None)
+        response_body = response.json() if response is not None else None
+    except Exception:
+        response_body = None
+    if isinstance(response_body, dict) and response_body is not body:
+        candidates.append(response_body)
+    for payload in candidates:
+        nodes = [payload]
+        error = payload.get("error")
+        if isinstance(error, dict):
+            nodes.insert(0, error)
+        for node in nodes:
+            for key in ("code", "type", "error_code"):
+                normalized = _normalize_provider_code(node.get(key))
+                if normalized:
+                    return normalized
+    return None
+
+
+def _auth_quarantine_scope(exc) -> str | None:
+    """Return the durable scope for terminal 401/403 route failures."""
+    status = _status_code(exc)
+    if status == 401:
+        return "prov"
+    if status == 403:
+        return ("prov" if _provider_error_code(exc) in _AUTH_PROVIDER_CODES
+                else "model")
+    return None
 
 
 def _classify_failure(exc) -> str | None:
     """Which breaker scope a failure trips: 'prov' (endpoint+credential dead —
-    transport, timeout, 429, auth, or a connection-reset wrapped in a 400),
-    'model' (5xx — one overloaded model), or None (request-specific/unknown —
-    programming and validation errors must never poison a route)."""
+    transport, timeout, 429, 401/auth-coded 403, or a connection-reset wrapped
+    in a 400), 'model' (5xx or ordinary 403 — one overloaded/unauthorized
+    model), or None (request-specific/unknown — programming and validation
+    errors must never poison a route)."""
     if isinstance(exc, anthropic.APIConnectionError):   # includes timeouts
         return "prov"
-    status = getattr(exc, "status_code", None)
-    if status in (401, 403, 429):
+    status = _status_code(exc)
+    auth_scope = _auth_quarantine_scope(exc)
+    if auth_scope:
+        return auth_scope
+    if status == 429:
         return "prov"
     if status == 400 and _RESET_PATTERN.search(str(exc)):
         return "prov"                                   # MiMo wraps resets in 400
@@ -105,6 +302,30 @@ def _classify_failure(exc) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _is_transient(exc) -> bool:
+    """Whether the platform may retry this failure within its three attempts."""
+    if _status_code(exc) in (401, 403):
+        return False
+    if isinstance(exc, (anthropic.APIConnectionError,
+                        anthropic.RateLimitError,
+                        anthropic.InternalServerError)):
+        return True
+    status = _status_code(exc)
+    if status == 429 or (isinstance(status, int) and status >= 500):
+        return True
+    try:
+        import httpx
+
+        return isinstance(exc, httpx.TransportError)
+    except Exception:
+        return False
+
+
+def _request_timeout_s(role: str | None) -> int:
+    """Bound provider requests: interactive chat 45s, offline work 120s."""
+    return _INTERACTIVE_TIMEOUT_S if role == "chat" else _OFFLINE_TIMEOUT_S
 
 
 def _failure_span_attrs(exc) -> dict:
@@ -121,11 +342,11 @@ def _failure_span_attrs(exc) -> dict:
     except Exception:
         pass
     attrs = {
-        "error_type": type(exc).__name__,
+        "error_type": _bounded_error_type(exc),
         "breaker_classification": classification or "none",
     }
     try:
-        status = getattr(exc, "status_code", None)
+        status = _status_code(exc)
     except Exception:
         status = None
     if isinstance(status, int) and not isinstance(status, bool):
@@ -231,14 +452,23 @@ class LLM:
         # single-model, never in the MoA role set
         if (settings.llm_review or {}).get("model"):
             self.roles.setdefault("review", settings.llm_review)
-        self.mixture: dict = settings.llm_mixture or {}
+        self.mixture: dict = normalize_mixture(settings.llm_mixture, settings)
         # roles that run Mixture-of-Agents when >=2 members are configured;
         # defaults to the offline, quality-sensitive roles (interactive chat is
         # opt-in, since MoA ~doubles latency)
         self._mixture_roles: set = (
-            set(self.mixture.get("roles") or ["pipeline", "research", "task", "evolve"])
-            if len(self.mixture.get("members", [])) >= 2 else set())
+            set(self.mixture["roles"])
+            if len(self.mixture["members"]) >= 2 else set())
         self._clients: dict = {}
+        try:
+            self._health = RouteHealthStore(settings.shared_dir)
+        except Exception:
+            import logging
+
+            logging.getLogger("assistant").warning(
+                "LLM route health store unavailable; durable quarantine disabled",
+                exc_info=True)
+            self._health = None
         self.client = self._client(settings.anthropic_base_url,
                                    settings.anthropic_api_key)
 
@@ -249,7 +479,10 @@ class LLM:
         api_key = api_key or self.settings.anthropic_api_key
         cache_key = (base_url, api_key)
         if cache_key not in self._clients:
-            kwargs: dict = {"api_key": api_key}
+            # The SDK otherwise retries twice internally, multiplying the
+            # platform's explicit three-attempt policy into hidden attempts.
+            kwargs: dict = {"api_key": api_key, "max_retries": 0,
+                            "timeout": _OFFLINE_TIMEOUT_S}
             if base_url:
                 kwargs["base_url"] = base_url
             self._clients[cache_key] = anthropic.Anthropic(**kwargs)
@@ -260,15 +493,72 @@ class LLM:
         ``model`` wins on the default provider; a configured role uses its
         model + optional provider override; an unconfigured role falls back to
         the cheap or default model on the default provider."""
+        client, model_id, _base_url, _api_key = self._resolve_route(role, model)
+        return client, model_id
+
+    def _resolve_route(self, role: str | None, model: str | None):
+        """Resolve a call to client/model plus its effective URL/credential."""
+        # Preserve the lightweight ``LLM.__new__`` provider seam used by image
+        # integration tests and embedders that inject an already-built client.
+        if not hasattr(self, "settings"):
+            return self.client, model or self.default_model, None, None
         if model:
-            return self.client, model
+            return (self.client, model, self.settings.anthropic_base_url,
+                    self.settings.anthropic_api_key)
         spec = self.roles.get(role) if role else None
         if isinstance(spec, dict) and spec.get("model"):
             return (self._client(spec.get("base_url"), spec.get("api_key")),
-                    spec["model"])
+                    spec["model"],
+                    spec.get("base_url") or self.settings.anthropic_base_url,
+                    spec.get("api_key") or self.settings.anthropic_api_key)
         if role in _CHEAP_ROLES:
-            return self.client, self.cheap_model
-        return self.client, self.default_model
+            return (self.client, self.cheap_model,
+                    self.settings.anthropic_base_url,
+                    self.settings.anthropic_api_key)
+        return (self.client, self.default_model,
+                self.settings.anthropic_base_url,
+                self.settings.anthropic_api_key)
+
+    def _quarantine_scope(self, scopes: tuple) -> str | None:
+        """Best-effort durable lookup; storage trouble must not block LLM use."""
+        if getattr(self, "_health", None) is None:
+            return None
+        try:
+            return self._health.quarantine_scope(scopes)
+        except Exception:
+            import logging
+
+            logging.getLogger("assistant").warning(
+                "LLM route health lookup failed; allowing provider call",
+                exc_info=True)
+            return None
+
+    def _quarantine(self, scopes: tuple, scope: str) -> None:
+        """Best-effort persistence of a terminal auth/permission failure."""
+        if getattr(self, "_health", None) is None:
+            return
+        try:
+            self._health.quarantine(scopes, scope)
+        except Exception:
+            import logging
+
+            logging.getLogger("assistant").warning(
+                "LLM route quarantine write failed", exc_info=True)
+
+    def _clear_quarantine(self, scopes: tuple) -> None:
+        """Clear durable state or raise a bounded error before transient reset."""
+        if getattr(self, "_health", None) is None:
+            raise RouteHealthPersistenceError(
+                "LLM route health store unavailable during probe recovery")
+        try:
+            self._health.clear_route(scopes)
+        except Exception:
+            import logging
+
+            logging.getLogger("assistant").warning(
+                "LLM route quarantine clear failed")
+            raise RouteHealthPersistenceError(
+                "LLM route quarantine clear failed") from None
 
     def complete(
         self,
@@ -290,8 +580,8 @@ class LLM:
         is MoA-configured — the escape hatch for latency/cost-floor calls
         (task-tier classification, simple/medium task turns) that must never
         pay the ~2× MoA overhead. Each underlying API call (``_call``) is
-        traced, retried on transient errors, and logs a warning — but does not
-        raise — when the response is cut off at ``max_tokens``. Retry lives on
+        traced, retried on transient errors, and retains ``stop_reason`` on its
+        string-compatible result. Retry lives on
         ``_call`` (not here) so a mixture's proposers and aggregator each get
         their own retry rather than being dropped on the first blip, and an
         aggregator retry doesn't re-run every proposer."""
@@ -302,23 +592,91 @@ class LLM:
         if model is None and mixture and role and role in self._mixture_roles \
                 and len(self.mixture.get("members", [])) >= 2:
             return self._mixture(content, system, max_tokens, role=role)
-        client, model_id = self._resolve(role, model)
-        return self._call(client, model_id, content, system, max_tokens)
+        client, model_id, base_url, api_key = self._resolve_route(role, model)
+        scopes = (_route_scopes(self.settings, base_url, api_key, model_id)
+                  if hasattr(self, "settings") else None)
+        return self._call(client, model_id, content, system, max_tokens,
+                          route_scopes=scopes,
+                          timeout_s=_request_timeout_s(role))
 
-    @retry(
-        retry=retry_if_exception_type(_RETRYABLE),
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=2, max=30),
-        reraise=True,
-    )
+    def force_probe(
+        self,
+        prompt: str,
+        system: str | None = None,
+        model: str | None = None,
+        max_tokens: int = 1500,
+        role: str | None = None,
+    ) -> str:
+        """Probe one route despite quarantine, clearing it only after success.
+
+        This is the narrow recovery hook for ``assistant init --check`` after an
+        operator fixes credentials or provider access.  It remains a normal
+        traced, bounded-retry call; only the pre-call quarantine gate is bypassed.
+        """
+        client, model_id, base_url, api_key = self._resolve_route(role, model)
+        return self._force_probe_resolved(
+            client, model_id, base_url, api_key, prompt, system, max_tokens)
+
+    def force_probe_route(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        prompt: str = "Reply with the single word: ok",
+        system: str | None = None,
+        max_tokens: int = 1500,
+    ) -> str:
+        """Probe one explicit configured route and clear only proven health.
+
+        ``base_url``/``api_key`` follow normal blank-to-default resolution and
+        are never logged or returned. This lets the config doctor recover
+        role, mixture-member, aggregator, and review routes that are otherwise
+        unreachable once a model-scoped 403 quarantine exists.
+        """
+        if not model:
+            raise ValueError("LLM route probe requires a model")
+        resolved_url = base_url or self.settings.anthropic_base_url
+        resolved_key = api_key or self.settings.anthropic_api_key
+        client = self._client(resolved_url, resolved_key)
+        return self._force_probe_resolved(
+            client, str(model), resolved_url, resolved_key,
+            prompt, system, max_tokens)
+
+    def _force_probe_resolved(
+        self,
+        client,
+        model_id: str,
+        base_url: str | None,
+        api_key: str | None,
+        prompt: str,
+        system: str | None,
+        max_tokens: int,
+    ) -> str:
+        """Run one resolved forced probe and clear both health layers on success."""
+        scopes = _route_scopes(self.settings, base_url, api_key, model_id)
+        result = self._call(client, model_id, prompt, system, max_tokens,
+                            route_scopes=scopes, allow_quarantined=True,
+                            timeout_s=_INTERACTIVE_TIMEOUT_S)
+        if not result.strip():
+            return result
+        self._clear_quarantine(scopes)
+        _breaker_clear_route(scopes)
+        return result
+
     def _call(self, client, model_id: str, content, system: str | None,
-              max_tokens: int, span_attrs: dict | None = None) -> str:
+              max_tokens: int, span_attrs: dict | None = None,
+              route_scopes: tuple | None = None,
+              allow_quarantined: bool = False,
+              timeout_s: float = _OFFLINE_TIMEOUT_S) -> str:
         """One traced ``messages.create`` returning the concatenated text; the
         shared core of the single-model and mixture paths. ``span_attrs`` ride
         on the ``llm`` span — the mixture path tags each call with its stage
         (proposer/aggregator/fallback) so MoA overhead is measurable per call.
-        Retried on transient errors here (rather than on ``complete``) so each
-        mixture proposer and the aggregator retry independently.
+        The platform makes at most three transient attempts, with 1s and 4s
+        waits; SDK retries are disabled. 401/403 are never retried and instead
+        enter the durable deployment-wide quarantine. ``allow_quarantined`` is
+        reserved for the explicit operator health probe.
 
         Appends the temporal anchor to the TAIL of the user content — the
         model's only reliable clock. Tail placement adds nothing before any
@@ -328,33 +686,60 @@ class LLM:
         the mixture path passes one shared list to every proposer."""
         from assistant.platform.timeutil import temporal_anchor
 
+        scopes = route_scopes
+        if scopes is None and hasattr(self, "settings"):
+            scopes = _route_scopes(self.settings, None, None, model_id)
+        if scopes is not None and not allow_quarantined:
+            quarantined = self._quarantine_scope(scopes)
+            if quarantined:
+                raise RouteQuarantinedError(quarantined)
+
         anchor = temporal_anchor()
         if isinstance(content, str):
             content = content + "\n\n" + anchor
         else:
             content = [*content, {"type": "text", "text": anchor}]
         kwargs: dict = {"model": model_id, "max_tokens": max_tokens,
+                        "timeout": timeout_s,
                         "messages": [{"role": "user", "content": content}]}
         if system:
             kwargs["system"] = system
         from assistant.platform import tracing
 
-        with tracing.span("llm", model=model_id, max_tokens=max_tokens,
-                          **(span_attrs or {})) as _sp:
-            try:
-                resp = client.messages.create(**kwargs)
-            except Exception as exc:
-                _sp.set(**_failure_span_attrs(exc))
-                raise
-            tracing.set_usage(_sp, getattr(resp, "usage", None),
-                              stop_reason=getattr(resp, "stop_reason", "") or "")
-        if resp.stop_reason == "max_tokens":
+        resp = None
+        for attempt in range(1, len(_RETRY_DELAYS_S) + 2):
+            if scopes is not None and attempt > 1 and not allow_quarantined:
+                quarantined = self._quarantine_scope(scopes)
+                if quarantined:
+                    raise RouteQuarantinedError(quarantined)
+            with tracing.span("llm", model=model_id, max_tokens=max_tokens,
+                              retry_attempt=attempt,
+                              **(span_attrs or {})) as _sp:
+                try:
+                    resp = client.messages.create(**kwargs)
+                except Exception as exc:
+                    _sp.set(**_failure_span_attrs(exc))
+                    auth_scope = _auth_quarantine_scope(exc)
+                    if auth_scope and scopes is not None:
+                        self._quarantine(scopes, auth_scope)
+                    if attempt > len(_RETRY_DELAYS_S) or not _is_transient(exc):
+                        raise
+                else:
+                    tracing.set_usage(
+                        _sp, getattr(resp, "usage", None),
+                        stop_reason=getattr(resp, "stop_reason", "") or "")
+                    break
+            _sleep(_RETRY_DELAYS_S[attempt - 1])
+
+        stop_reason = getattr(resp, "stop_reason", "") or ""
+        if stop_reason == "max_tokens":
             import logging
 
             logging.getLogger("assistant").warning(
                 "LLM response truncated at max_tokens=%s — raise the budget for this call",
                 max_tokens)
-        return "".join(b.text for b in resp.content if b.type == "text")
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        return CompletionText(text, stop_reason)
 
     def _mixture(self, content, system: str | None, max_tokens: int,
                  role: str | None = None) -> str:
@@ -421,13 +806,15 @@ class LLM:
         every proposer — there, quality beats latency."""
         import contextvars
         import logging
-        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+        from concurrent.futures import ThreadPoolExecutor, wait
 
         members = self.mixture["members"]
         agg = self.mixture.get("aggregator") or members[0]
         layers = max(1, int(self.mixture.get("layers", 1)))
-        timeout_s = (self.settings.moa_chat_proposer_timeout_s
-                     if role == "chat" else 0)
+        configured_timeout = self.settings.moa_chat_proposer_timeout_s
+        timeout_s = (min(float(configured_timeout), _INTERACTIVE_TIMEOUT_S)
+                     if role == "chat" and configured_timeout > 0
+                     else 0)
 
         log_ = logging.getLogger("assistant")
         threshold = self.settings.moa_member_fail_threshold
@@ -443,7 +830,9 @@ class LLM:
                 out = self._call(client, member["model"], layer_input, system,
                                  max_tokens, span_attrs={
                                      "mixture_stage": "proposer",
-                                     "mixture_role": role or ""})
+                                     "mixture_role": role or ""},
+                                 route_scopes=scopes,
+                                 timeout_s=_request_timeout_s(role))
                 _breaker_record(scopes, gens, claimed,
                                 "ok" if out.strip() else None, threshold, cooldown)
                 if out.strip():
@@ -455,7 +844,10 @@ class LLM:
                 call_failed.add(scopes[1])            # this model route
                 if cls == "prov":
                     call_failed.add(scopes[0])        # whole endpoint+credential
-                log_.warning("mixture proposer %s failed: %s", member.get("model"), exc)
+                log_.warning(
+                    "mixture proposer %s failed (%s, status=%s)",
+                    _bounded_route_label(member.get("model")),
+                    _bounded_error_type(exc), _status_code(exc))
                 return None, True
 
         responses: list[str] = []
@@ -467,10 +859,19 @@ class LLM:
             for m in members:
                 scopes = _route_scopes(self.settings, m.get("base_url"),
                                        m.get("api_key"), m["model"])
+                quarantine_scope = self._quarantine_scope(scopes)
+                if quarantine_scope:
+                    log_.warning("mixture: skipping %s (durable %s route "
+                                 "quarantine)",
+                                 _bounded_route_label(m.get("model")),
+                                 quarantine_scope)
+                    stats["members_skipped"] += 1
+                    continue
                 mode, gens, claimed = _breaker_check(scopes, cooldown)
                 if mode == "open":
                     log_.warning("mixture: skipping %s (provider cooling down "
-                                 "after repeated failures)", m.get("model"))
+                                 "after repeated failures)",
+                                 _bounded_route_label(m.get("model")))
                     stats["members_skipped"] += 1
                     continue
                 runnable.append((m, scopes, gens, claimed))
@@ -487,19 +888,19 @@ class LLM:
             ctxs = [contextvars.copy_context() for _ in runnable]
             if timeout_s > 0:
                 # Bounded wait: collect what finished inside the window; if
-                # nothing did, wait for the FIRST completion (the provider SDK's
-                # own timeouts bound that). Abandoned threads finish in the
-                # background (can't be killed) and record their own eventual
-                # outcome — generation-guarded, so a stale result can't flip a
-                # newer breaker state; the abandonment itself counts nothing.
+                # nothing did, fail at that same outer bound. Abandoned threads
+                # finish in the background (can't be killed) and record their
+                # own eventual outcome — generation-guarded, so a stale result
+                # can't flip a newer breaker state; the abandonment itself
+                # counts nothing.
                 ex = ThreadPoolExecutor(max_workers=min(8, len(runnable)))
                 futs = [ex.submit(ctx.run, propose, m, sc, ge, cl, layer_input)
                         for ctx, (m, sc, ge, cl) in zip(ctxs, runnable)]
                 done, pending = wait(futs, timeout=timeout_s)
                 outcomes = [f.result() for f in done]
-                while not any(out for out, _failed in outcomes) and pending:
-                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                    outcomes += [f.result() for f in done]
+                timed_out_without_answer = (
+                    bool(pending)
+                    and not any(out for out, _failed in outcomes))
                 for f in pending:
                     f.cancel()
                 ex.shutdown(wait=False)
@@ -510,6 +911,14 @@ class LLM:
                 stats["members_failed"] += sum(
                     1 for _out, failed in outcomes if failed)
                 fresh = [out for out, _failed in outcomes if out]
+                if timed_out_without_answer:
+                    if responses:
+                        # A later refinement layer timing out must not discard
+                        # the independent answers from the preceding layer.
+                        break
+                    stats["aggregator_skipped"] = 1
+                    raise TimeoutError(
+                        "all chat mixture proposers exceeded the latency bound")
             else:
                 with ThreadPoolExecutor(max_workers=min(8, len(runnable))) as ex:
                     outcomes = list(ex.map(
@@ -532,18 +941,36 @@ class LLM:
         # health depends on how many independent answers actually reach the
         # final synthesis after later-layer failures narrow the set.
         stats["proposals_final"] = len(responses)
+        # Synthesis needs at least two independent final answers. With only one,
+        # an aggregator adds cost and a false appearance of consensus; return
+        # the surviving proposal and make the degradation explicit in metrics.
+        if len(responses) < 2:
+            stats["aggregator_skipped"] = 1
+            stats["fallback_used"] = 1
+            log_.warning("mixture: fewer than two healthy final proposers — "
+                         "skipping synthesis")
+            return responses[0]
         # The aggregator is otherwise a single point of failure: if it dies
         # after every proposer succeeded, fall back to the first surviving
         # proposal (itself a complete answer to the original prompt) rather
         # than sinking the whole call — symmetric with dropping a dead proposer.
         agg_scopes = _route_scopes(self.settings, agg.get("base_url"),
                                    agg.get("api_key"), agg["model"])
+        agg_quarantine = self._quarantine_scope(agg_scopes)
+        if agg_quarantine:
+            stats["aggregator_skipped"] = 1
+            stats["fallback_used"] = 1
+            log_.warning("mixture aggregator %s durably quarantined — returning "
+                         "a proposer answer",
+                         _bounded_route_label(agg.get("model")))
+            return responses[0]
         agg_mode, agg_gens, agg_claimed = _breaker_check(agg_scopes, cooldown)
         if agg_mode == "open":
             stats["aggregator_skipped"] = 1
             stats["fallback_used"] = 1
             log_.warning("mixture aggregator %s cooling down — returning a "
-                         "proposer answer", agg.get("model"))
+                         "proposer answer",
+                         _bounded_route_label(agg.get("model")))
             return responses[0]
         agg_client = self._client(agg.get("base_url"), agg.get("api_key"))
         stats["aggregator_attempted"] = 1
@@ -551,7 +978,9 @@ class LLM:
             synthesis = self._call(agg_client, agg["model"],
                                    _augment(content, responses), system, max_tokens,
                                    span_attrs={"mixture_stage": "aggregator",
-                                               "mixture_role": role or ""})
+                                               "mixture_role": role or ""},
+                                   route_scopes=agg_scopes,
+                                   timeout_s=_request_timeout_s(role))
             _breaker_record(agg_scopes, agg_gens, agg_claimed,
                             "ok" if synthesis.strip() else None, threshold, cooldown)
         except Exception as exc:
@@ -560,8 +989,10 @@ class LLM:
             _breaker_record(agg_scopes, agg_gens, agg_claimed,
                             _classify_failure(exc), threshold, cooldown)
             logging.getLogger("assistant").warning(
-                "mixture aggregator %s failed (%s) — returning a proposer answer",
-                agg.get("model"), exc)
+                "mixture aggregator %s failed (%s, status=%s) — returning a "
+                "proposer answer", _bounded_route_label(agg.get("model")),
+                _bounded_error_type(exc),
+                _status_code(exc))
             return responses[0]
         # An empty synthesis is as useless as a raised one — a reasoning-model
         # aggregator that spends its whole budget on hidden thinking emits no
@@ -571,7 +1002,7 @@ class LLM:
             stats["fallback_used"] = 1
             logging.getLogger("assistant").warning(
                 "mixture aggregator %s returned empty output — returning a "
-                "proposer answer", agg.get("model"))
+                "proposer answer", _bounded_route_label(agg.get("model")))
             return responses[0]
         stats["aggregator_ok"] = 1
         return synthesis
@@ -609,23 +1040,29 @@ class LLM:
                     or prov_key in call_failed:
                 continue
             tried.add(model_key)
+            if self._quarantine_scope(scopes):
+                continue
             mode, gens, claimed = _breaker_check(scopes, cooldown)
             if mode == "open":
                 continue
             log_.warning("mixture: all proposers failed/cooling — trying %s "
-                         "(%s) directly", model, label)
+                         "(%s) directly", _bounded_route_label(model), label)
             try:
                 out = self._call(self._client(base_url, api_key), model,
                                  content, system, max_tokens,
                                  span_attrs={"mixture_stage": "fallback",
-                                             "mixture_role": role or ""})
+                                             "mixture_role": role or ""},
+                                 route_scopes=scopes,
+                                 timeout_s=_request_timeout_s(role))
             except Exception as exc:
                 cls = _classify_failure(exc)
                 _breaker_record(scopes, gens, claimed, cls, threshold, cooldown)
                 call_failed.add(model_key)
                 if cls == "prov":
                     call_failed.add(prov_key)
-                log_.warning("mixture fallback %s failed: %s", model, exc)
+                log_.warning("mixture fallback %s failed (%s, status=%s)",
+                             _bounded_route_label(model),
+                             _bounded_error_type(exc), _status_code(exc))
                 continue
             if out.strip():
                 _breaker_record(scopes, gens, claimed, "ok", threshold, cooldown)
@@ -634,16 +1071,47 @@ class LLM:
         raise RuntimeError("all mixture proposers failed")
 
     def complete_json(self, prompt: str, system: str | None = None, **kw):
-        """One retry with error feedback if the first response isn't valid JSON."""
+        """Parse JSON with one stop-aware recovery attempt.
+
+        A normal ``end_turn`` parse failure gets one same-budget repair prompt
+        containing bounded parse feedback and the prior output. A truncated
+        response gets one fresh attempt at twice the token budget, capped at
+        16k. The cap is never retried at an identical budget; persistent/capped
+        truncation raises ``StructuredOutputTruncatedError`` explicitly.
+        """
         text = self.complete(prompt, system=system, **kw)
         try:
             return _parse_json(text)
         except ValueError as exc:
-            retry_prompt = (
-                f"{prompt}\n\nYour previous response could not be parsed as JSON "
-                f"({exc}). Respond again with ONLY valid JSON, no prose, no code fences."
-            )
-            return _parse_json(self.complete(retry_prompt, system=system, **kw))
+            stop_reason = getattr(text, "stop_reason", "") or ""
+            retry_kw = dict(kw)
+            if stop_reason == "max_tokens":
+                current_budget = retry_kw.get("max_tokens", 4000)
+                next_budget = min(_STRUCTURED_TOKEN_CAP, current_budget * 2)
+                if current_budget >= _STRUCTURED_TOKEN_CAP \
+                        or next_budget <= current_budget:
+                    raise StructuredOutputTruncatedError(
+                        "structured LLM response truncated at the 16000-token cap"
+                    ) from exc
+                retry_kw["max_tokens"] = next_budget
+                retry_prompt = prompt
+            else:
+                retry_prompt = (
+                    f"{prompt}\n\n[JSON repair feedback]\n"
+                    f"The previous response could not be parsed: {exc}. "
+                    "Respond again with ONLY valid JSON, no prose or code fences."
+                    f"\n\n[Previous invalid response]\n{text}"
+                )
+
+            repaired = self.complete(retry_prompt, system=system, **retry_kw)
+            try:
+                return _parse_json(repaired)
+            except ValueError as repair_exc:
+                if getattr(repaired, "stop_reason", "") == "max_tokens":
+                    raise StructuredOutputTruncatedError(
+                        "structured LLM response remained truncated after one retry"
+                    ) from repair_exc
+                raise
 
 
 _MOA_SYNTH = (

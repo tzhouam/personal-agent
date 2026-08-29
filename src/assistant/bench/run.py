@@ -19,7 +19,7 @@ from assistant.bench import stats
 from assistant.bench.results import RunStore
 from assistant.bench.sandbox import bench_settings, network_guard, route_fingerprint
 from assistant.bench.tracks import TRACKS
-from assistant.platform.llm import LLM
+from assistant.platform.llm import LLM, normalize_mixture
 from assistant.platform.timeutil import frozen_now
 
 log = logging.getLogger("assistant")
@@ -36,7 +36,9 @@ def _llm_hosts(settings) -> frozenset[str]:
     for spec in (settings.llm_roles or {}).values():
         if isinstance(spec, dict) and spec.get("base_url"):
             urls.append(spec["base_url"])
-    mix = settings.llm_mixture or {}
+    # Match runtime exactly: structurally invalid members are ignored and
+    # canonically duplicate routes are collapsed before host allowlisting.
+    mix = normalize_mixture(settings.llm_mixture, settings)
     for spec in mix.get("members", []):
         if isinstance(spec, dict) and spec.get("base_url"):
             urls.append(spec["base_url"])
