@@ -918,27 +918,35 @@ def test_concurrent_cap_is_process_wide_across_rotation(settings, monkeypatch):
         c.sendall(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 300\r\n\r\nab")
         return c
 
-    holders = [stalled(port1), stalled(port1)]     # cap fully consumed on gen1
-    port2 = _free_port()
-    monkeypatch.setattr(settings, "wecom_callback_port", port2)  # rotate
-    assert wecom.WeComChannel(settings).start_callback_server() is True
-
-    def new_gen_refuses():
+    def request_refused(port):
+        """True only when the cap closes a complete request without a reply."""
         try:
-            extra = socket.create_connection(("127.0.0.1", port2), timeout=5)
-            extra.settimeout(2)
-            # send a COMPLETE (bad) request: an accepted-but-idle probe would
-            # pin a slot for the full 20s handler timeout and flake the
-            # service-resumed assertion under load
-            extra.sendall(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
-            refused = extra.recv(64) == b""
-            extra.close()
-            return refused
+            with socket.create_connection(
+                    ("127.0.0.1", port), timeout=5) as extra:
+                extra.settimeout(2)
+                # A complete bad request returns HTTP 400 when accepted. Only
+                # EOF proves the process-wide cap refused it before dispatch.
+                extra.sendall(
+                    b"POST / HTTP/1.1\r\nHost: x\r\n"
+                    b"Content-Length: 0\r\n\r\n")
+                return extra.recv(64) == b""
         except OSError:
             return False
 
+    holders = []
     try:
-        assert _wait_until(new_gen_refuses), "cap not shared across rotation"
+        holders.append(stalled(port1))
+        holders.append(stalled(port1))
+        # connect/send only queues work; establish the happens-before edge by
+        # proving both gen1 handlers consumed the two slots before rotation.
+        assert _wait_until(lambda: request_refused(port1), timeout=8), \
+            "old generation never filled cap"
+
+        port2 = _free_port()
+        monkeypatch.setattr(settings, "wecom_callback_port", port2)  # rotate
+        assert wecom.WeComChannel(settings).start_callback_server() is True
+        assert _wait_until(lambda: request_refused(port2), timeout=8), \
+            "cap not shared across rotation"
     finally:
         for c in holders:
             c.close()
