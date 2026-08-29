@@ -16,6 +16,7 @@ from pathlib import Path
 from assistant.agent.actions import registry as actions_registry
 from assistant.agent.actions.registry import ACTIONS, looks_failed, validate
 from assistant.platform.config import Settings
+from assistant.platform.llm import normalize_mixture
 
 # Bench-STRICT non-success markers: production's `looks_failed` is deliberately
 # narrow (a dedup rejection is not a failure for the repair loop), but for
@@ -132,14 +133,18 @@ def route_fingerprint(settings: Settings) -> dict:
         if isinstance(spec, dict):
             roles[role] = {"model": spec.get("model", ""),
                            "host": host(spec.get("base_url", ""))}
-    mix = settings.llm_mixture or {}
+    # Fingerprint the effective runtime routing, not tolerant raw JSON that may
+    # contain malformed nested values or canonically duplicate members.
+    mix = normalize_mixture(settings.llm_mixture, settings)
     mixture = {"members": [{"model": m.get("model", ""),
                             "host": host(m.get("base_url", ""))}
                            for m in mix.get("members", []) if isinstance(m, dict)],
                "aggregator": {"model": (mix.get("aggregator") or {}).get("model", ""),
                               "host": host((mix.get("aggregator") or {}).get("base_url", ""))}
                if isinstance(mix.get("aggregator"), dict) else None,
-               "roles": sorted(mix.get("roles", []))}
+               "roles": sorted(mix.get("roles", [])),
+               "layers": mix.get("layers", 1),
+               "chat_proposer_timeout_s": settings.moa_chat_proposer_timeout_s}
     return {"default_model": settings.anthropic_model,
             "default_host": host(settings.anthropic_base_url),
             "cheap_model": settings.anthropic_default_haiku_model,

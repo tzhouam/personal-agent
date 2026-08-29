@@ -14,7 +14,7 @@ import pytest
 from assistant.agent.actions.registry import execute
 from assistant.bench import stats
 from assistant.bench.results import RunStore
-from assistant.bench.run import render_report, run_tracks
+from assistant.bench.run import _llm_hosts, render_report, run_tracks
 from assistant.bench.sandbox import (SandboxRecorder, action_sandbox,
                                      bench_settings, network_guard,
                                      outward_credential_fields,
@@ -131,6 +131,66 @@ def test_bench_settings_keeps_llm_blanks_outward(settings, tmp_path):
             assert val in ("", {}, None), (field, val)    # outward blanked
     assert "leak" not in json.dumps(route_fingerprint(bench))  # no key persisted
     assert bench.bench_enabled is False
+
+
+@pytest.mark.parametrize("mixture", [
+    {"members": 1, "roles": 1, "aggregator": 1},
+    {"members": [
+        {"model": " kept ", "base_url": "https://one.example/anthropic",
+         "api_key": "PRIVATE_MIXTURE_KEY"},
+        {"model": 7, "base_url": "https://invalid.example"},
+        {"model": "bad-route", "base_url": ["not", "a", "url"]},
+        # Canonically identical to the first member; runtime drops it too.
+        {"model": "kept", "base_url": "https://ONE.example:443/anthropic/",
+         "api_key": "PRIVATE_MIXTURE_KEY"}],
+     "roles": 1, "aggregator": 1},
+])
+def test_bench_routing_uses_runtime_safe_mixture(settings, mixture):
+    """Malformed nested MoA config cannot crash or enter persisted metadata."""
+    configured = settings.model_copy(update={"llm_mixture": mixture})
+
+    hosts = _llm_hosts(configured)
+    fingerprint = route_fingerprint(configured)
+    serialized = json.dumps(fingerprint)
+
+    assert "PRIVATE_MIXTURE_KEY" not in serialized
+    assert all(isinstance(host, str) for host in hosts)
+    if isinstance(mixture["members"], int):
+        assert fingerprint["mixture"]["members"] == []
+        assert fingerprint["mixture"]["aggregator"] is None
+    else:
+        assert fingerprint["mixture"]["members"] == [
+            {"model": "kept", "host": "one.example"}]
+        assert fingerprint["mixture"]["aggregator"] == \
+            {"model": "kept", "host": "one.example"}
+        assert "one.example" in hosts
+
+
+def test_bench_fingerprint_changes_with_moa_execution_policy(settings):
+    """Depth and chat latency changes cannot compare against stale references."""
+    base_mixture = {
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "agg"},
+        "roles": ["chat"],
+        "layers": 2,
+    }
+    base = settings.model_copy(update={
+        "llm_mixture": base_mixture,
+        "moa_chat_proposer_timeout_s": 10,
+    })
+    deeper = base.model_copy(update={
+        "llm_mixture": {**base_mixture, "layers": 3},
+    })
+    slower = base.model_copy(update={"moa_chat_proposer_timeout_s": 20})
+
+    base_fp = route_fingerprint(base)
+    deeper_fp = route_fingerprint(deeper)
+    slower_fp = route_fingerprint(slower)
+
+    assert base_fp["mixture"]["layers"] == 2
+    assert base_fp["mixture"]["chat_proposer_timeout_s"] == 10
+    assert base_fp != deeper_fp
+    assert base_fp != slower_fp
 
 
 def test_network_guard_denies_by_ip_and_allows_resolved_host():

@@ -75,7 +75,7 @@ LLM-judge metrics need one cheap extra LLM call per artifact.
 - **MRR**: mean reciprocal rank of the first item per digest the owner eventually marks done — are the best papers on top?
 - **NDCG@10** (binary rel: done=1) once enough done-marks accumulate: `DCG = Σ rel_i/log₂(i+1)` normalized by ideal ordering.
 - **Backlog pressure**: reading-list open count trend (already in stats) — rising forever means over-surfacing (novelty/volume miscalibrated).
-- **Source coverage & health**: share of configured sources that returned items (already tracked as `source_health` — promote to a metric with a 3-day-dead alert, which the design doc promised).
+- **Source coverage & health**: share of configured sources that returned items (tracked as `source_health`). Three consecutive failures open a persistent 72-hour source cooldown; ordinary fetch, cooling skip, half-open probe, and recovery stay distinguishable without persisting URLs or exception messages.
 
 ## 7. website
 

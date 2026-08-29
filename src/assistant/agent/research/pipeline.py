@@ -5,6 +5,8 @@ entry point; the module also owns the engagement-driven adaptive paper quota."""
 
 import hashlib
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 from assistant.platform.config import Settings
 from assistant.agent.events_store import EventsStore
@@ -38,6 +40,33 @@ _MIN_SCORE = 6
 _QUOTA_WINDOW_DAYS = 14
 _QUOTA_MIN_HISTORY = 20  # surfaced items needed before the controller kicks in
 _QUOTA_FLOOR = 2
+_FEED_WORKERS_DEFAULT = 4
+_FEED_WORKERS_MAX = 32
+_SCORE_BATCH_SIZE = 20
+_SCORE_MAX_WORKERS = 2
+_SCORE_MAX_TOKENS = 8000
+
+
+def _strict_int(value) -> int:
+    """Accept JSON integers and integer strings, but never bools or floats."""
+    if isinstance(value, bool):
+        raise ValueError("boolean is not an integer response field")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value.strip(), 10)
+    raise ValueError("response field must be an integer")
+
+
+def _bounded_feed_workers(value) -> int:
+    """Normalize the configurable worker count to a safe finite bound."""
+    if isinstance(value, bool):
+        return _FEED_WORKERS_DEFAULT
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return _FEED_WORKERS_DEFAULT
+    return min(_FEED_WORKERS_MAX, max(1, parsed))
 
 
 def adaptive_paper_quota(settings: Settings, reading_items: list[dict],
@@ -76,10 +105,10 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
     Threads the owner's reading-list feedback into scoring: items marked
     unrelated become negative examples in the prompt, and the done/unrelated
     rate tunes the adaptive paper quota. Candidates are deduped against
-    everything ever surfaced (`events.filter_unseen`), scored one batch per pool
-    (English feeds and Chinese feeds separately, since 中文媒体 is a required
-    section with a lower bar and a floor), and only then summarized. Returned
-    requested/completed/fallback counters make the existing deterministic
+    everything ever surfaced (`events.filter_unseen`), scored in bounded batches
+    per pool (English feeds and Chinese feeds separately, since 中文媒体 is a
+    required section with a lower bar and a floor), and only then summarized.
+    Returned requested/completed/fallback counters make the existing deterministic
     score/summary fallbacks visible without changing their behavior."""
     profile_summary = render_summary(profile)
     health: dict[str, str] = {}
@@ -157,7 +186,7 @@ def _gather_papers(llm: LLM, profile: dict, profile_summary: str,
     try:
         result = llm.complete_json(
             f"## Owner profile\n{profile_summary}", system=_QUERY_SYSTEM,
-            max_tokens=1500, role="pipeline",
+            max_tokens=4000, role="pipeline", mixture=False,
         )
         queries = [q for q in result.get("queries", []) if isinstance(q, str)][:6]
     except Exception as exc:
@@ -183,24 +212,96 @@ def _gather_papers(llm: LLM, profile: dict, profile_summary: str,
 
 
 def _gather_feed_items(settings: Settings, health: dict) -> list[dict]:
-    """Fetch every configured feed source (≤15 items each), tagging items with
-    their source name, language, and a url-hashed `seen_id`. A failing source is
-    recorded as FAILED in `health` (surfaced in the email footer) and skipped, so
-    one broken scraper never kills the sweep.
+    """Fetch configured feeds concurrently while returning them in source order.
+
+    Each runnable source gets exactly one HTTP attempt in a run (≤15 items).
+    Active requests are bounded by ``research_feed_workers`` and a hard cap of
+    32. Three consecutive failures open a deployment-shared 72h cooldown; after
+    it expires, an atomic half-open lease admits exactly one probe across
+    concurrent processes. A changed URL/config has a new opaque fingerprint
+    and bypasses stale health.
+    Worker ``1`` and cooldown ``0`` are the rollback path to the old serial,
+    stateless behavior. Zero is a temporary bypass: it preserves prior state,
+    which resumes if the same positive cooldown policy is re-enabled.
 
     A *missing* sources file is recorded as a FAILED row of its own rather than
     passing silently: `load_sources` degrades to `[]` for an absent file, so a
     misresolved `sources_file` looked exactly like "no news today" — three days
     of empty industry/中文 sections (2026-07-22→24) raised nothing anywhere.
-    Health values are prefixed `ok:`/`FAILED` so the run can count them."""
-    items = []
+    Health values keep the existing ``ok:``/``FAILED`` prefixes for metrics and
+    separately label cooling, skipped, probe, and ordinary failure outcomes.
+    URLs and exception messages never enter health output."""
+    from assistant.agent.research.feed_health import FeedHealthStore
+
+    items: list[dict] = []
     if not settings.sources_file.exists():
         health["sources"] = f"FAILED: sources file missing ({settings.sources_file})"
         return items
-    for source in feeds.load_sources(settings.sources_file):
-        name = source.get("name", source.get("url", "?"))
+
+    sources = feeds.load_sources(settings.sources_file)
+    workers = _bounded_feed_workers(
+        getattr(settings, "research_feed_workers", _FEED_WORKERS_DEFAULT))
+    health_store = FeedHealthStore(
+        settings.shared_dir,
+        getattr(settings, "research_feed_cooldown_hours", 72),
+    )
+
+    # Preserve useful configured names without ever falling back to a URL.  A
+    # generic ordinal also keeps missing/URL-shaped names privacy-safe; suffixes
+    # prevent duplicate names overwriting one another in the health dict.
+    labels: list[str] = []
+    used_labels = {str(key) for key in health}
+    for index, source in enumerate(sources):
+        raw_name = str(source.get("name", "")).strip()
+        base = (" ".join(raw_name.split())[:80]
+                if raw_name and "://" not in raw_name else f"feed {index + 1}")
+        label = base
+        suffix = 1
+        while label in used_labels:
+            suffix += 1
+            label = f"{base} #{suffix}"
+        used_labels.add(label)
+        labels.append(label)
+
+    decisions = [health_store.claim(source) for source in sources]
+    runnable = [(index, source, decisions[index])
+                for index, source in enumerate(sources)
+                if decisions[index].should_fetch]
+
+    def fetch_one(source: dict):
         try:
-            fetched = feeds.fetch_feed(source["url"])[:15]
+            return feeds.fetch_feed(source["url"])[:15], None
+        except Exception as exc:
+            return [], exc
+
+    fetched_by_index: dict[int, tuple[list[dict], Exception | None]] = {}
+    if workers == 1:
+        for index, source, _attempt in runnable:
+            fetched_by_index[index] = fetch_one(source)
+    elif runnable:
+        with ThreadPoolExecutor(
+                max_workers=min(workers, len(runnable)),
+                thread_name_prefix="research-feed") as executor:
+            futures = {index: executor.submit(fetch_one, source)
+                       for index, source, _attempt in runnable}
+            # Awaiting in configured order does not serialize the work: every
+            # future was submitted above, and only result assembly is ordered.
+            for index, _source, _attempt in runnable:
+                fetched_by_index[index] = futures[index].result()
+
+    for index, source in enumerate(sources):
+        name = labels[index]
+        attempt = decisions[index]
+        if attempt.mode == "cooling":
+            health[name] = f"FAILED: cooling; skipped until {attempt.retry_at}"
+            continue
+        if attempt.mode == "skipped":
+            health[name] = "FAILED: skipped; half-open probe already in progress"
+            continue
+
+        fetched, exc = fetched_by_index[index]
+        if exc is None:
+            health_store.record_success(attempt)
             for item in fetched:
                 if not item.get("title") or not item.get("url"):
                     continue
@@ -208,38 +309,109 @@ def _gather_feed_items(settings: Settings, health: dict) -> list[dict]:
                 item["lang"] = source.get("lang", "en")
                 item["seen_id"] = "feed-" + hashlib.sha1(item["url"].encode()).hexdigest()[:16]
                 items.append(item)
-            health[name] = f"ok: {len(fetched)} items"
-        except Exception as exc:
-            health[name] = f"FAILED: {type(exc).__name__}"  # surfaced in the email footer
+            probe = "probe; " if attempt.mode == "probe" else ""
+            health[name] = f"ok: {probe}{len(fetched)} items"
+        else:
+            health_store.record_failure(attempt)
+            probe = "probe; " if attempt.mode == "probe" else "fetch; "
+            # Exception type is actionable enough and cannot contain a source
+            # URL, response content, or credentials like the message might.
+            health[name] = f"FAILED: {probe}{type(exc).__name__}"
     return items
+
+
+def _score_batch(llm: LLM, profile_summary: str,
+                 indexed_items: list[tuple[int, dict]], render
+                 ) -> tuple[dict[int, int], bool]:
+    """Score one indexed batch, returning valid scores and whether it failed.
+
+    Indices remain global so independently completed batches can be merged
+    without remapping or letting a response from one batch affect another.
+    """
+    allowed = {index for index, _ in indexed_items}
+    try:
+        lines = "\n".join(f"[{index}] {render(item)}"
+                          for index, item in indexed_items)
+        scored = llm.complete_json(
+            f"## Owner profile\n{profile_summary}\n\n## Items\n{lines}",
+            system=_SCORE_SYSTEM,
+            role="research",
+            max_tokens=_SCORE_MAX_TOKENS,
+            mixture=False,
+        )
+        if not isinstance(scored, list):
+            raise ValueError("score response must be an array")
+        scores: dict[int, int] = {}
+        for row in scored:
+            if not isinstance(row, dict) or "idx" not in row or "score" not in row:
+                continue
+            try:
+                index, score = _strict_int(row["idx"]), _strict_int(row["score"])
+            except (TypeError, ValueError):
+                continue
+            if index in allowed and 0 <= score <= 10:
+                # First valid row wins, so duplicate output cannot overwrite an
+                # already-accounted item or perturb deterministic ordering.
+                scores.setdefault(index, score)
+    except Exception as exc:
+        first = indexed_items[0][0] if indexed_items else 0
+        log.warning("relevance scoring batch at %s failed, keeping natural order: %s",
+                    first, exc)
+        return {}, True
+    # Preserve the previous all-or-nothing fallback value for an empty or
+    # wholly malformed response; a partially valid response uses score 0 only
+    # for its missing IDs, as before.
+    return scores, not scores
 
 
 def _score(llm: LLM, profile_summary: str, pool: list[dict], render,
            accounting: dict | None = None) -> list[dict]:
     """Annotate every item with _score and return the pool sorted by it (desc).
-    On scorer failure every item gets _MIN_SCORE so downstream selection keeps
-    natural order instead of dropping the whole pool."""
+
+    Pools are split into bounded batches and at most two calls run concurrently.
+    A failed batch gets `_MIN_SCORE` in its original order; successful batches
+    retain their scores, and missing IDs in a partial response get 0.
+    """
     if not pool:
         return []
     if accounting is not None:
         accounting["score_requested"] += len(pool)
-    lines = "\n".join(f"[{i}] {render(x)}" for i, x in enumerate(pool))
-    try:
-        scored = llm.complete_json(
-            f"## Owner profile\n{profile_summary}\n\n## Items\n{lines}",
-            system=_SCORE_SYSTEM, role="research", max_tokens=4000,
-        )
-        scores = {int(s["idx"]): int(s["score"]) for s in scored
-                  if isinstance(s, dict) and "idx" in s and "score" in s}
-    except Exception as exc:
-        log.warning("relevance scoring failed, keeping natural order: %s", exc)
-        scores = {}
-    completed = sum(1 for i in range(len(pool)) if i in scores)
+
+    indexed = list(enumerate(pool))
+    batches = [indexed[start:start + _SCORE_BATCH_SIZE]
+               for start in range(0, len(indexed), _SCORE_BATCH_SIZE)]
+    if len(batches) == 1:
+        results = [_score_batch(llm, profile_summary, batches[0], render)]
+    else:
+        with ThreadPoolExecutor(
+                max_workers=min(_SCORE_MAX_WORKERS, len(batches))) as executor:
+            futures = [
+                executor.submit(
+                    copy_context().run,
+                    _score_batch,
+                    llm,
+                    profile_summary,
+                    batch,
+                    render,
+                )
+                for batch in batches
+            ]
+            # Merge in batch order, independent of completion order.
+            results = [future.result() for future in futures]
+
+    scores: dict[int, int] = {}
+    failed_indices: set[int] = set()
+    for batch, (batch_scores, failed) in zip(batches, results):
+        scores.update(batch_scores)
+        if failed:
+            failed_indices.update(index for index, _ in batch)
+
+    completed = len(scores)
     if accounting is not None:
         accounting["score_completed"] += completed
         accounting["score_fallback"] += len(pool) - completed
     for i, item in enumerate(pool):
-        item["_score"] = scores.get(i, _MIN_SCORE if not scores else 0)
+        item["_score"] = scores.get(i, _MIN_SCORE if i in failed_indices else 0)
     return sorted(pool, key=lambda x: -x["_score"])
 
 

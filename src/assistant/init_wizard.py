@@ -54,6 +54,40 @@ def _ask(prompt: str) -> str:  # seam for tests
     return input(prompt).strip()
 
 
+def _bounded_identifier(value, limit: int = 64) -> str:
+    """Return a printable bounded model/error label with no control characters."""
+    import re
+
+    safe = re.sub(r"[^A-Za-z0-9._:/+-]", "?", str(value or "?"))
+    return safe[:limit] or "?"
+
+
+def _bounded_config_identifier(value, limit: int = 64) -> str:
+    """Bound a config label and redact values that resemble URLs or secrets."""
+    import re
+
+    raw = str(value or "?")
+    key_like = re.search(
+        r"(?i)(?:^sk[-_]|api[_-]?key|secret|password|credential|bearer|"
+        r"(?:^|[_-])token(?:$|[_-])|(?:^|[_-])key(?:$|[_-]))",
+        raw)
+    if "://" in raw or key_like:
+        return "[redacted]"
+    return _bounded_identifier(raw, limit)
+
+
+def _bounded_failure(exc) -> str:
+    """Describe only exception type and integer status, never its message/body."""
+    error_type = _bounded_identifier(type(exc).__name__)
+    try:
+        status = getattr(exc, "status_code", None)
+    except Exception:
+        status = None
+    if isinstance(status, int) and not isinstance(status, bool):
+        return f"{error_type} HTTP {status}"
+    return error_type
+
+
 # ── probes (shared by wizard and doctor) ─────────────────────────────
 
 def probe_llm(s: Settings):
@@ -65,11 +99,17 @@ def probe_llm(s: Settings):
     try:
         from assistant.platform.llm import LLM
 
-        reply = LLM(s).complete("Reply with the single word: ok", max_tokens=1500)
-        return (OK, f"model {s.anthropic_model} answers") if reply.strip() \
+        # An explicit operator health check is also the recovery path for a
+        # route quarantined after an auth/entitlement failure.  The probe
+        # bypasses quarantine and clears it only after a successful response.
+        reply = LLM(s).force_probe(
+            "Reply with the single word: ok", max_tokens=1500)
+        model = _bounded_config_identifier(s.anthropic_model)
+        return (OK, f"model {model} answers") if reply.strip() \
             else (WARN, "endpoint reachable but empty reply")
     except Exception as exc:
-        return FAIL, f"LLM call failed: {str(exc)[:120]}"
+        return FAIL, (f"model {_bounded_config_identifier(s.anthropic_model)} failed: "
+                      f"{_bounded_failure(exc)}")
 
 
 def probe_github(s: Settings):
@@ -248,12 +288,14 @@ def _summarize_roles(parsed: dict) -> tuple[list[str], str]:
     never keys/URLs) plus structural warnings."""
     warns, bits = [], []
     for role, spec in parsed.items():
+        safe_role = _bounded_config_identifier(role)
         model = spec.get("model") if isinstance(spec, dict) else None
-        bits.append(f"{role}→{model or '?'}")
+        bits.append(f"{safe_role}→{_bounded_config_identifier(model)}")
         if role not in _KNOWN_ROLES:
-            warns.append(f"unknown role {role!r} (known: {', '.join(sorted(_KNOWN_ROLES))})")
+            warns.append(f"unknown role {safe_role!r} (known: "
+                         f"{', '.join(sorted(_KNOWN_ROLES))})")
         if not model:
-            warns.append(f"role {role!r} has no \"model\"")
+            warns.append(f"role {safe_role!r} has no \"model\"")
     return warns, "roles " + (", ".join(bits) or "(empty)")
 
 
@@ -262,21 +304,44 @@ def _summarize_mixture(parsed: dict) -> tuple[list[str], str]:
     model ids + roles) plus structural warnings — including the chat-latency
     one (priority: chat stays single-model by default)."""
     warns = []
-    members = parsed.get("members") or []
+    raw_members = parsed.get("members")
+    if raw_members in (None, []):
+        members = []
+    elif isinstance(raw_members, list):
+        members = raw_members
+    else:
+        members = []
+        warns.append('mixture "members" must be a list')
     models = [m.get("model") if isinstance(m, dict) else None for m in members]
-    if members and any(not m for m in models):
-        warns.append('a mixture member has no "model"')
+    invalid_members = [m for m in members if not (
+        isinstance(m, dict)
+        and isinstance(m.get("model"), str) and m.get("model", "").strip()
+        and (m.get("base_url") is None or isinstance(m.get("base_url"), str))
+        and (m.get("api_key") is None or isinstance(m.get("api_key"), str)))]
+    if invalid_members:
+        warns.append("invalid mixture member route(s) are ignored")
     if len(members) < 2:
         warns.append("fewer than 2 members — MoA stays off")
-    agg = parsed.get("aggregator") or (members[0] if members else {})
+    raw_aggregator = parsed.get("aggregator")
+    agg = raw_aggregator or (members[0] if members else {})
+    if raw_aggregator is not None and not isinstance(raw_aggregator, dict):
+        warns.append('mixture "aggregator" must be an object')
     agg_model = agg.get("model", "?") if isinstance(agg, dict) else "?"
-    roles = parsed.get("roles") or ["pipeline", "research", "task", "evolve"]
+    raw_roles = parsed.get("roles")
+    if raw_roles in (None, []):
+        roles = ["pipeline", "research", "task", "evolve"]
+    elif isinstance(raw_roles, list):
+        roles = raw_roles
+    else:
+        roles = []
+        warns.append('mixture "roles" must be a list')
     if "chat" in roles:
         warns.append("mixture includes the chat role — MoA ~doubles reply "
                      "latency; interactive chat is best single-model")
     return warns, (f"mixture {len(members)} member(s) "
-                   f"({', '.join(str(m or '?') for m in models) or 'none'}) "
-                   f"→ agg {agg_model}; roles {', '.join(map(str, roles))}")
+                   f"({', '.join(_bounded_config_identifier(m) for m in models) or 'none'}) "
+                   f"→ agg {_bounded_config_identifier(agg_model)}; "
+                   f"roles {', '.join(_bounded_config_identifier(r) for r in roles) or '(invalid)'}")
 
 
 def _summarize_review(parsed: dict) -> tuple[list[str], str]:
@@ -284,16 +349,122 @@ def _summarize_review(parsed: dict) -> tuple[list[str], str]:
     model slot; model id only)."""
     model = parsed.get("model")
     warns = [] if model else ['LLM_REVIEW has no "model"']
-    return warns, f"review→{model or '?'}"
+    return warns, f"review→{_bounded_config_identifier(model)}"
+
+
+def _summarize_live_mixture(value: dict, s: Settings) -> tuple[list[str], str]:
+    """Summarize the exact normalized/deduplicated mixture runtime will use."""
+    from assistant.platform.llm import normalize_mixture
+
+    raw = value if isinstance(value, dict) else {}
+    normalized = normalize_mixture(raw, s)
+    raw_warns, _raw_summary = _summarize_mixture(raw)
+    effective_warns, summary = _summarize_mixture(normalized)
+    raw_members = raw.get("members")
+    raw_count = len(raw_members) if isinstance(raw_members, list) else 0
+    if raw_count != len(normalized["members"]):
+        raw_warns.append("invalid or duplicate mixture member route(s) dropped")
+    warns = list(dict.fromkeys(raw_warns + effective_warns))
+    return warns, summary
+
+
+def _configured_nondefault_routes(s: Settings) -> list[dict]:
+    """Resolve and deduplicate every configured route beyond the default.
+
+    Deduplication uses the same canonical URL + credential HMAC + model scope
+    as runtime quarantine. The returned specs stay in memory and must never be
+    rendered because they can contain API keys and credential-bearing URLs.
+    """
+    from assistant.platform.llm import normalize_mixture
+    from assistant.platform.llm_health import route_scopes
+
+    # The cheap tier is an implicit route, not an LLM_ROLES entry. Probe it
+    # whenever its model differs; exact equality with the default is removed by
+    # the canonical-scope dedupe below.
+    candidates = [{"model": s.cheap_model}]
+    roles = s.llm_roles if isinstance(s.llm_roles, dict) else {}
+    candidates.extend(spec for spec in roles.values() if isinstance(spec, dict))
+
+    mixture = normalize_mixture(s.llm_mixture, s)
+    members = mixture["members"]
+    candidates.extend(spec for spec in members if isinstance(spec, dict))
+    aggregator = mixture.get("aggregator")
+    if isinstance(aggregator, dict):
+        candidates.append(aggregator)
+
+    review = s.llm_review if isinstance(s.llm_review, dict) else {}
+    if review:
+        candidates.append(review)
+
+    default_scope = route_scopes(
+        s.anthropic_base_url, s.anthropic_api_key, s.anthropic_model)[1]
+    seen = {default_scope}
+    resolved = []
+    for spec in candidates:
+        model = spec.get("model")
+        if not model:
+            continue
+        base_url = spec.get("base_url") or s.anthropic_base_url
+        api_key = spec.get("api_key") or s.anthropic_api_key
+        scope = route_scopes(base_url, api_key, str(model))[1]
+        if scope in seen:
+            continue
+        seen.add(scope)
+        resolved.append({"model": str(model), "base_url": base_url,
+                         "api_key": api_key})
+    return resolved
+
+
+def _probe_configured_routes(s: Settings) -> tuple[list[str], bool, bool]:
+    """Force-probe unique optional routes, returning safe summaries and flags.
+
+    Results contain only a bounded model id plus success/empty/error type and
+    integer status. Provider output, exception text, URLs, and credentials are
+    deliberately discarded.
+    """
+    routes = _configured_nondefault_routes(s)
+    if not routes:
+        return [], False, False
+
+    from assistant.platform.llm import LLM
+
+    try:
+        llm = LLM(s)
+    except Exception as exc:
+        failure = _bounded_failure(exc)
+        return ([f"{_bounded_config_identifier(route['model'])} ✗ {failure}"
+                 for route in routes], True, False)
+    results = []
+    failed = warned = False
+    for route in routes:
+        model = _bounded_config_identifier(route["model"])
+        try:
+            reply = llm.force_probe_route(
+                route["model"], base_url=route["base_url"],
+                api_key=route["api_key"], max_tokens=1500)
+        except Exception as exc:
+            failed = True
+            results.append(f"{model} ✗ {_bounded_failure(exc)}")
+            continue
+        if reply.strip():
+            results.append(f"{model} ✓")
+        else:
+            warned = True
+            results.append(f"{model} ? empty")
+    return results, failed, warned
 
 
 def probe_model_routing(s: Settings, env_files: tuple | None = None):
-    """Diagnose `LLM_ROLES` / `LLM_MIXTURE` — the two optional JSON knobs that
-    `config.py` deliberately degrades to `{}` on malformed input so a broken
-    routing config can never crash startup. The flip side is that a typo
+    """Diagnose the three optional LLM routing JSON knobs and live routes.
+
+    ``LLM_ROLES`` / ``LLM_MIXTURE`` / ``LLM_REVIEW`` deliberately degrade to
+    ``{}`` on malformed input so a broken config can never crash startup. The
+    flip side is that a typo
     silently turns the whole feature off; this probe makes that visible. Reads
     the effective raw value from the same ordered sources Settings uses and
-    names the winning source — never the value. Returns `(status, detail)`."""
+    names the winning source — never the value. With a real ``Settings`` it
+    also force-probes every unique non-default route; ``None`` remains an
+    offline parser seam. Returns `(status, detail)`."""
     import json
 
     parts, warns, failed = [], [], False
@@ -303,24 +474,50 @@ def probe_model_routing(s: Settings, env_files: tuple | None = None):
         raw, source = _effective_raw(name, env_files)
         if not raw:
             continue
+        safe_source = _bounded_config_identifier(source, 120)
         try:
             parsed = json.loads(raw)
         except ValueError:
             failed = True
-            parts.append(f"{name} malformed JSON (from {source}) — dotenv reads "
+            parts.append(f"{name} malformed JSON (from {safe_source}) — dotenv reads "
                          "a multi-line value as only its first physical line; "
                          "keep it on one line or wrap the whole value in "
                          "'single quotes'")
             continue
         if not isinstance(parsed, dict):
             failed = True
-            parts.append(f"{name} is valid JSON but not an object (from {source})")
+            parts.append(f"{name} is valid JSON but not an object "
+                         f"(from {safe_source})")
             continue
-        w, summary = summarize(parsed)
-        warns += w
-        parts.append(summary)
+        if s is None:
+            w, summary = summarize(parsed)
+            warns += w
+            parts.append(summary)
+
+    # Tests may construct Settings directly rather than through env JSON. Live
+    # checks still summarize those effective objects, while ``s=None`` remains
+    # the intentionally offline raw-parser path.
+    if s is not None:
+        effective = (("LLM_ROLES", s.llm_roles, _summarize_roles),
+                     ("LLM_MIXTURE", s.llm_mixture,
+                      lambda value: _summarize_live_mixture(value, s)),
+                     ("LLM_REVIEW", s.llm_review, _summarize_review))
+        for name, parsed, summarize in effective:
+            if not isinstance(parsed, dict) or not parsed:
+                continue
+            w, summary = summarize(parsed)
+            warns += w
+            parts.append(summary)
+
+        live_results, live_failed, live_warned = _probe_configured_routes(s)
+        if live_results:
+            parts.append("route checks " + ", ".join(live_results))
+        failed = failed or live_failed
+        if live_warned:
+            warns.append("a configured model returned an empty health response")
     if not parts:
-        return SKIP, "LLM_ROLES/LLM_MIXTURE unset — every role runs the default model"
+        return SKIP, ("LLM_ROLES/LLM_MIXTURE/LLM_REVIEW unset — every role "
+                      "runs the default model")
     detail = " · ".join(parts + [f"⚠ {w}" for w in warns])
     return (FAIL if failed else WARN if warns else OK), detail
 

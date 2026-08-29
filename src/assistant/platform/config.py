@@ -259,6 +259,12 @@ class Settings(BaseSettings):
     arxiv_max_per_query: int = 30
     research_top_papers: int = 10
     research_top_feed_items: int = 8
+    research_feed_workers: int = 4  # runtime-clamped to 1..32; 1 is serial
+    # A repeatedly dead feed is skipped after three consecutive failures, then
+    # receives one half-open probe after this many hours. Zero temporarily
+    # bypasses persistence without clearing prior policy-scoped health state;
+    # runtime policy is finite and clamped to 0..8760 hours.
+    research_feed_cooldown_hours: float = 72
 
     # Data & run behavior
     data_dir: Path = Path.home() / ".personal-agent"
