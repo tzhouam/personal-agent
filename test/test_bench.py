@@ -7,11 +7,13 @@ results run + report card."""
 
 import json
 import socket
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from assistant.agent.actions.registry import execute
+from assistant.agent.actions.base import ActionResult
+from assistant.agent.actions.registry import ACTIONS, execute
 from assistant.bench import stats
 from assistant.bench.results import RunStore
 from assistant.bench.run import _llm_hosts, render_report, run_tracks
@@ -94,6 +96,55 @@ def test_sandbox_runs_allowlisted_actions_for_real(tmp_path):
 
     assert len(FinanceStore(settings.profile_dir).records()) == 1
     assert str(settings.data_dir).startswith(str(tmp_path))
+
+
+def test_sandbox_projects_structured_results_to_strict_text_schema(
+        settings, monkeypatch):
+    """Typed handler data never enters raw; both success verdicts apply."""
+    action = ACTIONS["list_todos"]
+    rich = ActionResult(
+        False,
+        "benign text without a legacy failure marker",
+        data={"PRIVATE_OWNER_FIELD": object()},
+        error="PRIVATE_ERROR",
+        provenance=[{"PRIVATE_SOURCE": "PRIVATE_ID"}],
+    )
+    monkeypatch.setitem(
+        ACTIONS, "list_todos", replace(action, handler=lambda _s, _a: rich))
+    recorder = SandboxRecorder()
+    with action_sandbox(recorder):
+        assert execute([{"type": "list_todos"}], settings) == [rich.text]
+    assert recorder.executed == [{
+        "action": {"type": "list_todos"}, "outcome": rich.text, "ok": False,
+    }]
+    assert isinstance(recorder.executed[0]["outcome"], str)
+    assert "PRIVATE_OWNER_FIELD" not in json.dumps(recorder.executed)
+
+    # A handler-level success is still a benchmark non-success when the
+    # deterministic policy says no entity was actually found.
+    monkeypatch.setitem(
+        ACTIONS, "list_todos", replace(
+            action, handler=lambda _s, _a: ActionResult(True, "(no open todos)")))
+    recorder = SandboxRecorder()
+    with action_sandbox(recorder):
+        execute([{"type": "list_todos"}], settings)
+    assert recorder.executed[0]["ok"] is False
+
+
+def test_sandbox_never_persists_handler_exception_text(settings, monkeypatch):
+    """A handler exception can contain owner data; retained raw never can."""
+    def fail(_settings, _action):
+        raise RuntimeError("PRIVATE_HANDLER_EXCEPTION")
+
+    monkeypatch.setitem(
+        ACTIONS, "list_todos", replace(ACTIONS["list_todos"], handler=fail))
+    recorder = SandboxRecorder()
+    with action_sandbox(recorder):
+        result = execute([{"type": "list_todos"}], settings)
+    assert result == ["action list_todos failed"]
+    assert recorder.executed[0]["outcome"] == "action list_todos failed"
+    assert recorder.executed[0]["ok"] is False
+    assert "PRIVATE_HANDLER_EXCEPTION" not in json.dumps(recorder.executed)
 
 
 def test_sandbox_denies_by_default(tmp_path):
@@ -295,6 +346,38 @@ def test_golden_actions_track_end_to_end(settings, tmp_path):
         {k: v for k, v in row["item_means"].items() if v < 1}, ensure_ascii=False)
 
 
+def test_golden_actions_typed_read_reaches_jsonl_and_rescores(
+        settings, tmp_path):
+    """The real ga30 choice that exposed ActionResult remains re-scoreable."""
+    from assistant.bench.surfaces import TurnRecord
+    from assistant.bench.tracks import _load_fixture, _score_action_item
+
+    script = _perfect_script()
+    script["开放待办"] = [{"type": "list_todos"}]
+    summary = run_tracks(
+        ["golden-actions"], settings, reps=1,
+        llm_factory=lambda s: ScriptedLLM(script),
+        results_root=tmp_path / "results", guard_network=False)
+
+    path = (tmp_path / "results" / summary["run_id"]
+            / "golden-actions.items.jsonl")
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(rows) == 30
+    ga30 = next(row for row in rows if row["item"] == "ga30")
+    raw = ga30["reps"][0]["raw"]
+    assert raw["executed"]
+    assert all(isinstance(entry["outcome"], str)
+               for entry in raw["executed"])
+    assert "ActionResult" not in path.read_text()
+
+    item = next(item for item in _load_fixture("golden_actions.json")[0]["items"]
+                if item["id"] == "ga30")
+    persisted_record = TurnRecord(
+        reply=raw["reply"], outcome="success",
+        executed=raw["executed"], faked=raw["faked"])
+    assert _score_action_item(item, persisted_record) == ga30["reps"][0]["score"]
+
+
 def test_golden_actions_scores_wrong_actions_zero(settings, tmp_path):
     bad = {"午饭花了45": [{"type": "add_todo", "title": "午饭"}]}   # wrong action
     summary = run_tracks(
@@ -380,6 +463,108 @@ def test_results_run_isolated_and_report_renders(settings, tmp_path, monkeypatch
     delta = summary2["tracks"]["golden-actions"]["delta"]
     assert delta["regressed"] is True
     assert "REGRESSED (unconfirmed" in render_report(summary2)
+
+
+def test_results_writer_rejects_hostile_payload_atomically(tmp_path):
+    """Unknown objects never invoke user code or leave a partial final JSONL."""
+    calls = []
+
+    class Hostile:
+        def __str__(self):
+            calls.append("str")
+            raise AssertionError("PRIVATE_STR_SECRET")
+
+        def __repr__(self):
+            calls.append("repr")
+            raise AssertionError("PRIVATE_REPR_SECRET")
+
+    store = RunStore(root=tmp_path / "results")
+    rows = {
+        "first": [{"score": 1.0, "raw": {"ok": True}}],
+        "second": [{"score": 0.0, "raw": {"value": Hostile()}}],
+    }
+    with pytest.raises(
+            ValueError,
+            match=r"not JSON-compatible at row 1 rep 0") as caught:
+        store.write_items("hostile", rows)
+    assert calls == []
+    assert "PRIVATE" not in str(caught.value)
+    assert not (store.dir / "hostile.items.jsonl").exists()
+    assert not (store.dir / ".hostile.items.jsonl.tmp").exists()
+
+
+def test_results_writer_never_calls_custom_container_methods(tmp_path):
+    """Container subclasses are rejected before `.items`, `.get`, or iteration."""
+    calls = []
+
+    class HostileDict(dict):
+        def items(self):
+            calls.append("items")
+            raise RuntimeError("PRIVATE_ITEMS_SECRET")
+
+        def get(self, *args, **kwargs):
+            calls.append("get")
+            raise RuntimeError("PRIVATE_GET_SECRET")
+
+    class HostileList(list):
+        def __iter__(self):
+            calls.append("iter")
+            raise RuntimeError("PRIVATE_ITER_SECRET")
+
+    store = RunStore(root=tmp_path / "results-a")
+    with pytest.raises(ValueError, match="track payload"):
+        store.write_items("mapping", HostileDict())
+    assert calls == []
+
+    store = RunStore(root=tmp_path / "results-b")
+    with pytest.raises(ValueError, match=r"row 0 rep 0"):
+        store.write_items("result", {"item": [HostileDict()]})
+    assert calls == []
+
+    store = RunStore(root=tmp_path / "results-c")
+    with pytest.raises(ValueError, match=r"at row 0$"):
+        store.write_items("reps", {"item": HostileList()})
+    assert calls == []
+
+
+def test_results_writer_rejects_unpaired_unicode_at_safe_location(tmp_path):
+    """Invalid UTF-8 cannot escape as a raw UnicodeEncodeError or partial file."""
+    bad = "\ud800"
+    payloads = [
+        ({"item": [{"score": 1.0, "raw": {"nested": bad}}]},
+         r"row 0 rep 0"),
+        ({"item": [{"score": 1.0, "raw": {bad: "nested key"}}]},
+         r"row 0 rep 0"),
+        ({bad: [{"score": 1.0, "raw": None}]}, r"at row 0$"),
+    ]
+    for index, (rows, location) in enumerate(payloads):
+        store = RunStore(root=tmp_path / f"results-{index}")
+        with pytest.raises(ValueError, match=location) as caught:
+            store.write_items("unicode", rows)
+        assert bad not in str(caught.value)
+        assert not (store.dir / "unicode.items.jsonl").exists()
+
+
+@pytest.mark.parametrize("payload", [float("nan"), {"bad": (1, 2)}])
+def test_results_writer_rejects_non_json_values(tmp_path, payload):
+    """NaN and coercible-looking Python containers stay outside the contract."""
+    store = RunStore(root=tmp_path / "results")
+    with pytest.raises(ValueError, match="row 0 rep 0"):
+        store.write_items(
+            "invalid", {"item": [{"score": 1.0, "raw": payload}]})
+    assert not (store.dir / "invalid.items.jsonl").exists()
+
+
+def test_results_writer_masks_tokens_and_uses_private_mode(tmp_path):
+    """Atomic strict writing keeps the existing durable secret filter."""
+    token = "ghp_" + "A" * 36
+    store = RunStore(root=tmp_path / "results")
+    store.write_items(
+        "safe", {"item": [{"score": 1.0, "raw": {"token": token}}]})
+    path = store.dir / "safe.items.jsonl"
+    text = path.read_text()
+    assert token not in text and "ghp_…AAAA" in text
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_nutribench_scoring_and_missing_data(settings, tmp_path, monkeypatch):

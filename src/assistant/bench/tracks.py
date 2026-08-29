@@ -391,9 +391,12 @@ def _run_reps(reps, make, body):
             continue
         try:
             out.append(body(ctx))
-        except Exception as exc:
+        except Exception:
             log.exception("bench: item body crashed")
-            out.append({"score": 0.0, "raw": {"crash": str(exc)[:200]}})
+            # Raw results are durable. Exception messages may contain owner
+            # data or credentials, so persist only a fixed classification.
+            out.append({"score": 0.0,
+                        "raw": {"crash": "item_body_exception"}})
     return out
 
 
