@@ -51,6 +51,10 @@ LLM-judge metrics need one cheap extra LLM call per artifact.
 
 ## 4. github digest (triage)
 
+- **Model coverage**: `llm_triaged / llm_requested`, with
+  `fallback_count`, `degraded`, and an artifact-only reason code. Overflow and
+  malformed/missing summaries count as deterministic fallback rather than a
+  silent success.
 - **Red precision (SRE alerting precision)**: reds the owner acted on within N days / total reds. "Acted on" = todo done, PR/issue interaction observed in later collects, or link click. The Workbook's alert-fatigue result is the justification: unactionable reds train the owner to ignore red.
 - **Red recall (proxy)**: items triaged yellow/white that the owner nonetheless acted on ⇒ missed-red count (implicit false negatives).
 - **Suppression effectiveness**: seen-store suppressed / total notifications — dedup doing its job (`suppressed_seen` already computed).
@@ -63,6 +67,10 @@ LLM-judge metrics need one cheap extra LLM call per artifact.
 
 ## 6. research digest
 
+- **Model coverage**: item-level `score_requested/completed/fallback` and
+  `summary_requested/completed/fallback`; `degraded=1` when either deterministic
+  fallback path was used. Counters include partial and malformed responses, not
+  only raised provider errors.
 - **Done-rate (Precision@k analog)**: reading-list items marked done / items surfaced, per window — the digest's single most meaningful quality number (implicit relevance label).
 - **MRR**: mean reciprocal rank of the first item per digest the owner eventually marks done — are the best papers on top?
 - **NDCG@10** (binary rel: done=1) once enough done-marks accumulate: `DCG = Σ rel_i/log₂(i+1)` normalized by ideal ordering.

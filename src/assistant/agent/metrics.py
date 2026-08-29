@@ -30,11 +30,16 @@ def _collect(out: dict) -> dict:
 def _digest(out: dict) -> dict:
     """Metrics for the digest phase: red/yellow/white section counts plus how
     many already-seen items were suppressed."""
-    sections = out.get("digest", {}).get("sections", {})
+    digest = out.get("digest", {})
+    sections = digest.get("sections", {})
     return {"red": len(sections.get("red", [])),
             "yellow": len(sections.get("yellow", [])),
             "white": len(sections.get("white", [])),
-            "suppressed": out.get("digest", {}).get("suppressed_seen", 0)}
+            "suppressed": digest.get("suppressed_seen", 0),
+            "llm_requested": digest.get("llm_requested", 0),
+            "llm_triaged": digest.get("llm_triaged", 0),
+            "fallback_count": digest.get("fallback_count", 0),
+            "degraded": 1 if digest.get("degraded") else 0}
 
 
 def _count_sources(out: dict, prefixes: tuple[str, ...]) -> int:
@@ -44,6 +49,27 @@ def _count_sources(out: dict, prefixes: tuple[str, ...]) -> int:
                if str(v).startswith(prefixes))
 
 
+def _research(out: dict) -> dict:
+    """Metrics for research output and its LLM fallback coverage."""
+    research = out.get("research", {})
+    return {
+        "papers": len(research.get("papers", [])),
+        "paper_quota": research.get("paper_quota", 0),
+        "industry": len(research.get("industry", [])),
+        # `source_health` also carries free-text arXiv/quota notes; only the
+        # tagged rows represent configured feed sources.
+        "sources_ok": _count_sources(out, ("ok:",)),
+        "sources_total": _count_sources(out, ("ok:", "FAILED")),
+        "score_requested": research.get("score_requested", 0),
+        "score_completed": research.get("score_completed", 0),
+        "score_fallback": research.get("score_fallback", 0),
+        "summary_requested": research.get("summary_requested", 0),
+        "summary_completed": research.get("summary_completed", 0),
+        "summary_fallback": research.get("summary_fallback", 0),
+        "degraded": 1 if research.get("degraded") else 0,
+    }
+
+
 EXTRACTORS = {
     "collect": _collect,
     "profile": lambda out: {"ops_applied": len(out.get("profile_ops", []))},
@@ -51,16 +77,7 @@ EXTRACTORS = {
     "todos": lambda out: {"wip": out.get("todos", {}).get("open_count", 0),
                           "added": len(out.get("todos", {}).get("added", [])),
                           "auto_closed": len(out.get("todos", {}).get("closed", []))},
-    "research": lambda out: {
-        "papers": len(out.get("research", {}).get("papers", [])),
-        "paper_quota": out.get("research", {}).get("paper_quota", 0),
-        "industry": len(out.get("research", {}).get("industry", [])),
-        # Only the `ok:`/`FAILED` rows are sources — `source_health` also carries
-        # free-text notes (arxiv candidate counts, the paper quota explanation)
-        # that must not be counted as either. Before this, every value was
-        # free text, so `sources_ok` was structurally stuck at 0.
-        "sources_ok": _count_sources(out, ("ok:",)),
-        "sources_total": _count_sources(out, ("ok:", "FAILED"))},
+    "research": _research,
     "website": lambda out: {
         "pushed": 1 if out.get("website", {}).get("status") in ("pushed", "no_change") else 0},
     "deliver": lambda out: {"email_sent": 1 if out.get("email_sent") else 0},

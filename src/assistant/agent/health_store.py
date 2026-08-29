@@ -18,12 +18,13 @@ averages) are computed here in code so health advice cites real figures.
 import re
 import shutil
 import subprocess
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
 
 from assistant.platform.locks import _path_lock, locked_transaction
+from assistant.platform.timeutil import local_naive_now, local_today
 
 RECORD_KINDS = ("meal", "exercise", "weight")
 
@@ -199,7 +200,7 @@ class HealthStore:
         if sex in ("male", "female", "m", "f", "男", "女"):
             profile["sex"] = {"m": "male", "男": "male",
                               "f": "female", "女": "female"}.get(sex, sex)
-        for key, low, high in (("birth_year", 1900, date.today().year),
+        for key, low, high in (("birth_year", 1900, local_today().year),
                                ("height_cm", 80, 260)):
             try:
                 value = float(fields.get(key))
@@ -225,7 +226,7 @@ class HealthStore:
         kind = str(kind).strip().lower()
         if kind not in RECORD_KINDS:
             return "invalid", None
-        when = str(when or date.today().isoformat()).strip()
+        when = str(when or local_today().isoformat()).strip()
         try:
             datetime.strptime(when, "%Y-%m-%d")
         except ValueError:
@@ -282,7 +283,7 @@ class HealthStore:
             if kind == "weight" and not stated and not _stated_time(r) \
                     and r.get("weight_kg") == body["weight_kg"]:
                 return "duplicate", r
-        now = datetime.now()
+        now = local_naive_now()
         record = {"id": f"h-{when.replace('-', '')}-{_next_n(day_data['records'], when)}",
                   "kind": kind, "date": when,
                   "time": stated or now.strftime("%H:%M"),
@@ -314,7 +315,7 @@ class HealthStore:
         window (system-local today) and `kind` to one record type. Reads only
         the day-files whose filename date is in-window."""
         self._ensure_migrated()
-        cutoff = (date.today() - timedelta(days=days)).isoformat() if days else ""
+        cutoff = (local_today() - timedelta(days=days)).isoformat() if days else ""
         out: list[dict] = []
         if self.dir.exists():
             for p in self.dir.glob("*.yaml"):
@@ -358,7 +359,7 @@ class HealthStore:
                for n in data["needs"]):
             return None
         need = {"id": f"n{data['next_need_id']}", "item": item,
-                "why": str(why or "")[:160], "since": date.today().isoformat()}
+                "why": str(why or "")[:160], "since": local_today().isoformat()}
         data["next_need_id"] += 1
         data["needs"].append(need)
         self._save_meta(data, f"health: need {item} ({need['id']})")
@@ -389,7 +390,7 @@ class HealthStore:
         averages over the days that have data, and open needs."""
         profile = self.profile()
         if profile.get("birth_year"):
-            profile["age"] = date.today().year - int(profile["birth_year"])
+            profile["age"] = local_today().year - int(profile["birth_year"])
         weights = self.records(kind="weight")
         latest = weights[-1] if weights else None
         if latest and profile.get("height_cm"):

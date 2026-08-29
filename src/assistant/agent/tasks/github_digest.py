@@ -50,10 +50,21 @@ def build_digest(llm: LLM, profile: dict, notifications: list[dict], activity: l
     recent `activity` as relevance context); the rest are appended to white as
     FYI so nothing is silently dropped. Each notification falls back to its
     `_REASON_PRIORITY` bucket and a `[reason] title` summary when the model
-    omits it or the call fails, so triage always covers every id."""
+    omits it or the call fails, so triage always covers every id. The returned
+    accounting distinguishes an LLM exception (`llm_error`) from an otherwise
+    valid response that omitted requested IDs (`partial_response`)."""
     sections = {"red": [], "yellow": [], "white": []}
     if not notifications:
-        return {"sections": sections, "total": 0, "overflow": 0}
+        return {
+            "sections": sections,
+            "total": 0,
+            "overflow": 0,
+            "llm_requested": 0,
+            "llm_triaged": 0,
+            "fallback_count": 0,
+            "degraded": False,
+            "fallback_reason_code": "none",
+        }
 
     head, overflow = notifications[:_MAX_TO_LLM], notifications[_MAX_TO_LLM:]
 
@@ -72,13 +83,43 @@ def build_digest(llm: LLM, profile: dict, notifications: list[dict], activity: l
 
     by_id = {str(n["id"]): n for n in head}
     triaged: dict[str, dict] = {}
+    fallback_reason_code = "none"
     try:
-        for item in llm.complete_json(prompt, system=_SYSTEM, max_tokens=6000, role="pipeline"):
-            nid = str(item.get("id", ""))
-            if nid in by_id and item.get("priority") in sections:
-                triaged[nid] = item
+        response = llm.complete_json(
+            prompt, system=_SYSTEM, max_tokens=6000, role="pipeline")
     except Exception:
-        triaged = {}  # full fallback to deterministic buckets below
+        fallback_reason_code = "llm_error"
+        response = []
+    if not isinstance(response, list):
+        fallback_reason_code = "malformed_response"
+        response = []
+    malformed = False
+    for item in response:
+        if not isinstance(item, dict):
+            malformed = True
+            continue
+        nid = str(item.get("id", ""))
+        priority = item.get("priority")
+        summary = item.get("summary")
+        action = item.get("action")
+        todo = item.get("todo")
+        if (nid not in by_id or not isinstance(priority, str)
+                or priority not in sections
+                or not isinstance(summary, str) or not summary.strip()
+                or (action is not None and not isinstance(action, str))
+                or (todo is not None and not isinstance(todo, str))):
+            malformed = True
+            continue
+        triaged[nid] = item
+    if malformed and fallback_reason_code == "none":
+        fallback_reason_code = "malformed_response"
+
+    missing_requested = len(head) - len(triaged)
+    # Overflow is deliberately not sent to the LLM, but it is still rendered
+    # through the deterministic fallback and therefore belongs in this count.
+    fallback_count = len(notifications) - len(triaged)
+    if fallback_count and fallback_reason_code == "none":
+        fallback_reason_code = "partial_response" if missing_requested else "overflow"
 
     for nid, n in by_id.items():
         item = triaged.get(nid)
@@ -99,5 +140,9 @@ def build_digest(llm: LLM, profile: dict, notifications: list[dict], activity: l
         "sections": sections,
         "total": len(notifications),
         "overflow": len(overflow),
+        "llm_requested": len(head),
         "llm_triaged": len(triaged),
+        "fallback_count": fallback_count,
+        "degraded": fallback_count > 0,
+        "fallback_reason_code": fallback_reason_code,
     }

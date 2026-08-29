@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 from assistant.platform.locks import locked_transaction
+from assistant.platform.timeutil import local_today
 
 # Todo display grouping, shared by the digest email and the website todos
 # page: first predicate that matches wins, so the catch-all must stay last.
@@ -80,7 +81,7 @@ class _YamlItems:
         if any(i.get("key") == key and i["status"] == "open" for i in data["items"]):
             return None
         item = {"id": f"{self.ID_PREFIX}{data['next_id']}", "key": key,
-                "status": "open", "created": date.today().isoformat(), **fields}
+                "status": "open", "created": local_today().isoformat(), **fields}
         data["next_id"] += 1
         data["items"].append(item)
         self._save(data, f"{self.FILENAME}: add {item['id']} {fields.get('title', '')[:50]}")
@@ -94,7 +95,7 @@ class _YamlItems:
         for item in data["items"]:
             if item["id"] == item_id and item["status"] == "open":
                 item["status"] = "done"
-                item["done_at"] = date.today().isoformat()
+                item["done_at"] = local_today().isoformat()
                 self._save(data, f"{self.FILENAME}: done {item_id}")
                 return True
         return False
@@ -106,7 +107,7 @@ class _YamlItems:
         for item in data["items"]:
             if item.get("key") == key and item["status"] == "open":
                 item["status"] = "done"
-                item["done_at"] = date.today().isoformat()
+                item["done_at"] = local_today().isoformat()
                 item["closed"] = "auto"
                 self._save(data, f"{self.FILENAME}: auto-close {item['id']}")
                 return True
@@ -131,7 +132,7 @@ class _YamlItems:
         # COMMITTED_FADE_END govern.
         from assistant.agent.urgency import staleness
 
-        today = today or date.today()
+        today = today or local_today()
         data = self.load()
         expired = []
         for item in data["items"]:
@@ -169,7 +170,7 @@ class ReadingList(_YamlItems):
         for item in data["items"]:
             if item["id"] == item_id and item["status"] != "unrelated":
                 item["status"] = "unrelated"
-                item["unrelated_at"] = date.today().isoformat()
+                item["unrelated_at"] = local_today().isoformat()
                 self._save(data, f"{self.FILENAME}: {item_id} marked unrelated")
                 return True
         return False

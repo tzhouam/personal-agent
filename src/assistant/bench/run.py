@@ -8,17 +8,19 @@ regression. A directional track (too few items) never alerts. Regressions
 are labeled unconfirmed pending an immediate rerun (§2.5)."""
 
 import logging
-import os
 import shutil
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from assistant.bench import stats
 from assistant.bench.results import RunStore
 from assistant.bench.sandbox import bench_settings, network_guard, route_fingerprint
 from assistant.bench.tracks import TRACKS
 from assistant.platform.llm import LLM
+from assistant.platform.timeutil import frozen_now
 
 log = logging.getLogger("assistant")
 
@@ -79,14 +81,15 @@ def run_tracks(track_names: list[str], base_settings, reps: int = _MIN_REPS,
     scratch_base = Path(tempfile.mkdtemp(prefix="pa-bench-run-"))
     guard = (network_guard(_llm_hosts(base_settings)) if guard_network
              else _null_context())
-    prev_tz = os.environ.get("TZ")
-    os.environ["TZ"] = getattr(base_settings, "tz", "") or "Asia/Shanghai"
+    # TZ is process-global: mutating it lets concurrent benchmark/runtime
+    # threads observe one another's clock and makes nested runs restore the
+    # wrong value. Capture the configured zone directly and keep it scoped in
+    # the ContextVar-backed clock instead.
+    zone = ZoneInfo(getattr(base_settings, "tz", "") or "Asia/Shanghai")
+    benchmark_now = datetime.now(zone).replace(second=0, microsecond=0)
+    summary["benchmark_now"] = benchmark_now.isoformat()
     try:
-        time.tzset()
-    except AttributeError:
-        pass
-    try:
-        with guard:
+        with frozen_now(benchmark_now), guard:
             for name in track_names:
                 track = TRACKS[name]
                 scratch = scratch_base / name
@@ -126,14 +129,6 @@ def run_tracks(track_names: list[str], base_settings, reps: int = _MIN_REPS,
         store.write_summary(summary)
     finally:
         shutil.rmtree(scratch_base, ignore_errors=True)
-        if prev_tz is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = prev_tz
-        try:
-            time.tzset()
-        except AttributeError:
-            pass
     return summary
 
 

@@ -78,9 +78,19 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
     rate tunes the adaptive paper quota. Candidates are deduped against
     everything ever surfaced (`events.filter_unseen`), scored one batch per pool
     (English feeds and Chinese feeds separately, since 中文媒体 is a required
-    section with a lower bar and a floor), and only then summarized."""
+    section with a lower bar and a floor), and only then summarized. Returned
+    requested/completed/fallback counters make the existing deterministic
+    score/summary fallbacks visible without changing their behavior."""
     profile_summary = render_summary(profile)
     health: dict[str, str] = {}
+    accounting = {
+        "score_requested": 0,
+        "score_completed": 0,
+        "score_fallback": 0,
+        "summary_requested": 0,
+        "summary_completed": 0,
+        "summary_fallback": 0,
+    }
 
     # negative feedback: readings the owner marked unrelated bias the scorer
     from assistant.agent.todo_store import ReadingList
@@ -106,11 +116,16 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
     # ── 2. cheap-model relevance scoring, one batch per pool ─────────
     render_feed = lambda i: f"[{i['source']}] {i['title']} — {i['summary'][:200]}"  # noqa: E731
     papers = _select(
-        _score(llm, profile_summary, papers, lambda p: f"{p['title']} — {p['abstract'][:300]}"),
+        _score(llm, profile_summary, papers,
+               lambda p: f"{p['title']} — {p['abstract'][:300]}", accounting),
         min_score=_MIN_SCORE, top=paper_quota,
     )
-    en_pool = _score(llm, profile_summary, [i for i in feed_items if i.get("lang") != "zh"], render_feed)
-    zh_pool = _score(llm, profile_summary, [i for i in feed_items if i.get("lang") == "zh"], render_feed)
+    en_pool = _score(llm, profile_summary,
+                     [i for i in feed_items if i.get("lang") != "zh"],
+                     render_feed, accounting)
+    zh_pool = _score(llm, profile_summary,
+                     [i for i in feed_items if i.get("lang") == "zh"],
+                     render_feed, accounting)
     industry = _select(en_pool, min_score=_MIN_SCORE, top=settings.research_top_feed_items)
     # the 中文媒体 section is a product requirement — lower bar plus a floor of 3
     chinese = _select(zh_pool, min_score=4, top=settings.research_top_feed_items,
@@ -118,7 +133,7 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
 
     # ── 3. one full-model call writes all summaries ──────────────────
     if papers or industry or chinese:
-        _summarize(llm, profile_summary, papers, industry + chinese)
+        _summarize(llm, profile_summary, papers, industry + chinese, accounting)
 
     return {
         "paper_quota": paper_quota,
@@ -127,6 +142,9 @@ def run_research(llm: LLM, profile: dict, events: EventsStore, settings: Setting
         "chinese": chinese,
         "source_health": health,
         "seen_ids": [x["seen_id"] for x in papers + industry + chinese],
+        **accounting,
+        "degraded": bool(accounting["score_fallback"]
+                         or accounting["summary_fallback"]),
     }
 
 
@@ -196,12 +214,15 @@ def _gather_feed_items(settings: Settings, health: dict) -> list[dict]:
     return items
 
 
-def _score(llm: LLM, profile_summary: str, pool: list[dict], render) -> list[dict]:
+def _score(llm: LLM, profile_summary: str, pool: list[dict], render,
+           accounting: dict | None = None) -> list[dict]:
     """Annotate every item with _score and return the pool sorted by it (desc).
     On scorer failure every item gets _MIN_SCORE so downstream selection keeps
     natural order instead of dropping the whole pool."""
     if not pool:
         return []
+    if accounting is not None:
+        accounting["score_requested"] += len(pool)
     lines = "\n".join(f"[{i}] {render(x)}" for i, x in enumerate(pool))
     try:
         scored = llm.complete_json(
@@ -213,6 +234,10 @@ def _score(llm: LLM, profile_summary: str, pool: list[dict], render) -> list[dic
     except Exception as exc:
         log.warning("relevance scoring failed, keeping natural order: %s", exc)
         scores = {}
+    completed = sum(1 for i in range(len(pool)) if i in scores)
+    if accounting is not None:
+        accounting["score_completed"] += completed
+        accounting["score_fallback"] += len(pool) - completed
     for i, item in enumerate(pool):
         item["_score"] = scores.get(i, _MIN_SCORE if not scores else 0)
     return sorted(pool, key=lambda x: -x["_score"])
@@ -228,7 +253,8 @@ def _select(ranked: list[dict], min_score: int, top: int, floor: int = 0) -> lis
     return picked
 
 
-def _summarize(llm: LLM, profile_summary: str, papers: list[dict], feed_items: list[dict]) -> None:
+def _summarize(llm: LLM, profile_summary: str, papers: list[dict],
+               feed_items: list[dict], accounting: dict | None = None) -> None:
     """One full-model call writes every summary, mutating `papers` and
     `feed_items` in place: each paper gets `summary` + profile-tied `why`, each
     feed item a `takeaway` (zh items in Chinese). On failure the items fall back
@@ -240,20 +266,70 @@ def _summarize(llm: LLM, profile_summary: str, papers: list[dict], feed_items: l
         f"id={i['seen_id']} lang={i.get('lang', 'en')} :: [{i['source']}] {i['title']} :: {i['summary'][:300]}"
         for i in feed_items
     )
+    requested = len(papers) + len(feed_items)
+    if accounting is not None:
+        accounting["summary_requested"] += requested
     try:
         result = llm.complete_json(
             f"## Owner profile\n{profile_summary}\n\n## Papers\n{paper_lines or '(none)'}\n\n"
             f"## Feed items\n{item_lines or '(none)'}",
             system=_SUMMARY_SYSTEM, max_tokens=8000, role="pipeline",
         )
+        if not isinstance(result, dict):
+            raise ValueError("summary response must be an object")
+        raw_papers = result.get("papers", [])
+        raw_items = result.get("items", [])
+        if not isinstance(raw_papers, list) or not isinstance(raw_items, list):
+            raise ValueError("summary response lists are malformed")
     except Exception as exc:
         log.warning("summary generation failed: %s", exc)
+        if accounting is not None:
+            accounting["summary_fallback"] += requested
+        _apply_summary_fallbacks(papers, feed_items)
         return
-    summaries = {p.get("id"): p for p in result.get("papers", []) if isinstance(p, dict)}
-    takeaways = {i.get("id"): i for i in result.get("items", []) if isinstance(i, dict)}
+    summaries = {p["id"]: p for p in raw_papers
+                 if isinstance(p, dict) and isinstance(p.get("id"), str)
+                 and p.get("id")}
+    takeaways = {i["id"]: i for i in raw_items
+                 if isinstance(i, dict) and isinstance(i.get("id"), str)
+                 and i.get("id")}
+
+    def nonempty(value) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    completed = sum(
+        1 for paper in papers
+        if paper["seen_id"] in summaries
+        and nonempty(summaries[paper["seen_id"]].get("summary"))
+        and nonempty(summaries[paper["seen_id"]].get("why"))
+    ) + sum(
+        1 for item in feed_items
+        if item["seen_id"] in takeaways
+        and nonempty(takeaways[item["seen_id"]].get("takeaway"))
+    )
+    if accounting is not None:
+        accounting["summary_completed"] += completed
+        accounting["summary_fallback"] += requested - completed
     for p in papers:
         entry = summaries.get(p["seen_id"], {})
-        p["summary"] = entry.get("summary", p["abstract"][:300])
-        p["why"] = entry.get("why", "")
+        p["summary"] = (entry.get("summary") if nonempty(entry.get("summary"))
+                        else p["abstract"][:300])
+        p["why"] = entry.get("why") if nonempty(entry.get("why")) else ""
     for i in feed_items:
-        i["takeaway"] = takeaways.get(i["seen_id"], {}).get("takeaway", i["summary"][:200])
+        takeaway = takeaways.get(i["seen_id"], {}).get("takeaway")
+        i["takeaway"] = takeaway if nonempty(takeaway) else i["summary"][:200]
+
+
+def _apply_summary_fallbacks(papers: list[dict], feed_items: list[dict]) -> None:
+    """Populate the deterministic values promised by `_summarize`'s contract."""
+    for paper in papers:
+        summary = paper.get("summary")
+        why = paper.get("why")
+        paper["summary"] = (summary if isinstance(summary, str) and summary.strip()
+                            else str(paper.get("abstract", ""))[:300])
+        paper["why"] = why if isinstance(why, str) else ""
+    for item in feed_items:
+        takeaway = item.get("takeaway")
+        item["takeaway"] = (
+            takeaway if isinstance(takeaway, str) and takeaway.strip()
+            else str(item.get("summary", ""))[:200])

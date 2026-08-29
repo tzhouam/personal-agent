@@ -141,6 +141,34 @@ def test_mixture_only_for_configured_roles(monkeypatch):
     assert llm2._mixture_roles == set()
 
 
+def test_single_member_config_stays_single_model(monkeypatch):
+    """A one-member config is routing data, not an implicit MoA invocation."""
+    calls = []
+    metrics = []
+
+    class Resp:
+        content = [type("B", (), {"type": "text", "text": "single"})()]
+        stop_reason = "end_turn"
+        usage = None
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    calls.append(kw["model"])
+                    return Resp()
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    settings = _settings(llm_mixture={
+        "members": [{"model": "only-member"}], "roles": ["pipeline"]})
+    llm = LLM(settings, metrics_sink=lambda *args: metrics.append(args))
+    assert llm.complete("x", role="pipeline") == "single"
+    assert calls == ["default-model"]
+    assert metrics == []
+
+
 def test_mixture_survives_one_dead_proposer(monkeypatch):
     class Resp:
         def __init__(self, text):
@@ -410,6 +438,75 @@ class _Err(Exception):
             self.status_code = status
 
 
+def _connection_error():
+    """Transport failure whose message is deliberately unsafe to persist."""
+    import httpx
+
+    return httpx.ConnectError(
+        "PRIVATE_EXCEPTION_MESSAGE",
+        request=httpx.Request("POST", "https://provider.example/v1/messages"))
+
+
+def _unknown_error():
+    """Unclassified failure with a non-integer status-like value."""
+    exc = RuntimeError("PRIVATE_EXCEPTION_MESSAGE")
+    exc.status_code = "PRIVATE_STATUS_TEXT"
+    return exc
+
+
+@pytest.mark.parametrize("factory, error_type, status, classification", [
+    (lambda: _Err(401, "PRIVATE_EXCEPTION_MESSAGE"), "_Err", 401, "prov"),
+    (lambda: _Err(403, "PRIVATE_EXCEPTION_MESSAGE"), "_Err", 403, "prov"),
+    (lambda: _Err(429, "PRIVATE_EXCEPTION_MESSAGE"), "_Err", 429, "prov"),
+    (lambda: _Err(503, "PRIVATE_EXCEPTION_MESSAGE"), "_Err", 503, "model"),
+    (_connection_error, "ConnectError", None, "prov"),
+    (_unknown_error, "RuntimeError", None, "none"),
+])
+def test_failed_call_span_has_safe_bounded_metadata(
+        monkeypatch, tmp_path, factory, error_type, status, classification):
+    """Failed spans expose routing health without owner/provider payloads."""
+    from assistant.platform import tracing
+
+    _fake_anthropic(monkeypatch)
+    settings = _settings()
+    llm = LLM(settings)
+    exc = factory()
+    exc.response_body = "PRIVATE_RESPONSE_BODY"
+
+    class Client:
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                raise exc
+
+    trace_path = tmp_path / "failed-call.jsonl"
+    token = tracing._default.set(None)
+    try:
+        tracing.init("failed-call", trace_path)
+        with pytest.raises(type(exc)):
+            llm._call(Client(), "safe-model", "PRIVATE_PROMPT",
+                      "PRIVATE_SYSTEM", 100)
+    finally:
+        tracing._default.reset(token)
+
+    spans = [s for s in tracing.load_spans(trace_path) if s["name"] == "llm"]
+    assert len(spans) == 1
+    attrs = spans[0]["attr"]
+    assert attrs["error_type"] == error_type
+    assert attrs["breaker_classification"] == classification
+    if status is None:
+        assert "status_code" not in attrs
+    else:
+        assert attrs["status_code"] == status
+        assert isinstance(attrs["status_code"], int)
+
+    serialized = trace_path.read_text(encoding="utf-8")
+    for forbidden in ("PRIVATE_EXCEPTION_MESSAGE", "PRIVATE_RESPONSE_BODY",
+                      "PRIVATE_STATUS_TEXT", "PRIVATE_PROMPT", "PRIVATE_SYSTEM",
+                      settings.anthropic_api_key):
+        assert forbidden not in serialized
+
+
 def _reset400():
     return _Err(400, "recvAddress(..) failed: Connection reset by peer")
 
@@ -639,7 +736,7 @@ def _moa_rows(settings):
     events = EventsStore(settings.events_db)
     rows = [r for r in events.metrics_window(1) if r["step"] == "moa"]
     events.close()
-    return {r["name"]: r["value"] for r in rows[-6:]}
+    return {r["name"]: r["value"] for r in rows}
 
 
 def test_mixture_observability_spans_and_durable_metrics(monkeypatch, tmp_path):
@@ -673,12 +770,22 @@ def test_mixture_observability_spans_and_durable_metrics(monkeypatch, tmp_path):
     assert stages.count("proposer") == 2 and stages.count("aggregator") == 1
     mix = next(s for s in spans if s["name"] == "mixture")
     assert mix["attr"]["members_total"] == 2
+    assert mix["attr"]["members_attempted"] == 2
+    assert mix["attr"]["members_skipped"] == 0
+    assert mix["attr"]["members_failed"] == 0
     assert mix["attr"]["proposals_ok"] == 2
+    assert mix["attr"]["proposals_final"] == 2
+    assert mix["attr"]["aggregator_attempted"] == 1
+    assert mix["attr"]["aggregator_skipped"] == 0
+    assert mix["attr"]["aggregator_failed"] == 0
     assert mix["attr"]["aggregator_ok"] == 1
     assert mix["attr"]["fallback_used"] == 0
+    assert mix["attr"]["degraded"] == 0
     # the durable numeric row lands even without any tracer (chat turns)
     moa = _moa_rows(settings)
-    assert moa["proposals_ok"] == 2 and moa["aggregator_ok"] == 1
+    for name, value in mix["attr"].items():
+        if name not in {"role"}:
+            assert moa[name] == value
 
 
 def test_mixture_metrics_count_dead_proposer(monkeypatch):
@@ -702,8 +809,98 @@ def test_mixture_metrics_count_dead_proposer(monkeypatch):
         "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
     assert LLM(settings).complete("go", role="pipeline") == "SYNTH"
     moa = _moa_rows(settings)
-    assert moa["members_total"] == 2 and moa["proposals_ok"] == 1
+    assert moa["members_total"] == 2
+    assert moa["members_attempted"] == 2
+    assert moa["members_skipped"] == 0 and moa["members_failed"] == 1
+    assert moa["proposals_ok"] == 1 and moa["proposals_final"] == 1
+    assert moa["aggregator_attempted"] == 1
+    assert moa["aggregator_skipped"] == 0 and moa["aggregator_failed"] == 0
+    assert moa["aggregator_ok"] == 1 and moa["fallback_used"] == 0
+    assert moa["degraded"] == 1
+
+
+def test_mixture_metrics_count_breaker_skipped_member(monkeypatch):
+    """A cooling proposer is skipped, not attempted or failed this call."""
+    calls = []
+    _scripted(monkeypatch, {
+        "m1": lambda kw: "survivor", "m2": lambda kw: "must-not-run",
+        "agg": lambda kw: "SYNTH"}, calls)
+    settings = _settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "agg"}, "roles": ["pipeline"]})
+    scopes = llm_mod._route_scopes(settings, None, None, "m2")
+    for _ in range(settings.moa_member_fail_threshold):
+        mode, gens, claimed = llm_mod._breaker_check(
+            scopes, settings.moa_member_cooldown_s)
+        llm_mod._breaker_record(
+            scopes, gens, claimed, "model", settings.moa_member_fail_threshold,
+            settings.moa_member_cooldown_s)
+
+    assert LLM(settings).complete("go", role="pipeline") == "SYNTH"
+    assert "m2" not in calls
+    moa = _moa_rows(settings)
+    assert moa["members_attempted"] == 1
+    assert moa["members_skipped"] == 1 and moa["members_failed"] == 0
+    assert moa["proposals_ok"] == 1 and moa["proposals_final"] == 1
+    assert moa["degraded"] == 1
+
+
+def test_mixture_degraded_uses_final_layer_proposal_count(monkeypatch):
+    """Earlier successes cannot hide a one-proposal final synthesis layer."""
+    seen = {"m2": 0}
+
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    model = kw["model"]
+                    if model == "m2":
+                        seen["m2"] += 1
+                        if seen["m2"] == 2:
+                            raise RuntimeError("second layer failed")
+                    if model == "aggregator":
+                        return _MoaResp("SYNTH")
+                    return _MoaResp(f"proposal-{model}")
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    settings = _settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "aggregator"},
+        "layers": 2, "roles": ["pipeline"]})
+    assert LLM(settings).complete("go", role="pipeline") == "SYNTH"
+    moa = _moa_rows(settings)
+    assert moa["proposals_ok"] == 3       # two in layer 1, one in layer 2
+    assert moa["proposals_final"] == 1    # only this set reached synthesis
     assert moa["aggregator_ok"] == 1
+    assert moa["degraded"] == 1
+
+
+def test_mixture_metrics_count_failed_aggregator(monkeypatch):
+    """A failed synthesis is observable even when a proposal is returned."""
+    def make_client(**kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    if kw["model"] == "aggregator":
+                        raise RuntimeError("aggregator unavailable")
+                    return _MoaResp(f"proposal-{kw['model']}")
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    settings = _settings(llm_mixture={
+        "members": [{"model": "m1"}, {"model": "m2"}],
+        "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
+    assert LLM(settings).complete("go", role="pipeline").startswith("proposal-")
+    moa = _moa_rows(settings)
+    assert moa["members_attempted"] == 2 and moa["proposals_ok"] == 2
+    assert moa["proposals_final"] == 2
+    assert moa["aggregator_attempted"] == 1
+    assert moa["aggregator_skipped"] == 0 and moa["aggregator_failed"] == 1
+    assert moa["aggregator_ok"] == 0 and moa["fallback_used"] == 1
+    assert moa["degraded"] == 1
 
 
 def test_mixture_metrics_record_fallback(monkeypatch):
@@ -725,6 +922,11 @@ def test_mixture_metrics_record_fallback(monkeypatch):
         "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
     assert LLM(settings).complete("go", role="pipeline") == "fallback answer"
     moa = _moa_rows(settings)
-    assert moa["proposals_ok"] == 0 and moa["fallback_used"] == 1
-    assert moa["aggregator_ok"] == 0
+    assert moa["members_attempted"] == 2
+    assert moa["members_skipped"] == 0 and moa["members_failed"] == 2
+    assert moa["proposals_ok"] == 0 and moa["proposals_final"] == 0
+    assert moa["fallback_used"] == 1
+    assert moa["aggregator_attempted"] == 0
+    assert moa["aggregator_skipped"] == 1 and moa["aggregator_failed"] == 0
+    assert moa["aggregator_ok"] == 0 and moa["degraded"] == 1
     llm_mod._reset_breaker()
