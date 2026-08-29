@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 
 from assistant.agent.actions import registry as actions_registry
+from assistant.agent.actions.base import ActionResult
 from assistant.agent.actions.registry import ACTIONS, looks_failed, validate
 from assistant.platform.config import Settings
 from assistant.platform.llm import normalize_mixture
@@ -188,11 +189,32 @@ def sandboxed_executor(recorder: SandboxRecorder):
                 results.append(error)
                 continue
             try:
-                outcome = action.handler(settings, raw)
-            except Exception as exc:  # mirror production containment
-                outcome = f"action {kind} failed: {exc}"
+                handler_result = action.handler(settings, raw)
+                if type(handler_result) is ActionResult:
+                    # The production executor projects structured results back
+                    # to text for chat. Mirror that boundary here: retained
+                    # benchmark raw is deliberately the small documented
+                    # {action, outcome: str, ok} schema, never handler data or
+                    # provenance that can contain substantially more owner data.
+                    outcome = handler_result.text
+                    succeeded = bool(handler_result.ok)
+                elif type(handler_result) is str:
+                    outcome = handler_result
+                    succeeded = True
+                else:
+                    raise TypeError("action returned an unsupported result")
+                if type(outcome) is not str:
+                    raise TypeError("action result text must be a string")
+                succeeded = succeeded and bench_succeeded(outcome)
+            except Exception:  # mirror production containment, without payloads
+                # Exception messages can contain credentials or owner data.
+                # The benchmark needs only a stable failed outcome; the local
+                # traceback above this persistence boundary remains available
+                # to a developer running the handler directly.
+                outcome = f"action {kind} failed"
+                succeeded = False
             recorder.executed.append({"action": dict(raw), "outcome": outcome,
-                                      "ok": bench_succeeded(outcome)})
+                                      "ok": succeeded})
             results.append(outcome)
         return results
 
