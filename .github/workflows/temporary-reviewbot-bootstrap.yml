@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: JiusiServe/omni-reviewbot
-          ref: de3045f1b9a8047bd20685ab05bb8ff6cb3e7aa2
+          ref: 80d460cd336226608f7673e60c37cb82f7ebaef9
           token: ${{ secrets.MIGRATION_GH_TOKEN }}
           persist-credentials: false
       - name: Download and verify the cutover payload
@@ -32,13 +32,14 @@ jobs:
           GH_TOKEN: ${{ secrets.MIGRATION_GH_TOKEN }}
           MIGRATION_ARCHIVE_KEY: ${{ secrets.MIGRATION_ARCHIVE_KEY }}
           MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
+          BOOTSTRAP_SHA: 80d460cd336226608f7673e60c37cb82f7ebaef9
           REVIEWBOT_SHA: de3045f1b9a8047bd20685ab05bb8ff6cb3e7aa2
           REVIEWBOT_RUN_ID: "33372546646"
           CADDY_VERSION: "2.11.4"
           CADDY_SHA256: "c41708ffb4af9bc6d19f7d22a7a034804352a21ecc62e1d3dfe3d58e30b38a3e"
         run: |
           [[ "$MIGRATION_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$(git rev-parse HEAD)" == "$REVIEWBOT_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$BOOTSTRAP_SHA" ]]
           install -m 700 -d "$RUNNER_TEMP/cutover" "$RUNNER_TEMP/package"
 
           [[ "$(gh run view "$MIGRATION_RUN_ID" \
