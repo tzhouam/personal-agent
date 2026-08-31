@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: JiusiServe/omni-reviewbot
-          ref: fb894f095795b9a8df5c6c5a0ed340e2b4ab6f80
+          ref: aca556671f1fd21793ad8224387dd645fece7fa9
           token: ${{ secrets.MIGRATION_GH_TOKEN }}
           persist-credentials: false
       - name: Download and verify the cutover payload
@@ -32,7 +32,7 @@ jobs:
           GH_TOKEN: ${{ secrets.MIGRATION_GH_TOKEN }}
           MIGRATION_ARCHIVE_KEY: ${{ secrets.MIGRATION_ARCHIVE_KEY }}
           MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
-          BOOTSTRAP_SHA: fb894f095795b9a8df5c6c5a0ed340e2b4ab6f80
+          BOOTSTRAP_SHA: aca556671f1fd21793ad8224387dd645fece7fa9
           REVIEWBOT_SHA: de3045f1b9a8047bd20685ab05bb8ff6cb3e7aa2
           REVIEWBOT_RUN_ID: "33372546646"
           CADDY_VERSION: "2.11.4"
@@ -125,6 +125,8 @@ jobs:
           chmod 600 ~/.ssh/reviewbot-known-hosts
           payload="$RUNNER_TEMP/bootstrap-payload.tar.gz"
           payload_sha=$(sha256sum "$payload" | awk '{print $1}')
+          bootstrap_log="$RUNNER_TEMP/bootstrap.log"
+          set +e
           ssh -T \
             -i ~/.ssh/reviewbot-host \
             -p "$REVIEWBOT_PORT" \
@@ -133,7 +135,40 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile=~/.ssh/reviewbot-known-hosts \
             "$REVIEWBOT_USER@$REVIEWBOT_HOST" \
-            "bootstrap $REVIEWBOT_SHA $payload_sha" < "$payload"
+            "bootstrap $REVIEWBOT_SHA $payload_sha" \
+            < "$payload" > "$bootstrap_log" 2>&1
+          bootstrap_rc=$?
+          set -e
+          cat "$bootstrap_log"
+          if [[ $bootstrap_rc -ne 0 ]]; then
+            # The currently installed de3045f forced command has one known
+            # successful-exit trap bug. The new bootstrap repairs its on-disk
+            # successor before this old process exits. Accept only that exact
+            # post-completion signature, then prove the repaired command and
+            # every service are healthy.
+            grep -Fq 'ReviewBot bootstrap complete:' "$bootstrap_log" || exit "$bootstrap_rc"
+            grep -Fq 'stage: unbound variable' "$bootstrap_log" || exit "$bootstrap_rc"
+            status=$(ssh -T \
+              -i ~/.ssh/reviewbot-host \
+              -p "$REVIEWBOT_PORT" \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile=~/.ssh/reviewbot-known-hosts \
+              "$REVIEWBOT_USER@$REVIEWBOT_HOST" status)
+            printf '%s\n' "$status"
+            grep -Fqx "bootstrap_complete=$REVIEWBOT_SHA" <<<"$status"
+            grep -Fqx 'caddy.service=active' <<<"$status"
+            for unit in \
+              omni-reviewbot-vllm-omni-watch.service \
+              omni-reviewbot-vllm-omni-dashboard.service \
+              omni-reviewbot-vllm-gr-watch.service \
+              omni-reviewbot-vllm-gr-dashboard.service \
+              omni-reviewbot-github-runner.service
+            do
+              grep -Fqx "$unit=active" <<<"$status"
+            done
+          fi
       - name: Verify the new public read-only dashboards
         env:
           REVIEWBOT_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
