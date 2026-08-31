@@ -42,56 +42,6 @@ status() {
   done
 }
 
-host_audit() {
-  echo "reviewbot Personal-Agent host audit v1"
-  printf 'hostname=%s\n' "$(hostname -f 2>/dev/null || hostname)"
-  printf 'public_ipv4='
-  curl -4fsS --max-time 15 https://api.ipify.org || true
-  echo
-  printf 'os='
-  . /etc/os-release
-  printf '%s %s\n' "$ID" "$VERSION_ID"
-  printf 'kernel=%s\n' "$(uname -sr)"
-  printf 'user=%s uid=%s\n' "$(id -un)" "$(id -u)"
-  printf 'systemd_user='
-  systemctl --user is-system-running 2>/dev/null || true
-  printf 'linger='
-  loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true
-
-  for command in caddy nginx apache2 setcap; do
-    printf '%s=' "$command"
-    command -v "$command" 2>/dev/null || echo missing
-  done
-  if command -v caddy >/dev/null 2>&1 && command -v getcap >/dev/null 2>&1; then
-    printf 'caddy_capabilities='
-    getcap "$(command -v caddy)" 2>/dev/null || true
-  fi
-  for unit in caddy nginx apache2; do
-    printf '%s.service=' "$unit"
-    systemctl is-active "$unit" 2>/dev/null || true
-  done
-
-  printf 'passwordless_sudo='
-  if sudo -n true 2>/dev/null; then
-    echo yes
-  else
-    echo no
-  fi
-  echo 'sudo_permissions_begin'
-  sudo -n -l 2>&1 || true
-  echo 'sudo_permissions_end'
-  echo 'listening_tcp_begin'
-  ss -H -ltnp 2>/dev/null || ss -H -ltn 2>/dev/null || true
-  echo 'listening_tcp_end'
-  echo 'firewall_begin'
-  if command -v ufw >/dev/null 2>&1; then
-    sudo -n ufw status 2>&1 || ufw status 2>&1 || true
-  else
-    echo 'ufw=missing'
-  fi
-  echo 'firewall_end'
-}
-
 prepare_tunnel_key() {
   install -d -m 700 "$SSH_ROOT"
   if [[ ! -f $SSH_ROOT/reviewbot-dashboard-tunnel ]]; then
@@ -117,10 +67,6 @@ prepare_tunnel_key() {
 
 if [[ $# -eq 1 && $1 == status ]]; then
   status
-  exit 0
-fi
-if [[ $# -eq 1 && $1 == host-audit ]]; then
-  host_audit
   exit 0
 fi
 if [[ $# -eq 1 && $1 == tunnel-key ]]; then

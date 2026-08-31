@@ -15,8 +15,6 @@ elif [[ ${SSH_ORIGINAL_COMMAND:-} == "reviewbot-tunnel-key" ]]; then
   exec "$APP/deploy/reviewbot-bootstrap.sh" tunnel-key
 elif [[ ${SSH_ORIGINAL_COMMAND:-} == "reviewbot-status" ]]; then
   exec "$APP/deploy/reviewbot-bootstrap.sh" status
-elif [[ ${SSH_ORIGINAL_COMMAND:-} == "reviewbot-host-audit" ]]; then
-  exec "$APP/deploy/reviewbot-bootstrap.sh" host-audit
 fi
 
 if [[ $# -eq 1 ]]; then
