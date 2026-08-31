@@ -6,17 +6,6 @@ CACHE=/home/ubuntu/.cache
 LOCK="$CACHE/personal-agent-deploy.lock"
 DEPLOY_RUNNER=/home/ubuntu/.local/bin/personal-agent-deploy
 
-# One-time ReviewBot cutover commands share this repository's existing forced
-# SSH key, but they never expose a shell.  The bootstrap command validates an
-# exact paired release and migration payload; status is read-only.
-if [[ ${SSH_ORIGINAL_COMMAND:-} =~ ^reviewbot-bootstrap[[:space:]]+([0-9a-f]{40})$ ]]; then
-  exec "$APP/deploy/reviewbot-bootstrap.sh" bootstrap "${BASH_REMATCH[1]}"
-elif [[ ${SSH_ORIGINAL_COMMAND:-} == "reviewbot-tunnel-key" ]]; then
-  exec "$APP/deploy/reviewbot-bootstrap.sh" tunnel-key
-elif [[ ${SSH_ORIGINAL_COMMAND:-} == "reviewbot-status" ]]; then
-  exec "$APP/deploy/reviewbot-bootstrap.sh" status
-fi
-
 if [[ $# -eq 1 ]]; then
   DEPLOY_SHA=$1
 elif [[ ${SSH_ORIGINAL_COMMAND:-} =~ ^deploy[[:space:]]+([0-9a-f]{40})$ ]]; then
