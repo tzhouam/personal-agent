@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: JiusiServe/omni-reviewbot
-          ref: 80d460cd336226608f7673e60c37cb82f7ebaef9
+          ref: a291aa81d8528c0b4805f3312d13ad17fe7e8e72
           token: ${{ secrets.MIGRATION_GH_TOKEN }}
           persist-credentials: false
       - name: Download and verify the cutover payload
@@ -32,7 +32,7 @@ jobs:
           GH_TOKEN: ${{ secrets.MIGRATION_GH_TOKEN }}
           MIGRATION_ARCHIVE_KEY: ${{ secrets.MIGRATION_ARCHIVE_KEY }}
           MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
-          BOOTSTRAP_SHA: 80d460cd336226608f7673e60c37cb82f7ebaef9
+          BOOTSTRAP_SHA: a291aa81d8528c0b4805f3312d13ad17fe7e8e72
           REVIEWBOT_SHA: de3045f1b9a8047bd20685ab05bb8ff6cb3e7aa2
           REVIEWBOT_RUN_ID: "33372546646"
           CADDY_VERSION: "2.11.4"
