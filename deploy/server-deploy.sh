@@ -65,6 +65,12 @@ git reset --hard "$DEPLOY_SHA"
 "$APP/.venv/bin/assistant" reboot
 printf '%s\n' "$DEPLOY_SHA" > "$APP/.deployed-commit"
 
+# One-time cleanup for files created by the reverted ReviewBot host audit.
+rm -f -- \
+  /home/ubuntu/.ssh/reviewbot-dashboard-tunnel \
+  /home/ubuntu/.ssh/reviewbot-dashboard-tunnel.pub \
+  /home/ubuntu/.ssh/reviewbot-dashboard-known_hosts
+
 # Upgrade the forced-command runner only after the new release is healthy.
 install -m 700 "$APP/deploy/server-deploy.sh" "$DEPLOY_RUNNER.next"
 mv -f "$DEPLOY_RUNNER.next" "$DEPLOY_RUNNER"
