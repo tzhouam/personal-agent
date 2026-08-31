@@ -1,0 +1,123 @@
+name: Bootstrap ReviewBot on Personal-Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration_run_id:
+        description: Successful encrypted export run in zuiho-kai/omni-reviewbot
+        required: true
+        type: string
+      reviewbot_run_id:
+        description: Successful paired-release run in JiusiServe/omni-reviewbot
+        required: true
+        default: "33356262762"
+        type: string
+      reviewbot_sha:
+        description: Exact canonical ReviewBot commit in the paired release
+        required: true
+        default: "26b37cfc857c373d2f4b41e71a6e7bf1bfceab70"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reviewbot-personal-agent-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate immutable inputs
+        env:
+          MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
+          REVIEWBOT_RUN_ID: ${{ inputs.reviewbot_run_id }}
+          REVIEWBOT_SHA: ${{ inputs.reviewbot_sha }}
+        run: |
+          [[ "$MIGRATION_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$REVIEWBOT_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$REVIEWBOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Download and verify cutover inputs
+        env:
+          GH_TOKEN: ${{ secrets.MIGRATION_GH_TOKEN }}
+          MIGRATION_ARCHIVE_KEY: ${{ secrets.MIGRATION_ARCHIVE_KEY }}
+          MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
+          REVIEWBOT_RUN_ID: ${{ inputs.reviewbot_run_id }}
+          REVIEWBOT_SHA: ${{ inputs.reviewbot_sha }}
+        run: |
+          install -m 700 -d "$RUNNER_TEMP/cutover" "$RUNNER_TEMP/package"
+          gh run download "$MIGRATION_RUN_ID" \
+            --repo zuiho-kai/omni-reviewbot \
+            --name "reviewbot-migration-$MIGRATION_RUN_ID" \
+            --dir "$RUNNER_TEMP/cutover/migration"
+          mapfile -t encrypted < <(find "$RUNNER_TEMP/cutover/migration" -type f -name 'reviewbot-migration-*.tar.gz.enc')
+          [[ ${#encrypted[@]} -eq 1 ]]
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:MIGRATION_ARCHIVE_KEY \
+            -in "${encrypted[0]}" \
+            -out "$RUNNER_TEMP/package/migration.tar.gz"
+
+          gh run download "$REVIEWBOT_RUN_ID" \
+            --repo JiusiServe/omni-reviewbot \
+            --name "paired-release-$REVIEWBOT_SHA" \
+            --dir "$RUNNER_TEMP/cutover/release"
+          mapfile -t releases < <(find "$RUNNER_TEMP/cutover/release" -type f -name "omni-reviewbot-$REVIEWBOT_SHA.tar.gz")
+          [[ ${#releases[@]} -eq 1 ]]
+          cp "${releases[0]}" "$RUNNER_TEMP/package/release.tar.gz"
+
+          runner_json=$(gh api repos/actions/runner/releases/latest)
+          runner_asset_id=$(jq -r '.assets[] | select(.name | test("^actions-runner-linux-x64-[0-9.]+\\.tar\\.gz$")) | .id' <<<"$runner_json")
+          runner_digest=$(jq -r '.assets[] | select(.id == '"$runner_asset_id"') | .digest' <<<"$runner_json")
+          [[ "$runner_asset_id" =~ ^[0-9]+$ ]]
+          [[ "$runner_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/actions/runner/releases/assets/$runner_asset_id" \
+            > "$RUNNER_TEMP/package/actions-runner.tar.gz"
+          printf '%s\n' "${runner_digest#sha256:}" \
+            > "$RUNNER_TEMP/package/actions-runner.sha256"
+          printf '%s  %s\n' "${runner_digest#sha256:}" "$RUNNER_TEMP/package/actions-runner.tar.gz" |
+            sha256sum -c -
+
+          gh api --method POST \
+            repos/JiusiServe/omni-reviewbot/actions/runners/registration-token \
+            --jq .token > "$RUNNER_TEMP/package/runner-token"
+          chmod 600 "$RUNNER_TEMP/package/runner-token"
+      - name: Configure the existing restricted Personal-Agent deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/personal-agent-deploy
+          chmod 600 ~/.ssh/personal-agent-deploy
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Stream the validated payload to Personal-Agent
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          REVIEWBOT_SHA: ${{ inputs.reviewbot_sha }}
+        run: |
+          tar -C "$RUNNER_TEMP/package" -czf - \
+            migration.tar.gz \
+            release.tar.gz \
+            actions-runner.tar.gz \
+            actions-runner.sha256 \
+            runner-token |
+          ssh -T \
+            -i ~/.ssh/personal-agent-deploy \
+            -p "$DEPLOY_PORT" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" "reviewbot-bootstrap $REVIEWBOT_SHA"
+      - name: Verify the public dashboard routes
+        run: |
+          curl -fsS --max-time 20 \
+            https://review.43.153.173.195.nip.io/code_review/vllm_omni/api/status >/dev/null
+          curl -fsS --max-time 20 \
+            https://review.43.153.173.195.nip.io/code_review/vllm_gr/api/status >/dev/null
