@@ -203,8 +203,11 @@ do
 done
 
 python3 - "$STAGE/migration/manifest.json" <<'PY'
+import hashlib
 import json
+import sqlite3
 import sys
+from pathlib import Path
 
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 required = {"schema_version", "migration_id", "source_commit", "created_at", "state"}
@@ -212,6 +215,55 @@ if set(manifest) != required or manifest.get("schema_version") != 1:
     raise SystemExit("unsupported migration manifest")
 if not isinstance(manifest.get("state"), dict) or set(manifest["state"]) != {"state", "state-vllm-gr"}:
     raise SystemExit("incomplete migration state manifest")
+
+migration_root = Path(sys.argv[1]).parent / "app"
+for name, expected in manifest["state"].items():
+    root = migration_root / name
+    tree = hashlib.sha256()
+    files = 0
+    total_bytes = 0
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if not path.is_file() or path.is_symlink():
+            continue
+        relative = path.relative_to(root).as_posix()
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+        files += 1
+        total_bytes += size
+        tree.update(relative.encode("utf-8") + b"\0")
+        tree.update(str(size).encode("ascii") + b"\0")
+        tree.update(digest.digest())
+    database = {}
+    db = root / "reviewbot.db"
+    if db.is_file():
+        connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            for table in ("workflow_jobs", "jobs", "attempts", "review_metrics"):
+                if table in tables:
+                    database[table] = connection.execute(
+                        f'SELECT count(*) FROM "{table}"'
+                    ).fetchone()[0]
+        finally:
+            connection.close()
+    actual = {
+        "exists": root.is_dir(),
+        "files": files,
+        "bytes": total_bytes,
+        "sha256": tree.hexdigest(),
+        "database": database,
+    }
+    if actual != expected:
+        raise SystemExit(f"migration integrity mismatch for {name}")
 PY
 
 prepare_tunnel_key >/dev/null
