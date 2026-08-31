@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: JiusiServe/omni-reviewbot
-          ref: aca556671f1fd21793ad8224387dd645fece7fa9
+          ref: a954f80b3705c2cd3dc1b3474a29f44c198f23f9
           token: ${{ secrets.MIGRATION_GH_TOKEN }}
           persist-credentials: false
       - name: Download and verify the cutover payload
@@ -32,7 +32,7 @@ jobs:
           GH_TOKEN: ${{ secrets.MIGRATION_GH_TOKEN }}
           MIGRATION_ARCHIVE_KEY: ${{ secrets.MIGRATION_ARCHIVE_KEY }}
           MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
-          BOOTSTRAP_SHA: aca556671f1fd21793ad8224387dd645fece7fa9
+          BOOTSTRAP_SHA: a954f80b3705c2cd3dc1b3474a29f44c198f23f9
           REVIEWBOT_SHA: de3045f1b9a8047bd20685ab05bb8ff6cb3e7aa2
           REVIEWBOT_RUN_ID: "33372546646"
           CADDY_VERSION: "2.11.4"
@@ -173,7 +173,7 @@ jobs:
         env:
           REVIEWBOT_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
         run: |
-          base=https://review.43.155.186.30.nip.io
+          base=http://review.43.155.186.30.nip.io
           for path in code_review/vllm_omni code_review/vllm_gr; do
             name=${path##*/}
             status_file="$RUNNER_TEMP/$name-status.json"
