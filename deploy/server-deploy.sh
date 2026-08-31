@@ -65,6 +65,19 @@ git reset --hard "$DEPLOY_SHA"
 "$APP/.venv/bin/assistant" reboot
 printf '%s\n' "$DEPLOY_SHA" > "$APP/.deployed-commit"
 
+# One-time handoff: install a digest-verified seed and a dedicated restricted
+# key. The ReviewBot repository upgrades the seed, after which this block is
+# removed from personal-agent.
+REVIEWBOT_ADMIN=/home/ubuntu/.local/bin/omni-reviewbot-host-admin
+REVIEWBOT_AUTHORIZED_KEY='restrict,command="/home/ubuntu/.local/bin/omni-reviewbot-host-admin" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+Ng0nzo+W9JBWudQeffzbj+mJ2R23o7f9IZAGBEW4v omni-reviewbot-host-admin'
+install -m 700 "$APP/deploy/omni-reviewbot-host-admin-seed.sh" "$REVIEWBOT_ADMIN"
+install -d -m 700 /home/ubuntu/.ssh
+touch /home/ubuntu/.ssh/authorized_keys
+chmod 600 /home/ubuntu/.ssh/authorized_keys
+if ! grep -Fqx "$REVIEWBOT_AUTHORIZED_KEY" /home/ubuntu/.ssh/authorized_keys; then
+  printf '%s\n' "$REVIEWBOT_AUTHORIZED_KEY" >> /home/ubuntu/.ssh/authorized_keys
+fi
+
 # Upgrade the forced-command runner only after the new release is healthy.
 install -m 700 "$APP/deploy/server-deploy.sh" "$DEPLOY_RUNNER.next"
 mv -f "$DEPLOY_RUNNER.next" "$DEPLOY_RUNNER"
