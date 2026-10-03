@@ -127,11 +127,15 @@ process.env.PERSONAL_AGENT_PORT = String(daemon.address().port);
 
 r = await handler({ cleanedBody: "hello there" }, { trigger: "user", conversationId: "conv7" });
 if (r?.reply?.text !== "daemon:hello there@oc:conv7") throw new Error("HTTP chat failed: " + JSON.stringify(r));
+const singleChatReq = requests.find((q) => q.path === "/chat");
+if (singleChatReq?.body?.channel !== "weixin")
+  throw new Error("single-user chat must identify its Weixin origin");
 
 r = await handler({ cleanedBody: "/todo add review the PR due:2026-07-20" }, { trigger: "user" });
 if (r?.reply?.text !== "did add_todo") throw new Error("slash HTTP failed: " + JSON.stringify(r));
 const addReq = requests.find((q) => q.path === "/actions/add_todo");
-if (!addReq || addReq.body.title !== "review the PR" || addReq.body.due !== "2026-07-20" || addReq.body.source !== "wechat")
+if (!addReq || addReq.body.title !== "review the PR" || addReq.body.due !== "2026-07-20"
+    || addReq.body.source !== "wechat" || addReq.body.channel !== "weixin")
   throw new Error("add_todo params wrong: " + JSON.stringify(addReq));
 
 r = await handler({ cleanedBody: "/status" }, { trigger: "user" });

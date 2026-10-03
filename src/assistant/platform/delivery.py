@@ -25,6 +25,18 @@ _OUTPUT_CAP = 4096
 _SURFACE_TTL_HOURS = 48
 _RETENTION_DAYS = 30
 
+# Weixin rejects a proactive direct send when the conversation context token
+# has aged out.  Keep this deliberately narrow: other delivery failures stay
+# terminal until acknowledged instead of being retried merely because the
+# owner happened to send a chat message.
+_WEIXIN_CONTEXT_CLOSED_MARKERS = (
+    "sendmessage ret=-2",
+    "errmsg=prepare failed",
+    "(sent 0/",
+)
+_WEIXIN_RETRY_QUEUED = "wechat_retry_queued: "
+_WEIXIN_RETRY_INFLIGHT = "wechat_retry_inflight: "
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS email_ledger (
@@ -312,19 +324,49 @@ class OutboxDB:
         execution_unknown (side effects may have started — never retried,
         surfaced). Returns (a) stale `claimed` rows (pre-side-effects: the
         caller RESUMES them — a crash between claim and execution must not
-        strand the occurrence) and (b) executed/execution_failed rows with
-        undelivered output for delivery-only retry."""
+        strand the occurrence), (b) executed/execution_failed rows with
+        undelivered output for delivery-only retry, and (c) terminal rows whose
+        private Weixin marker requests one owner-event-gated resend.  The latter
+        remain terminal in storage so they stay acknowledgeable until send."""
         self.conn.execute(
             "UPDATE routine_ledger SET state='execution_unknown', updated_at=? "
             "WHERE state='executing'", (_now(),))
+        # The poll thread performs queued fallback sends synchronously.  Thus
+        # an in-flight marker visible at the START of a later cycle belongs to
+        # a dead process, just like `executing` above. Re-offer it: duplicate
+        # over silent loss is the documented delivery-side crash tradeoff.
+        inflight = self.conn.execute(
+            "SELECT routine_id, occurrence, error FROM routine_ledger "
+            "WHERE state='delivery_failed' AND acked_at IS NULL AND error LIKE ?",
+            (_WEIXIN_RETRY_INFLIGHT + "%",)).fetchall()
+        for routine_id, occurrence, error in inflight:
+            queued_error = (_WEIXIN_RETRY_QUEUED
+                            + str(error)[len(_WEIXIN_RETRY_INFLIGHT):])
+            self.conn.execute(
+                "UPDATE routine_ledger SET error=?, updated_at=? "
+                "WHERE routine_id=? AND occurrence=? AND state='delivery_failed' "
+                "AND acked_at IS NULL AND error=?",
+                (queued_error, _now(), routine_id, occurrence, error))
         self.conn.commit()
         rows = self.conn.execute(
             "SELECT routine_id, occurrence, claim_token, output, error, attempts, "
             "state FROM routine_ledger WHERE state IN "
             "('claimed','executed','execution_failed')").fetchall()
-        return [{"routine_id": r, "occurrence": o, "claim_token": t,
-                 "output": out, "error": e, "attempts": a, "state": st}
-                for r, o, t, out, e, a, st in rows]
+        queued = self.conn.execute(
+            "SELECT routine_id, occurrence, claim_token, output, error, attempts "
+            "FROM routine_ledger WHERE state='delivery_failed' "
+            "AND acked_at IS NULL AND error LIKE ?",
+            (_WEIXIN_RETRY_QUEUED + "%",)).fetchall()
+        recovered = [
+            {"routine_id": r, "occurrence": o, "claim_token": t,
+             "output": out, "error": e, "attempts": a, "state": st}
+            for r, o, t, out, e, a, st in rows]
+        recovered.extend(
+            {"routine_id": r, "occurrence": o, "claim_token": t,
+             "output": out, "error": e, "attempts": a,
+             "state": "wechat_retry_queued"}
+            for r, o, t, out, e, a in queued)
+        return recovered
 
     def routine_delivered(self, routine_id: str, occurrence: str, token: str) -> bool:
         return self.routine_transition(routine_id, occurrence, token, "delivered",
@@ -342,6 +384,85 @@ class OutboxDB:
             (_MAX_ATTEMPTS, str(error)[:300], _now(),
              routine_id, occurrence, token))
         self.conn.commit()
+
+    def rearm_weixin_context_failures(self) -> int:
+        """Queue one delivery-only retry after fresh Weixin owner activity.
+
+        Only unacknowledged, still-surface-eligible routine results with the
+        exact stale-context signature are marked.  The row deliberately stays
+        ``delivery_failed`` until the poller sends: it remains visible and an
+        owner's follow-up acknowledgment can fence the retry.  Output, receipt
+        time, attempt count, and claim token are retained, so the routine itself
+        is never executed again and expiry still reflects the warning shown.
+        """
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(hours=_SURFACE_TTL_HOURS)).isoformat()
+        rows = self.conn.execute(
+            "SELECT routine_id, occurrence, error FROM routine_ledger "
+            "WHERE state='delivery_failed' AND output IS NOT NULL "
+            "AND acked_at IS NULL AND (surfaced_at IS NULL OR surfaced_at>?)",
+            (cutoff,)).fetchall()
+        reopened = 0
+        now = _now()
+        for routine_id, occurrence, error in rows:
+            if (str(error or "").startswith(
+                    (_WEIXIN_RETRY_QUEUED, _WEIXIN_RETRY_INFLIGHT))
+                    or not is_weixin_context_closed(error)):
+                continue
+            cur = self.conn.execute(
+                "UPDATE routine_ledger SET error=?, updated_at=? "
+                "WHERE routine_id=? AND occurrence=? "
+                "AND state='delivery_failed' AND acked_at IS NULL AND error=?",
+                (_WEIXIN_RETRY_QUEUED + str(error), now,
+                 routine_id, occurrence, error))
+            reopened += cur.rowcount
+        self.conn.commit()
+        return reopened
+
+    def routine_weixin_retry_begin(self, routine_id: str, occurrence: str,
+                                   token: str, queued_error: str) -> bool:
+        """Atomically cross the queued→send-started boundary.
+
+        Acknowledgment winning before this CAS prevents the send.  Once this
+        succeeds, delivery owns the row; a later acknowledgment may hide the
+        notice but cannot recall an already-started transport side effect.
+        """
+        if not str(queued_error).startswith(_WEIXIN_RETRY_QUEUED):
+            return False
+        inflight_error = (_WEIXIN_RETRY_INFLIGHT
+                          + str(queued_error)[len(_WEIXIN_RETRY_QUEUED):])
+        cur = self.conn.execute(
+            "UPDATE routine_ledger SET error=?, claimed_at=?, updated_at=? "
+            "WHERE routine_id=? AND occurrence=? AND claim_token=? "
+            "AND state='delivery_failed' AND acked_at IS NULL AND error=?",
+            (inflight_error, _now(), _now(), routine_id, occurrence, token,
+             queued_error))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def routine_weixin_retry_delivered(self, routine_id: str, occurrence: str,
+                                       token: str) -> bool:
+        """Finalize a started fallback, fenced by state/token/in-flight marker."""
+        cur = self.conn.execute(
+            "UPDATE routine_ledger SET state='delivered', error=NULL, updated_at=? "
+            "WHERE routine_id=? AND occurrence=? AND claim_token=? "
+            "AND state='delivery_failed' AND error LIKE ?",
+            (_now(), routine_id, occurrence, token,
+             _WEIXIN_RETRY_INFLIGHT + "%"))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def routine_weixin_retry_failed(self, routine_id: str, occurrence: str,
+                                    token: str, error: str) -> bool:
+        """Return a rejected event-gated send to an ordinary terminal row."""
+        cur = self.conn.execute(
+            "UPDATE routine_ledger SET attempts=attempts+1, error=?, updated_at=? "
+            "WHERE routine_id=? AND occurrence=? AND claim_token=? "
+            "AND state='delivery_failed' AND error LIKE ?",
+            (str(error)[:300], _now(), routine_id, occurrence, token,
+             _WEIXIN_RETRY_INFLIGHT + "%"))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # ── system notes ─────────────────────────────────────────────────
     def add_system_note(self, summary: str) -> None:
@@ -470,6 +591,12 @@ def parse_failure_id(fid: str):
     return "", None
 
 
+def is_weixin_context_closed(error: object) -> bool:
+    """Whether a send status is the known expired Weixin-context failure."""
+    message = str(error or "").casefold()
+    return all(marker in message for marker in _WEIXIN_CONTEXT_CLOSED_MARKERS)
+
+
 # ── the derived surface (all producers) ──────────────────────────────
 
 def open_failures(settings) -> list[dict]:
@@ -517,7 +644,7 @@ def render_failure_block(failures: list[dict]) -> str:
     entries drop until the block fits — each step strictly shrinks it."""
     if not failures:
         return ""
-    header = "⚠ 有事项没送达（回复 知道了 <编号> 可清除）:"
+    header = "⚠ 有事项没送达（回复 知道了 <编号>，或 清除全部）:"
     entries = [_clip_bytes(f"[{f['id']}] {f['summary']}", 130)
                for f in failures[:3]]
     hidden = len(failures) - len(entries)
@@ -571,3 +698,44 @@ def acknowledge(settings, fid: str) -> bool:
         finally:
             db.close()
     return False
+
+
+def acknowledge_all(settings) -> int:
+    """Acknowledge one snapshot of every currently open D5 failure.
+
+    The producer rows remain in place for audit; only their ``acked_at``
+    fields change.  Snapshotting first keeps the operation bounded and means a
+    failure created concurrently after the owner's request remains visible on
+    the next turn instead of being cleared accidentally.
+    """
+    from assistant.platform.locks import user_write_lock
+
+    with user_write_lock(settings):
+        ids = [failure["id"] for failure in open_failures(settings)]
+        return sum(1 for fid in ids if acknowledge(settings, fid))
+
+
+def rearm_weixin_context_failures(settings) -> dict[str, int]:
+    """Re-queue durable WeChat pushes after an inbound refreshed context.
+
+    Routine results and reminders remain on WeChat; no alternate transport is
+    introduced.  Each producer is isolated so one corrupt store cannot break
+    the interactive reply that supplied the fresh context token.
+    """
+    counts = {"routines": 0, "reminders": 0}
+    try:
+        db = OutboxDB(settings.data_dir)
+        try:
+            counts["routines"] = db.rearm_weixin_context_failures()
+        finally:
+            db.close()
+    except Exception:
+        log.exception("Weixin fallback: routine rearm failed")
+    try:
+        from assistant.platform.notify import ReminderStore
+
+        counts["reminders"] = ReminderStore(
+            settings.data_dir).rearm_weixin_context_failures()
+    except Exception:
+        log.exception("Weixin fallback: reminder rearm failed")
+    return counts

@@ -295,7 +295,10 @@ Just talk to it — "what should I focus on today?", "add a reminder to follow u
 with Sam in 2 hours", "book a dinner for six on Friday", "run the research
 digest again". It figures out the action. **Photos work too**: send a
 screenshot or a payment receipt (WeChat or email attachment) and it responds
-to what the image shows — and offers to log receipts to the ledger. On WeChat you can also use explicit
+to what the image shows — and offers to log receipts to the ledger. For
+safety a photo can only trigger the logging actions (meal / exercise /
+weight / transaction); anything else it asks you to confirm in a plain text
+message. On WeChat you can also use explicit
 slash commands (no LLM call, instant):
 
 | Command | Does |

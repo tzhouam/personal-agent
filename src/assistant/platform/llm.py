@@ -24,6 +24,9 @@ _sleep = _time.sleep
 
 _CHEAP_ROLES = frozenset({"cheap", "bulk", "research", "score"})
 _DEFAULT_MIXTURE_ROLES = ("pipeline", "research", "task", "evolve")
+# Reasoning modes a route may request via its `thinking` field (LLM_ROLES /
+# LLM_MIXTURE member). Anything else is ignored — see `_thinking_param`.
+_THINKING_MODES = frozenset({"disabled", "adaptive"})
 _INTERACTIVE_TIMEOUT_S = 45
 _OFFLINE_TIMEOUT_S = 120
 _SENSITIVE_IDENTIFIER = re.compile(
@@ -59,13 +62,32 @@ def _normalized_route_spec(value) -> dict | None:
     if not isinstance(model, str) or not model.strip():
         return None
     normalized = {"model": model.strip()}
-    for field in ("base_url", "api_key"):
+    for field in ("base_url", "api_key", "thinking"):
         item = value.get(field)
         if item is not None and not isinstance(item, str):
             return None
         if item is not None:
             normalized[field] = item
     return normalized
+
+
+def _thinking_param(spec) -> dict | None:
+    """The provider `thinking` block for one route spec, or None to omit it.
+
+    Reasoning mode is a per-ROUTE knob, not a global one, because whether the
+    provider accepts it depends on the model: `{"type": "disabled"}` is valid
+    on some Anthropic models and a 400 on others (Fable 5 at any effort; Opus 5
+    above `high`). Keeping it beside the model it applies to means a route swap
+    carries its own reasoning setting instead of stranding an illegal param.
+
+    An unrecognized mode is dropped rather than raised — a bad optional knob
+    must never break a call (same contract as the tolerant LLM_* parsing).
+    """
+    mode = spec.get("thinking") if isinstance(spec, dict) else None
+    if not isinstance(mode, str):
+        return None
+    mode = mode.strip().lower()
+    return {"type": mode} if mode in _THINKING_MODES else None
 
 
 def normalize_mixture(value, settings: Settings | None = None) -> dict:
@@ -519,6 +541,18 @@ class LLM:
                 self.settings.anthropic_base_url,
                 self.settings.anthropic_api_key)
 
+    def _route_thinking(self, role: str | None, model: str | None) -> dict | None:
+        """The `thinking` block for the route `_resolve_route` just picked.
+
+        Only a configured role entry carries one. An explicit ``model``
+        override selects a different model on the default provider, whose
+        reasoning support is unknown — so the role's mode does not follow it.
+        """
+        if model:
+            return None
+        spec = (getattr(self, "roles", None) or {}).get(role) if role else None
+        return _thinking_param(spec) if isinstance(spec, dict) else None
+
     def _quarantine_scope(self, scopes: tuple) -> str | None:
         """Best-effort durable lookup; storage trouble must not block LLM use."""
         if getattr(self, "_health", None) is None:
@@ -597,7 +631,8 @@ class LLM:
                   if hasattr(self, "settings") else None)
         return self._call(client, model_id, content, system, max_tokens,
                           route_scopes=scopes,
-                          timeout_s=_request_timeout_s(role))
+                          timeout_s=_request_timeout_s(role),
+                          thinking=self._route_thinking(role, model))
 
     def force_probe(
         self,
@@ -668,7 +703,8 @@ class LLM:
               max_tokens: int, span_attrs: dict | None = None,
               route_scopes: tuple | None = None,
               allow_quarantined: bool = False,
-              timeout_s: float = _OFFLINE_TIMEOUT_S) -> str:
+              timeout_s: float = _OFFLINE_TIMEOUT_S,
+              thinking: dict | None = None) -> str:
         """One traced ``messages.create`` returning the concatenated text; the
         shared core of the single-model and mixture paths. ``span_attrs`` ride
         on the ``llm`` span — the mixture path tags each call with its stage
@@ -704,6 +740,9 @@ class LLM:
                         "messages": [{"role": "user", "content": content}]}
         if system:
             kwargs["system"] = system
+        if thinking:  # omitted entirely unless the route asked for a mode —
+            # sending it blind would 400 on providers that reject the param
+            kwargs["thinking"] = thinking
         from assistant.platform import tracing
 
         resp = None
@@ -832,7 +871,8 @@ class LLM:
                                      "mixture_stage": "proposer",
                                      "mixture_role": role or ""},
                                  route_scopes=scopes,
-                                 timeout_s=_request_timeout_s(role))
+                                 timeout_s=_request_timeout_s(role),
+                                 thinking=_thinking_param(member))
                 _breaker_record(scopes, gens, claimed,
                                 "ok" if out.strip() else None, threshold, cooldown)
                 if out.strip():
@@ -980,7 +1020,8 @@ class LLM:
                                    span_attrs={"mixture_stage": "aggregator",
                                                "mixture_role": role or ""},
                                    route_scopes=agg_scopes,
-                                   timeout_s=_request_timeout_s(role))
+                                   timeout_s=_request_timeout_s(role),
+                                   thinking=_thinking_param(agg))
             _breaker_record(agg_scopes, agg_gens, agg_claimed,
                             "ok" if synthesis.strip() else None, threshold, cooldown)
         except Exception as exc:
@@ -1024,14 +1065,15 @@ class LLM:
         cooldown = self.settings.moa_member_cooldown_s
         role_spec = self.roles.get(role) if role else None
         candidates = [(agg.get("base_url"), agg.get("api_key"),
-                       agg.get("model"), "aggregator")]
+                       agg.get("model"), "aggregator", _thinking_param(agg))]
         if isinstance(role_spec, dict) and role_spec.get("model"):
             candidates.append((role_spec.get("base_url"), role_spec.get("api_key"),
-                               role_spec["model"], f"role:{role}"))
-        candidates.append((None, None, self.default_model, "default"))
+                               role_spec["model"], f"role:{role}",
+                               _thinking_param(role_spec)))
+        candidates.append((None, None, self.default_model, "default", None))
 
         tried: set = set()
-        for base_url, api_key, model, label in candidates:
+        for base_url, api_key, model, label, thinking in candidates:
             if not model:
                 continue
             scopes = _route_scopes(self.settings, base_url, api_key, model)
@@ -1053,7 +1095,8 @@ class LLM:
                                  span_attrs={"mixture_stage": "fallback",
                                              "mixture_role": role or ""},
                                  route_scopes=scopes,
-                                 timeout_s=_request_timeout_s(role))
+                                 timeout_s=_request_timeout_s(role),
+                                 thinking=thinking)
             except Exception as exc:
                 cls = _classify_failure(exc)
                 _breaker_record(scopes, gens, claimed, cls, threshold, cooldown)
@@ -1070,7 +1113,8 @@ class LLM:
             _breaker_record(scopes, gens, claimed, None, threshold, cooldown)
         raise RuntimeError("all mixture proposers failed")
 
-    def complete_json(self, prompt: str, system: str | None = None, **kw):
+    def complete_json(self, prompt: str, system: str | None = None,
+                      expect_keys: tuple = (), **kw):
         """Parse JSON with one stop-aware recovery attempt.
 
         A normal ``end_turn`` parse failure gets one same-budget repair prompt
@@ -1078,10 +1122,15 @@ class LLM:
         response gets one fresh attempt at twice the token budget, capped at
         16k. The cap is never retried at an identical budget; persistent/capped
         truncation raises ``StructuredOutputTruncatedError`` explicitly.
+
+        ``expect_keys`` (see ``_parse_json``) makes a wrong-SHAPED object count
+        as a parse failure, so it feeds that same repair round. Opt-in per call
+        site: the callers of this method expect a dozen different shapes, and
+        only the chat turn is exposed to the tool-call-markup failure.
         """
         text = self.complete(prompt, system=system, **kw)
         try:
-            return _parse_json(text)
+            return _parse_json(text, expect_keys)
         except ValueError as exc:
             stop_reason = getattr(text, "stop_reason", "") or ""
             retry_kw = dict(kw)
@@ -1105,7 +1154,7 @@ class LLM:
 
             repaired = self.complete(retry_prompt, system=system, **retry_kw)
             try:
-                return _parse_json(repaired)
+                return _parse_json(repaired, expect_keys)
             except ValueError as repair_exc:
                 if getattr(repaired, "stop_reason", "") == "max_tokens":
                     raise StructuredOutputTruncatedError(
@@ -1146,16 +1195,46 @@ def _image_block(path: str) -> dict:
                        "data": base64.b64encode(Path(path).read_bytes()).decode()}}
 
 
-def _parse_json(text: str):
+def _parse_shaped_json(text: str, expect_keys: tuple):
+    """The first JSON object in ``text`` carrying one of ``expect_keys``.
+
+    ``raw_decode`` walks the candidate ``{`` positions in one pass rather than
+    re-running the shrink search at each: a chat reply holds a dozen braces,
+    and shrinking the tail per start is quadratic on an interactive path.
+    """
+    decoder = json.JSONDecoder()
+    for start in (i for i, ch in enumerate(text) if ch == "{"):
+        try:
+            parsed, _end = decoder.raw_decode(text, start)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and any(k in parsed for k in expect_keys):
+            return parsed
+    raise ValueError("no JSON object carrying " + "/".join(expect_keys)
+                     + " found in response")
+
+
+def _parse_json(text: str, expect_keys: tuple = ()):
     """Best-effort extraction of a JSON object/array from a model response.
 
     Tolerates the common ways models wrap JSON: strips a ```json fence, seeks
     the first ``{`` or ``[``, then shrinks the tail until ``json.loads``
-    succeeds (handling trailing prose). Raises ValueError if nothing parses."""
+    succeeds (handling trailing prose). Raises ValueError if nothing parses.
+
+    ``expect_keys`` additionally requires an OBJECT carrying at least one of
+    those keys, skipping past ones that don't. A tool-calling-tuned model
+    answers a structured prompt with its own ``<tool_call>{"name": …}`` markup
+    BEFORE the requested object, and taking the first thing that parses handed
+    the caller that payload instead — a turn with an empty reply and no
+    actions, out of a response that held a perfectly good answer (2026-09-03
+    incident). No match raises like any other parse failure, so the caller's
+    repair round runs instead of a wrong-shaped dict escaping silently."""
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
     if fence:
         text = fence.group(1).strip()
+    if expect_keys:
+        return _parse_shaped_json(text, expect_keys)
     start = min((i for i in (text.find("{"), text.find("[")) if i >= 0), default=-1)
     if start < 0:
         raise ValueError("no JSON object or array found in response")

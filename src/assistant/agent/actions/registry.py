@@ -35,12 +35,14 @@ ACTIONS: dict[str, Action] = {a.name: a for a in [
     ),
     Action(
         name="acknowledge_failure",
-        description="clear one delivery-failure notice (知道了 <id>)",
+        description="clear one delivery-failure notice, or all open notices",
         handler=_acknowledge_failure,
         params={"id": {"required": True,
-                       "desc": "failure id, e.g. dfrem m3 / dfe…-… / dfo…"}},
+                       "desc": "exact failure id (dfrem… / dfe…-… / dfo…), "
+                               "or literal 'all' to clear every open notice"}},
         llm=True,
-        prompt_example='{"type": "acknowledge_failure", "id": "dfremm3"}',
+        prompt_example='{"type": "acknowledge_failure", "id": "dfremm3"}  '
+                       '# use id "all" when the owner asks to clear all',
     ),
     Action(
         name="list_todos",
@@ -765,6 +767,7 @@ def run_action(name: str, params: dict, settings: Settings) -> str:
 # double-log the very thing dedup caught.
 _FAILURE_MARKERS = ("rejected", "couldn't", "failed", "unknown action",
                     "missing required", "— need", "needs a", "no open todo",
+                    "no open delivery failure",
                     "no active transaction", "no unread item", "no open need",
                     "no reading item", "usage:")
 

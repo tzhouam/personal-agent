@@ -212,7 +212,7 @@ affects future occurrences only.
 | condition_false | WHEN held but CONDITION didn't | terminal |
 | executed | TASK done, `output` persisted | delivered / delivery_failed |
 | delivered | send transport-accepted | terminal |
-| delivery_failed | send attempts exhausted (3) → failure surface | terminal (ack via D5) |
+| delivery_failed | send attempts exhausted (3) → failure surface; may carry a private Weixin retry-queued marker while remaining terminal/acknowledgeable | delivered after the queued send, or terminal (ack via D5) |
 | execution_failed | TASK raised cleanly → failure notice delivered instead | delivered / delivery_failed |
 | cancelled | routine cancelled/retired mid-flight | terminal |
 | execution_unknown | stale `executing` from a dead process — side effects may have started; NEVER retried; failure surface | terminal (ack) |
@@ -230,6 +230,25 @@ cycle: stale `claimed` (older than one poll interval, token CAS) is
 minted when `claim_due` fires on its day — a daemon down across a scheduled
 time simply never mints it (pre-existing semantics, recorded as a non-goal:
 the ledger tracks fired occurrences, not counterfactual ones).
+
+**Weixin context-window fallback:** the direct-send context token can be
+present but too old for a proactive push.  After the normal bounded attempts,
+an authenticated inbound Weixin turn may queue a still-visible,
+unacknowledged `delivery_failed` row whose exact status is
+`sendMessage ret=-2 … prepare failed (sent 0/…)`.  Only rows with persisted
+output are eligible; the task is never rerun.  The row stays terminal and D5-
+visible while queued, so a follow-up acknowledgment fences a send that has not
+started.  Its first-surface timestamp and attempt counter are retained.  The
+next poll atomically changes the private marker from queued to in-flight; an
+acknowledgment that wins that CAS prevents the send, while one after the send-
+start boundary cannot recall the transport side effect.  A crash with an in-
+flight marker re-offers it next cycle (the existing duplicate-over-loss rule).
+Another rejection removes the marker and leaves the ordinary terminal row.
+Acknowledged
+rows, expired D5 rows, partial sends, and every other transport error are never
+queued.  Reminders use an equivalent private flag in their YAML row while
+keeping `sent_at="failed"`.  This same-channel fallback covers durable routine
+results and reminders; it does not introduce email delivery.
 
 **Rollback shadow (ledger-first):** the SQLite claim commits first, then
 `last_checked` is written into `routines.yaml` via atomic tmp+replace (the
@@ -268,9 +287,12 @@ there is no cross-store handoff window.
 - **Predicate:** unacknowledged AND (never surfaced OR first surfaced < 48h
   ago) — the block always expires 48h after it was actually delivered, never
   before, never permanently.
-- **Acknowledgment:** a new llm-exposed registry action
-  `acknowledge_failure(id)` sets `acked_at` on the producer row (distinct from
-  cancellation; audit history kept). "知道了/别再提醒那条" → the model emits it.
+- **Acknowledgment:** the llm-exposed registry action
+  `acknowledge_failure(id)` sets `acked_at` on one producer row (distinct from
+  cancellation; audit history kept).  Reserved `id="all"` snapshots and
+  acknowledges every currently open failure in one action, so hidden entries
+  and the executor's five-action cap cannot leave a partial clear behind.
+  "知道了/别再提醒那条" emits the full typed id; "清除全部" emits one `all`.
 
 ## 6. Deployment / rollback matrix
 

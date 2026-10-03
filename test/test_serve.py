@@ -74,6 +74,148 @@ def test_chat_keeps_session_history(server):
     assert httpx.post(f"{base}/chat", json={"session": "x", "text": ""}).status_code == 400
 
 
+def _seed_weixin_context_failure(settings):
+    """Persist one executed routine whose proactive Weixin send exhausted."""
+    from assistant.platform.delivery import OutboxDB
+
+    db = OutboxDB(settings.data_dir)
+    occurrence = "2026-08-30 09:30"
+    token = db.routine_claim("rt14", occurrence)
+    db.routine_transition("rt14", occurrence, token, "executing",
+                          from_states=("claimed",))
+    db.routine_transition("rt14", occurrence, token, "executed",
+                          output="persisted result", from_states=("executing",))
+    error = ("failed: rc=1 OutboundDeliveryError: sendMessage ret=-2 "
+             "errmsg=prepare failed (sent 0/1)")
+    for _ in range(3):
+        db.routine_delivery_failed("rt14", occurrence, token, error)
+    db.close()
+
+
+def test_weixin_chat_rearms_context_blocked_delivery_after_turn(server):
+    """A real bridge turn queues output-only retry after receipting its warning."""
+    from assistant.platform.delivery import OutboxDB
+    import time
+
+    base, _, settings = server
+    _seed_weixin_context_failure(settings)
+    response = httpx.post(
+        f"{base}/chat",
+        json={"session": "oc:owner", "channel": "weixin", "text": "在吗"},
+        timeout=10)
+    assert response.status_code == 200
+    assert "dfort14@2026-08-30T09:30" in response.json()["reply"]
+    deadline = time.monotonic() + 3
+    row = None
+    while time.monotonic() < deadline:
+        db = OutboxDB(settings.data_dir)
+        try:
+            row = db.conn.execute(
+                "SELECT state, attempts, error, surfaced_at "
+                "FROM routine_ledger").fetchone()
+        finally:
+            db.close()
+        if row and str(row[2]).startswith("wechat_retry_queued: "):
+            break
+        time.sleep(0.02)
+    assert row[0:2] == ("delivery_failed", 3)
+    assert row[2].startswith("wechat_retry_queued: ") and row[3]
+
+
+def test_generic_http_chat_does_not_queue_weixin_retry(server):
+    from assistant.platform.delivery import OutboxDB
+
+    base, _, settings = server
+    _seed_weixin_context_failure(settings)
+    response = httpx.post(
+        f"{base}/chat", json={"session": "api:owner", "text": "hello"}, timeout=10)
+    assert response.status_code == 200
+    db = OutboxDB(settings.data_dir)
+    try:
+        state, error = db.conn.execute(
+            "SELECT state, error FROM routine_ledger").fetchone()
+        assert state == "delivery_failed"
+        assert not error.startswith("wechat_retry_queued: ")
+    finally:
+        db.close()
+
+
+def test_weixin_clear_all_acknowledges_before_fallback_rearm(server):
+    """A natural warning→clear follow-up fences the queued automatic retry."""
+    from assistant.platform.delivery import OutboxDB
+    import time
+
+    base, llm, settings = server
+    _seed_weixin_context_failure(settings)
+    first = httpx.post(
+        f"{base}/chat",
+        json={"session": "oc:owner", "channel": "weixin", "text": "在吗"},
+        timeout=10)
+    assert first.status_code == 200 and "dfort14@" in first.json()["reply"]
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        db = OutboxDB(settings.data_dir)
+        try:
+            error = db.conn.execute(
+                "SELECT error FROM routine_ledger").fetchone()[0]
+        finally:
+            db.close()
+        if error.startswith("wechat_retry_queued: "):
+            break
+        time.sleep(0.02)
+    llm.result = {"reply": "已清除", "actions": [
+        {"type": "acknowledge_failure", "id": "all"},
+    ]}
+    response = httpx.post(
+        f"{base}/chat",
+        json={"session": "oc:owner", "channel": "weixin", "text": "清除全部"},
+        timeout=10)
+    assert response.status_code == 200
+    db = OutboxDB(settings.data_dir)
+    try:
+        state, acked_at = db.conn.execute(
+            "SELECT state, acked_at FROM routine_ledger").fetchone()
+        assert state == "delivery_failed" and acked_at
+    finally:
+        db.close()
+
+
+def test_weixin_reminder_retry_preserves_surface_receipt(server):
+    """Queueing a reminder must not erase the 48h clock of the warning shown."""
+    from datetime import datetime, timedelta
+    import time
+
+    from assistant.platform.notify import ReminderStore, _MAX_DELIVERY_ATTEMPTS
+
+    base, _, settings = server
+    store = ReminderStore(settings.data_dir)
+    store.add("interview", datetime.now() - timedelta(minutes=5))
+    error = ("failed: rc=1 OutboundDeliveryError: sendMessage ret=-2 "
+             "errmsg=prepare failed (sent 0/1)")
+    for _ in range(_MAX_DELIVERY_ATTEMPTS):
+        store.deliver_due(settings, send=lambda *a: error)
+
+    response = httpx.post(
+        f"{base}/chat",
+        json={"session": "oc:owner", "channel": "weixin", "text": "在吗"},
+        timeout=10)
+    assert response.status_code == 200 and "dfremm1" in response.json()["reply"]
+    deadline = time.monotonic() + 3
+    row = None
+    while time.monotonic() < deadline:
+        [row] = store.failed()
+        if row.get("wechat_retry_queued") and row.get("surfaced_at"):
+            break
+        time.sleep(0.02)
+    receipt = row.get("surfaced_at")
+    assert row.get("wechat_retry_queued") is True and receipt
+
+    store.deliver_due(settings, send=lambda *a: error)
+    [failed_again] = store.failed()
+    assert not failed_again.get("wechat_retry_queued")
+    assert failed_again.get("surfaced_at") == receipt
+
+
 def test_run_endpoint_respects_run_guard(server):
     base, _, settings = server
     persist_state(settings.state_file, run_id="run-z", phase="deliver")
@@ -375,3 +517,81 @@ def test_conflicting_verdicts_stay_internally_consistent(settings):
     store.append("s2", "多谢", "🙏", prev_verdict="satisfied", prev_ref=ref2)
     q2 = next(t for t in store._all("s2") if t["owner"] == "q2")
     assert q2["outcome"] == "fail"              # never upgraded
+
+
+# ── the after-inbound retry is gated on real push-context freshness ─────────
+
+def _weixin_token(home, account, age_hours):
+    import os
+    import time
+
+    d = home / "openclaw-weixin" / "accounts"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{account}.context-tokens.json"
+    path.write_text("{}")
+    when = time.time() - age_hours * 3600
+    os.utime(path, (when, when))
+
+
+def test_rearm_skipped_when_push_context_is_stale(settings, monkeypatch, tmp_path):
+    """A caller-supplied channel=weixin must not spend the one-shot retry.
+
+    Reproduces 2026-09-08/09: loopback /chat calls carrying the flag re-armed
+    the retained pushes, which failed seconds later against a token untouched
+    since 2026-09-06 — clearing the marker a genuine inbound needed.
+    """
+    from assistant.platform import serve as serve_mod
+
+    settings.openclaw_home = str(tmp_path)
+    calls = []
+    monkeypatch.setattr("assistant.platform.delivery.rearm_weixin_context_failures",
+                        lambda s: calls.append(s) or {"routines": 3})
+    body = {"channel": "weixin", "account_id": "7763402847f5-im-bot"}
+
+    _weixin_token(tmp_path, "7763402847f5-im-bot", age_hours=72)
+    serve_mod._rearm_weixin_after_turn(body, settings)
+    assert calls == []          # stale token → retry preserved for a real inbound
+
+    _weixin_token(tmp_path, "7763402847f5-im-bot", age_hours=0.1)
+    serve_mod._rearm_weixin_after_turn(body, settings)
+    assert len(calls) == 1      # genuine inbound refreshed it → re-arm proceeds
+
+
+def test_rearm_still_skipped_for_non_weixin_turns(settings, monkeypatch, tmp_path):
+    """The channel check stays the first gate; freshness is additional."""
+    from assistant.platform import serve as serve_mod
+
+    settings.openclaw_home = str(tmp_path)
+    _weixin_token(tmp_path, "7763402847f5-im-bot", age_hours=0.1)
+    calls = []
+    monkeypatch.setattr("assistant.platform.delivery.rearm_weixin_context_failures",
+                        lambda s: calls.append(s) or {"routines": 1})
+    serve_mod._rearm_weixin_after_turn(
+        {"channel": "email", "account_id": "7763402847f5-im-bot"}, settings)
+    assert calls == []
+
+
+def test_rearm_gate_resolves_single_user_announce_account(
+        settings, monkeypatch, tmp_path):
+    """The single-user bridge sends channel=weixin but no account_id.
+
+    Its pushes ride ANNOUNCE_ACCOUNT, so that account's token age must gate
+    the re-arm — otherwise the mtime gate never engages on the single-user
+    deployment and the flag-only behavior the skill runbook closes returns.
+    """
+    from assistant.platform import serve as serve_mod
+
+    settings.openclaw_home = str(tmp_path)
+    settings.announce_account = "7763402847f5-im-bot"
+    calls = []
+    monkeypatch.setattr("assistant.platform.delivery.rearm_weixin_context_failures",
+                        lambda s: calls.append(s) or {"routines": 1})
+    body = {"channel": "weixin", "session": "oc:owner"}
+
+    _weixin_token(tmp_path, "7763402847f5-im-bot", age_hours=72)
+    serve_mod._rearm_weixin_after_turn(body, settings)
+    assert calls == []          # stale announce token → one-shot retry preserved
+
+    _weixin_token(tmp_path, "7763402847f5-im-bot", age_hours=0.1)
+    serve_mod._rearm_weixin_after_turn(body, settings)
+    assert len(calls) == 1      # refreshed by a genuine inbound → re-arm

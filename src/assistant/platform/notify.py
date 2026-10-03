@@ -126,6 +126,51 @@ def send_to_conversation(settings: Settings, account_id: str, target: str,
     return f"failed: {report['error']}"
 
 
+# Weixin accepts a context-less proactive push only within roughly 24h of the
+# owner's last inbound; past that the gateway rejects it with `ret=-2 prepare
+# failed` (skills/wechat-outbound-context-token). The channel plugin persists a
+# token per conversation on EVERY inbound, so that file's mtime is a faithful
+# "last real owner activity" clock — the one signal that distinguishes a token
+# Weixin will still accept from one it won't.
+_WEIXIN_CONTEXT_FRESH_HOURS = 12
+_ACCOUNT_ID_RE = re.compile(r"^[0-9a-z][0-9a-z-]{2,63}$")
+
+
+def weixin_context_fresh(settings: Settings, account_id: str) -> bool:
+    """Whether `account_id`'s Weixin push context is recent enough to be worth
+    spending a one-shot retry on.
+
+    A request's ``channel=weixin`` field only asserts that the CALLER claims to
+    be a Weixin turn — it is not evidence that a token was refreshed. A loopback
+    health check, a smoke test, or any other local client setting that field
+    would otherwise re-arm the retained pushes and burn them against a token
+    Weixin still rejects (observed 2026-09-08/09: 5 then 9 retries queued and
+    failed seconds later, with the token untouched since 2026-09-06). Half the
+    ~24h window keeps a genuine inbound comfortably inside it.
+
+    Unreadable state degrades to True: that restores the previous
+    flag-only behavior rather than silently disabling recovery, and the
+    surrounding retry is best-effort in either direction.
+    """
+    if not _ACCOUNT_ID_RE.match(str(account_id or "")):
+        return True     # unknown account (legacy `oc:` sessions) — don't gate
+    path = (Path(settings.openclaw_home).expanduser() / "openclaw-weixin"
+            / "accounts" / f"{account_id}.context-tokens.json")
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromtimestamp(
+            path.stat().st_mtime, timezone.utc)
+    except OSError:
+        log.warning("weixin context freshness unknown (no token state for "
+                    "this account) — allowing retry")
+        return True
+    fresh = age < timedelta(hours=_WEIXIN_CONTEXT_FRESH_HOURS)
+    if not fresh:
+        log.info("weixin context token is %.1fh old (>%dh) — skipping the "
+                 "after-inbound retry; it would be rejected",
+                 age.total_seconds() / 3600, _WEIXIN_CONTEXT_FRESH_HOURS)
+    return fresh
+
+
 def send_wechat(settings: Settings, text: str) -> str:
     """Send ``text`` to the owner's WeChat announce target. Returns "sent" /
     "disabled" / "failed: …" — never raises."""
@@ -142,6 +187,7 @@ _RELATIVE = re.compile(r"^\+?(\d+)\s*(m|min|minutes?|h|hours?|d|days?)$", re.IGN
 # How many poll cycles a due reminder may fail to send before it is
 # dead-lettered rather than retried forever (~60s apart).
 _MAX_DELIVERY_ATTEMPTS = 3
+_FAILURE_SURFACE_TTL_HOURS = 48
 
 
 def _record_failure_metric(settings: Settings) -> None:
@@ -290,8 +336,13 @@ class ReminderStore:
                 for r in data["reminders"]:
                     if r["id"] in attempted:
                         continue
-                    if r.get("sent_at") or r["due_at"] > stamp:
-                        continue
+                    queued_retry = bool(
+                        r.get("wechat_retry_queued")
+                        and r.get("sent_at") == "failed"
+                        and not r.get("acked_at"))
+                    if not queued_retry:
+                        if r.get("sent_at") or r["due_at"] > stamp:
+                            continue
                     claimed_at = r.get("claimed_at")
                     if claimed_at and r.get("claim_token"):
                         try:
@@ -317,12 +368,19 @@ class ReminderStore:
                 for row in data["reminders"]:
                     if row["id"] != target["id"]:
                         continue
-                    if row.get("claim_token") != token or row.get("sent_at"):
+                    queued_retry = bool(
+                        row.get("wechat_retry_queued")
+                        and row.get("sent_at") == "failed"
+                        and not row.get("acked_at"))
+                    if row.get("claim_token") != token \
+                            or (row.get("sent_at") and not queued_retry):
                         break   # displaced by reclaim, or cancelled — the
                         #         newer claimant owns the outcome
                     if status == "sent":
                         row["sent_at"] = stamp
                         row["claim_token"] = None
+                        row["claimed_at"] = None
+                        row.pop("wechat_retry_queued", None)
                         delivered.append(row)
                     else:
                         attempts = int(row.get("attempts") or 0) + 1
@@ -330,6 +388,7 @@ class ReminderStore:
                         row["last_error"] = str(status)[:200]
                         row["claim_token"] = None
                         row["claimed_at"] = None
+                        row.pop("wechat_retry_queued", None)
                         if attempts >= _MAX_DELIVERY_ATTEMPTS:
                             row["sent_at"] = "failed"
                             row["failed_at"] = datetime.now().strftime(
@@ -357,6 +416,41 @@ class ReminderStore:
         return [r for r in self._load()["reminders"] if r.get("sent_at") == "failed"]
 
     @locked_transaction
+    def rearm_weixin_context_failures(self) -> int:
+        """Queue one retry for eligible reminders after fresh Weixin input.
+
+        This recognizes only the expired-context transport signature, keeps
+        the original attempt count, and excludes acknowledged or D5-expired
+        rows.  The reminder remains ``failed`` (and therefore visible and
+        acknowledgeable) while a private queue flag asks the next poll for one
+        retry.  Its surface receipt is preserved; another rejection simply
+        clears the flag and leaves the ordinary terminal row in place.
+        """
+        from assistant.platform.delivery import is_weixin_context_closed
+
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(hours=_FAILURE_SURFACE_TTL_HOURS)).isoformat()
+        data = self._load()
+        reopened = 0
+        for reminder in data["reminders"]:
+            if reminder.get("sent_at") != "failed" or reminder.get("acked_at"):
+                continue
+            surfaced = reminder.get("surfaced_at")
+            if surfaced is not None and surfaced <= cutoff:
+                continue
+            if reminder.get("wechat_retry_queued"):
+                continue
+            if not is_weixin_context_closed(reminder.get("last_error")):
+                continue
+            reminder["wechat_retry_queued"] = True
+            reminder["claim_token"] = None
+            reminder["claimed_at"] = None
+            reopened += 1
+        if reopened:
+            self._save(data)
+        return reopened
+
+    @locked_transaction
     def mark_surfaced(self, reminder_id: str) -> None:
         """D5 receipt: a reply carrying this failed reminder's notice was
         transport-accepted — start (once) its 48h expiry clock."""
@@ -377,6 +471,9 @@ class ReminderStore:
             if r["id"] == reminder_id and r.get("sent_at") == "failed" \
                     and not r.get("acked_at"):
                 r["acked_at"] = datetime.now(timezone.utc).isoformat()
+                r.pop("wechat_retry_queued", None)
+                r["claim_token"] = None
+                r["claimed_at"] = None
                 self._save(data)
                 return True
         return False

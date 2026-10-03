@@ -543,13 +543,15 @@ export default {
         if (body.startsWith("/")) {
           const parsed = parseSlash(body);
           if (!parsed) return; // not ours — OpenClaw built-ins keep it
-          return { handled: true, reply: { text: await handleSlash(parsed) } };
+          return { handled: true, reply: {
+            text: await handleSlash(parsed, { channel: "weixin" }),
+          } };
         }
 
         // weixin provides neither conversationId nor SenderId, so sessionKey is
         // what actually keys per-conversation memory (was falling to "default").
         const session = `oc:${ctx?.conversationId ?? ctx?.senderId ?? event?.senderId ?? ctx?.sessionKey ?? "default"}`;
-        const result = await ask(body, session, images);
+        const result = await ask(body, { session, channel: "weixin" }, images);
         const text = result.ok
           ? result.text
           : `(assistant bridge error: ${result.error} — check ~/.personal-agent and /rebase/personal-agent/.env)`;

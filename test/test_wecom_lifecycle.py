@@ -954,17 +954,32 @@ def test_concurrent_cap_is_process_wide_across_rotation(settings, monkeypatch):
         "service did not resume on the new generation"
 
 
-def test_image_callback_becomes_unsupported_media_event(settings, monkeypatch):
-    """F8: an owner's WeCom image message (MsgType=image, no Content) used to
-    fall through both branches — 200 OK, nothing else, the photo silently
-    ignored. It now queues a structured event the poll loop answers with a
-    fixed reply; non-owner images stay ignored."""
+def test_image_callback_downloads_media_for_vision(settings, monkeypatch):
+    """An owner's WeCom image is acknowledged quickly, then staged during
+    polling so the normal vision chain receives the downloaded file."""
     import httpx
 
     port = _free_port()
     _wecom_settings(settings, monkeypatch, port, owner="boss")
     ch = wecom.WeComChannel(settings)
     assert ch.start_callback_server() is True
+    ch._token = "access-token"
+    ch._token_expiry = float("inf")
+
+    class MediaResponse:
+        headers = {"content-type": "image/png"}
+        content = b"\x89PNG\r\n\x1a\nimage-bytes"
+
+        def raise_for_status(self):
+            pass
+
+    downloaded = {}
+
+    def get_media(url, params=None, timeout=None):
+        downloaded.update(url=url, params=params, timeout=timeout)
+        return MediaResponse()
+
+    monkeypatch.setattr(wecom.httpx, "get", get_media)
 
     def post_msg(inner_xml):
         blob, sig, ts, nonce = _encrypt_callback(
@@ -975,12 +990,22 @@ def test_image_callback_becomes_unsupported_media_event(settings, monkeypatch):
             content=f"<xml><Encrypt>{blob}</Encrypt></xml>", timeout=5)
 
     r = post_msg("<xml><FromUserName>boss</FromUserName>"
-                 "<MsgType>image</MsgType><PicUrl>http://x</PicUrl></xml>")
+                 "<MsgType>image</MsgType><PicUrl>http://x</PicUrl>"
+                 "<MediaId>media-123</MediaId></xml>")
     assert r.status_code == 200
     events = ch.poll()
     assert len(events) == 1
-    assert events[0]["kind"] == "unsupported_media"
-    assert events[0]["sender"] == "boss" and events[0]["text"] == "[图片]"
+    assert "kind" not in events[0]
+    assert events[0]["sender"] == "boss" and events[0]["text"] == ""
+    assert len(events[0]["images"]) == 1
+    image_path = events[0]["images"][0]
+    assert image_path.endswith(".png")
+    assert open(image_path, "rb").read() == MediaResponse.content
+    assert downloaded == {
+        "url": "https://qyapi.weixin.qq.com/cgi-bin/media/get",
+        "params": {"access_token": "access-token", "media_id": "media-123"},
+        "timeout": 30,
+    }
 
     r = post_msg("<xml><FromUserName>stranger</FromUserName>"
                  "<MsgType>image</MsgType></xml>")

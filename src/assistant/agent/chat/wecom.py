@@ -34,6 +34,25 @@ log = logging.getLogger("assistant")
 _API = "https://qyapi.weixin.qq.com/cgi-bin"
 
 _MAX_CONCURRENT_CALLBACKS = 32  # aggregate request-thread bound (public listener)
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _image_suffix(data: bytes) -> str | None:
+    """Return a supported suffix after checking the downloaded bytes.
+
+    WeCom normally returns an image content type, but its media endpoint can
+    also return JSON errors (and some compatible gateways use octet-stream).
+    The magic-byte check keeps those responses out of the vision pipeline.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return None
 
 
 class _CappedThreadingHTTPServer(ThreadingHTTPServer):
@@ -200,15 +219,77 @@ class WeComChannel:
             raise RuntimeError(f"wecom send failed: {report['error']}")
 
     # ── receiving (callback server; needs a public tunnel to this port) ──
+    def _download_image(self, media_id: str) -> tuple[str | None, str | None]:
+        """Download and stage one WeCom image for the vision chain.
+
+        The callback handler only acknowledges and queues messages; doing the
+        network request here prevents WeCom retries and callback-thread
+        exhaustion.  The media endpoint may return a JSON error with HTTP 200,
+        so both the response shape and the image bytes are validated.
+        """
+        try:
+            if not media_id:
+                raise ValueError("missing media id")
+            resp = httpx.get(f"{_API}/media/get", params={
+                "access_token": self._access_token(), "media_id": media_id},
+                timeout=30)
+            resp.raise_for_status()
+            data = bytes(resp.content)
+            if len(data) > _MAX_IMAGE_BYTES:
+                raise ValueError("image exceeds size limit")
+
+            content_type = str(getattr(resp, "headers", {}).get(
+                "content-type", "")).split(";", 1)[0].strip().lower()
+            if content_type == "application/json" or data.lstrip().startswith(b"{"):
+                try:
+                    detail = resp.json()
+                except Exception:
+                    detail = {}
+                raise RuntimeError(
+                    f"media endpoint returned an error ({detail.get('errcode', 'unknown')})")
+            suffix = _image_suffix(data)
+            if suffix is None:
+                raise ValueError("media endpoint did not return a supported image")
+
+            media_dir = self.settings.data_dir / "media"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            path = media_dir / (
+                f"wecom-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-"
+                f"{hashlib.sha1(data).hexdigest()[:12]}{suffix}")
+            path.write_bytes(data)
+            return str(path), None
+        except Exception as exc:
+            # Do not include media ids or access-token details in logs/replies.
+            log.warning("wecom image download failed: %s", type(exc).__name__)
+            return None, "[image could not be downloaded — try again]"
+
     def poll(self) -> list[dict]:
-        """Drain and return every message the callback server has queued since
-        the last poll (empty list if none) — non-blocking."""
+        """Drain callback messages and hydrate queued image media.
+
+        Image downloads happen during polling, never in the public callback
+        request.  A failed download remains an image-bearing turn via a
+        rejection note, so the agent can tell the owner what happened instead
+        of silently dropping the photo.
+        """
         messages = []
         while True:
             try:
-                messages.append(self._inbox.get_nowait())
+                message = self._inbox.get_nowait()
             except queue.Empty:
                 return messages
+            if message.get("kind") != "image":
+                messages.append(message)
+                continue
+            hydrated = dict(message)
+            hydrated.pop("kind", None)
+            media_id = str(hydrated.pop("media_id", "") or "").strip()
+            path, error = self._download_image(media_id)
+            if path:
+                hydrated["images"] = [path]
+            else:
+                hydrated["rejected_images"] = [error or
+                                                 "[image could not be downloaded]"]
+            messages.append(hydrated)
 
     def start_callback_server(self) -> bool:
         """Adopt the process-wide callback server (binding it on first use), so
@@ -298,14 +379,13 @@ def _make_handler(holder: "_CallbackHolder", generation: int, crypto: "_MsgCrypt
                 msg_type = (root.findtext("MsgType") or "").strip()
                 authorized = not owner or sender == owner
                 if msg_type == "image" and authorized and sender:
-                    # v1: no media download — a deterministic queued event the
-                    # poll loop answers with a fixed reply (never send from
-                    # this handler: blocking here triggers WeCom retries).
-                    # `text` keeps the loop's log line total. Real media
-                    # intake is a Track D design item (audit F8).
+                    # Queue the media id only. Downloading in this request can
+                    # exceed WeCom's callback deadline and trigger duplicate
+                    # callbacks; poll() hydrates it outside the public handler.
                     holder.enqueue(generation, principal, {
-                        "channel": "wecom", "kind": "unsupported_media",
-                        "text": "[图片]", "subject": "", "sender": sender})
+                        "channel": "wecom", "kind": "image",
+                        "media_id": (root.findtext("MediaId") or "").strip(),
+                        "text": text, "subject": "", "sender": sender})
                 elif text and authorized:
                     holder.enqueue(generation, principal, {
                         "channel": "wecom", "text": text[:4000],

@@ -332,9 +332,63 @@ def test_context_states_undelivered_reminders(settings):
     assert "## Delivery failures" in ctx
     assert "11:00 MiniMax 面试" in ctx
     assert "dfremm1" in ctx        # D5 typed id the ack action accepts
+    assert "id is 'all'" in ctx
+    assert "ENTIRE bracketed id" in ctx
 
 
 def test_context_omits_delivery_failures_when_all_is_well(settings):
     from assistant.agent.chat.agent import build_context
 
     assert "## Delivery failures" not in build_context(settings)
+
+
+# ── tool-call markup must not swallow the reply (2026-09-03 incident) ───────
+
+class _RawLLM:
+    """A real LLM whose provider returns scripted raw text.
+
+    `FakeLLM` above returns an already-parsed dict, so it cannot exercise the
+    structured-output path where the bug lived — this drives `complete_json`
+    and `_parse_json` for real.
+    """
+
+    def __init__(self, settings, *texts):
+        from assistant.platform.llm import LLM
+
+        self.llm = LLM(settings)
+        self.texts = list(texts)
+        self.calls = 0
+        outer = self
+
+        class _Resp:
+            def __init__(self, text):
+                self.content = [type("B", (), {"type": "text", "text": text})()]
+                self.stop_reason = "end_turn"
+                self.usage = None
+
+        def create(**kw):
+            outer.calls += 1
+            return _Resp(outer.texts.pop(0) if outer.texts else "{}")
+
+        self.llm.client.messages = type("M", (), {"create": staticmethod(create)})()
+
+    def complete_json(self, prompt, **kw):
+        return self.llm.complete_json(prompt, **kw)
+
+
+def test_tool_call_markup_does_not_swallow_the_reply(settings):
+    """The real answer is used even when tool-call markup precedes it."""
+    llm = _RawLLM(settings,
+                  '<tool_call>\n{"name": "add_todo", "arguments": '
+                  '{"title": "Buy GPU"}}\n</tool_call>\n'
+                  '{"reply": "已帮你记下了。", "actions": '
+                  '[{"type": "add_todo", "title": "Buy GPU"}], '
+                  '"self_check": "success"}')
+    reply = handle_message("记一下买显卡", settings, llm)
+    assert reply.startswith("已帮你记下了。")
+    assert "added todo" in reply                       # the action really ran
+    assert [t["title"] for t in TodoStore(settings.profile_dir).open_items()] \
+        == ["Buy GPU"]
+    # one provider call: no empty-reply retry, no repair round — the wasted
+    # 20-40s cascade was the other half of the "replies are slow" report
+    assert llm.calls == 1
