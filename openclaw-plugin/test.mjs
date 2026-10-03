@@ -2,7 +2,7 @@
 //   /opt/node24/bin/node test.mjs
 // Builds a stub assistant binary, an isolated HOME, and a stub serve daemon,
 // then imports index.js (which reads PERSONAL_AGENT_* and HOME at module load).
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -147,34 +147,66 @@ console.log("daemon HTTP path: PASS");
 // ---- supervisor ----
 const pidFile = join(work, ".personal-agent", "chat_listener.pid");
 
-// 1. start() kills a stale pid-lock holder, then spawns `assistant serve`
-const stale = spawn("/bin/sleep", ["30"]);
-writeFileSync(pidFile, String(stale.pid));
+// 1. start() with a stale (dead) pid file spawns `assistant serve` — no live
+// process to adopt, so the service owns the daemon from the start.
+const dead = spawn("/bin/sleep", ["30"]);
+await sleep(300);
+dead.kill("SIGKILL");
+await sleep(300);
+writeFileSync(pidFile, String(dead.pid));
 process.env.STUB_MODE = "run";
 const svc = serveService();
 svc.start({ logger: log });
-await sleep(2500);
-if (alive(stale.pid)) throw new Error("stale listener not killed");
+await sleep(800);
+if (alive(dead.pid)) throw new Error("dead pid came back to life?");
 let st = svc._state();
 if (!st.child || !alive(st.child.pid)) throw new Error("serve not spawned");
 const { readFileSync } = await import("node:fs");
 if (readFileSync(join(work, "spawn-arg"), "utf8").trim() !== "serve")
   throw new Error("supervisor did not spawn `assistant serve`");
-console.log("supervisor start + stale takeover: PASS");
+console.log("supervisor stale-pid spawn: PASS");
+
+// 1b. a LIVE external serve is adopted, never signalled, never fought: no
+// spawn while it lives, takeover once it dies (fast watch for the test).
+svc.stop({ logger: log });
+process.env.SERVE_WATCH_MS = "300";
+const external = spawn("/bin/sleep", ["30"]);
+writeFileSync(pidFile, String(external.pid));
+rmSync(join(work, "spawn-arg"), { force: true });
+const svcAdopt = serveService();
+svcAdopt.start({ logger: log });
+await sleep(1000);
+if (!alive(external.pid)) throw new Error("external serve was killed instead of adopted");
+if (svcAdopt._state().child) throw new Error("spawned while an external serve lives");
+if (existsSync(join(work, "spawn-arg"))) throw new Error("spawn attempted against live external serve");
+external.kill("SIGKILL");
+await sleep(1000);   // watch interval 300ms → takeover fires
+st = svcAdopt._state();
+if (!st.child || !alive(st.child.pid)) throw new Error("no takeover after external serve died");
+console.log("supervisor adopt + takeover: PASS");
+svcAdopt.stop({ logger: log });
+process.env.SERVE_WATCH_MS = "";
 
 // 2. stop() terminates the child and blocks respawn
 const childPid = st.child.pid;
-svc.stop({ logger: log });
+const svc3 = serveService();
+writeFileSync(pidFile, "0");   // dead pid → immediate spawn
+svc3.start({ logger: log });
+await sleep(500);
+const svc3Pid = svc3._state().child?.pid;
+svc3.stop({ logger: log });
 await sleep(800);
-if (alive(childPid)) throw new Error("serve not stopped");
-if (svc._state().child) throw new Error("child handle not cleared");
+if (svc3Pid && alive(svc3Pid)) throw new Error("serve not stopped");
+if (svc3._state().child) throw new Error("child handle not cleared");
+if (childPid && alive(childPid)) throw new Error("adopted-path child not stopped");
 console.log("supervisor stop: PASS");
 
 // 3. quick exits double the backoff (crash-loop damping)
 process.env.STUB_MODE = "exit";
 const svc2 = serveService();
+writeFileSync(pidFile, "0");
 svc2.start({ logger: log });
-await sleep(2500); // 1.5s spawn delay + immediate exit
+await sleep(1000); // immediate spawn + exit
 st = svc2._state();
 if (st.backoffMs !== 10_000) throw new Error(`backoff not doubled: ${st.backoffMs}`);
 svc2.stop({ logger: log });

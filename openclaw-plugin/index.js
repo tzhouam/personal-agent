@@ -398,25 +398,48 @@ async function handleSlash(parsed, chan) {
  * standalone listener used, so stale-pid takeover keeps working across the
  * migration. Never spawn at module top level: plugin discovery evaluates
  * this entry; services only start() on full gateway startup.
+ *
+ * A live serve this service doesn't own is ADOPTED, never signalled: a stale
+ * pid file may name a reused pid, and SIGTERMing a live daemon races its
+ * graceful shutdown (2026-10-02: the supervisor killed + respawned against
+ * a live external serve all evening while every child exited on the held
+ * lock). An adopted owner is watched; when it dies, this service takes
+ * over. Under systemd (gateway unit Restart=always), that makes systemd the
+ * outer crash loop and this the inner fallback without a respawn war.
  */
 export function serveService() {
   let child = null;
   let timer = null;
+  let watchTimer = null;
   let stopped = false;
   let backoffMs = 5_000;
 
-  const killStaleListener = (logger) => {
-    // A daemon orphaned by a SIGKILL'd gateway still holds the pid lock;
-    // take it over so our supervised child doesn't exit forever on startup.
-    try {
-      const pid = parseInt(readFileSync(PID_FILE, "utf8").trim(), 10);
-      if (pid > 1) {
-        process.kill(pid, "SIGTERM");
-        logger?.info?.(`[personal-agent-bridge] killed stale serve/listener pid ${pid}`);
-      }
-    } catch {
-      // no pid file or already dead
-    }
+  const readPid = () => {
+    try { return parseInt(readFileSync(PID_FILE, "utf8").trim(), 10); } catch { return 0; }
+  };
+  const pidAlive = (pid) => {
+    try { if (pid > 1) process.kill(pid, 0); return pid > 1; } catch { return false; }
+  };
+  const WATCH_MS = parseInt(process.env.SERVE_WATCH_MS ?? "30000", 10);
+
+  const watchExternal = (logger) => {
+    if (stopped || child || watchTimer) return;
+    watchTimer = setInterval(() => {
+      if (stopped || child) { clearInterval(watchTimer); watchTimer = null; return; }
+      const pid = readPid();
+      if (pidAlive(pid)) return;   // adopted owner still serving
+      clearInterval(watchTimer);
+      watchTimer = null;
+      logger?.info?.("[personal-agent-bridge] external assistant serve gone — taking over");
+      spawnOnce(logger);
+    }, WATCH_MS);
+    watchTimer.unref?.();
+  };
+  const adoptExternal = (logger, pid) => {
+    logger?.info?.(
+      `[personal-agent-bridge] assistant serve already running externally (pid ${pid}) — adopting; will take over if it dies`,
+    );
+    watchExternal(logger);
   };
 
   const spawnOnce = (logger) => {
@@ -429,6 +452,14 @@ export function serveService() {
     child.on("exit", (code, sig) => {
       child = null;
       if (stopped) return;
+      const pid = readPid();
+      if (pidAlive(pid)) {
+        // Someone else owns the lock now (lost the startup race, or an
+        // external supervisor restarted its own). No respawn war — adopt.
+        backoffMs = 5_000;
+        adoptExternal(logger, pid);
+        return;
+      }
       backoffMs = Date.now() - startedAt > 5 * 60_000 ? 5_000 : Math.min(backoffMs * 2, 300_000);
       logger?.warn?.(
         `[personal-agent-bridge] assistant serve exited (code=${code} sig=${sig}); respawn in ${backoffMs / 1000}s`,
@@ -441,21 +472,22 @@ export function serveService() {
   return {
     id: "serve-supervisor",
     start(ctx) {
-      killStaleListener(ctx?.logger);
-      // Give the SIGTERM'd stale process a moment to release the pid lock.
-      timer = setTimeout(() => spawnOnce(ctx?.logger), 1_500);
-      timer.unref?.();
+      const pid = readPid();
+      if (pidAlive(pid)) { adoptExternal(ctx?.logger, pid); return; }
+      spawnOnce(ctx?.logger);
     },
     stop(ctx) {
       stopped = true;
       if (timer) clearTimeout(timer);
+      if (watchTimer) clearInterval(watchTimer);
+      watchTimer = null;
       if (child) {
         ctx?.logger?.info?.("[personal-agent-bridge] stopping assistant serve");
         const doomed = child;
         doomed.kill("SIGTERM");
         setTimeout(() => {
           try { doomed.kill("SIGKILL"); } catch { /* already gone */ }
-        }, 5_000).unref?.();
+        }, 5_000).unref();
       }
     },
     // test seam
