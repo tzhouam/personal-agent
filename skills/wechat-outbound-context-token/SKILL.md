@@ -1,7 +1,7 @@
 ---
 name: wechat-outbound-context-token
-description: Proactive WeChat pushes (reminders/routines/announce) fail with `OutboundDeliveryError: sendMessage ret=-2 errmsg=prepare failed` once the owner hasn't messaged for ~24h, then "self-heal" when they message again — the CLI direct-send path drops the Weixin context token; patch getContextToken to restore the disk-persisted token, and never diagnose this as "channel down, needs reboot"
-trigger: reminder/routine/announce delivery fails with `sendMessage ret=-2 errmsg=prepare failed` while inbound chat replies still work; structured log shows `sendWeixinOutbound: contextToken missing … sending without context`; push failures cluster ~24h after the owner's last inbound message and clear on their next message
+description: Diagnose proactive WeChat `sendMessage ret=-2 errmsg=prepare failed`: restore a disk-persisted context token when a short-lived CLI process missed it, and when the token is present but aged out, retain the push and retry it once after the owner's next inbound WeChat turn; never misdiagnose either branch as a channel outage
+trigger: reminder/routine/announce delivery fails with `sendMessage ret=-2 errmsg=prepare failed` while inbound chat replies still work; structured logs show either a missing context token or `restoreContextTokens: restored` immediately before rejection; failures cluster after a quiet owner window and clear after the next inbound
 modules: [ops, notify]
 status: active
 created_at: 2026-08-03
@@ -29,6 +29,11 @@ created_at: 2026-08-03
   send` loads the channel in its own fresh process, never runs `startAccount`,
   finds an empty store, and sends without the token — accepted only inside the
   ~24h window, `prepare failed` outside it.
+- There are two distinct signatures after the restore-on-miss patch lands:
+  `contextToken missing` means the short-lived process still did not restore
+  disk state; `restoreContextTokens: restored 1` immediately followed by
+  `ret=-2 prepare failed` means the token existed but Weixin no longer accepted
+  its age.  Reapplying the persistence patch cannot fix the second branch.
 
 ## Fix
 1. Patch `getContextToken` in the **loaded** plugin copy (find it with
@@ -45,9 +50,18 @@ created_at: 2026-08-03
    persisted tokens on direct-mode sends) or in openclaw (route direct sends
    through the running gateway).
 3. Residual gap: a token also ages; if Weixin rejects a days-old token the push
-   still fails. That path is already handled — bounded retries dead-letter the
-   reminder and the D5 failure surface resends it in-chat on the owner's next
-   turn. Do not add unbounded retries back.
+   still fails.  Keep the routine output/reminder durable through the normal
+   bounded attempts.  On the owner's next authenticated inbound Weixin turn,
+   queue only an unacknowledged, still-visible failure with the exact
+   `ret=-2 … prepare failed (sent 0/…)` signature.  Preserve its attempt count:
+   keep the row terminal/visible and preserve its first-surface receipt while a
+   private marker asks the next poll for one delivery-only attempt.  This lets a
+   follow-up acknowledgment fence a send that has not crossed the poller's
+   atomic queued→in-flight boundary; a crash after that boundary re-offers the
+   send (duplicate over loss), and another rejection clears the marker.  Never
+   rerun the routine task, queue acknowledged
+   or expired rows, retry a partial send, switch to email, or restore unbounded
+   polling.
 
 ## Verification
 - `openclaw message send --channel weixin --account <acct> --target <peer> -m
@@ -66,6 +80,23 @@ created_at: 2026-08-03
 - Testing right after the owner messaged and declaring it fixed — inside the
   24h window context-less sends succeed anyway; the log's missing-token
   warning, not send success, is what the patch removes.
-- Treating `prepare failed` as transient and retrying forever — it is
-  deterministic outside the window; bounded retries + dead-letter + in-chat
-  surfacing is the correct shape (see notify.py).
+- Treating `prepare failed` as an ordinary transient and retrying forever — it
+  is deterministic outside the window.  Bounded retries + dead-letter + one
+  owner-event-gated delivery-only attempt is the correct shape (see
+  `delivery.py` and `notify.py`).
+- Trusting a request's `channel=weixin` field as proof the push context was
+  refreshed.  It only says the CALLER claims to be a Weixin turn: a loopback
+  `/chat` smoke test or health check carrying that flag re-arms the retained
+  pushes, they fail seconds later against the unchanged token, and the
+  rejection clears the marker a genuine inbound needed (2026-09-08/09: 5 then
+  9 retries queued and burned while the token had been untouched since
+  2026-09-06).  `_rearm_weixin_after_turn` now gates on
+  `notify.weixin_context_fresh`, which reads the mtime of
+  `~/.openclaw/openclaw-weixin/accounts/<acct>.context-tokens.json` — the
+  plugin rewrites it on every real inbound, so it is the only local evidence
+  that distinguishes a token Weixin will accept from one it will not.  The
+  account is the request's `account_id` (multi-tenant bridge) or, for the
+  single-user bridge that sends none, `ANNOUNCE_ACCOUNT` — the account the
+  pushes actually ride, so the gate engages on both deployments.  When
+  testing this path, drive a real inbound or fake the mtime; do not just set
+  the flag.

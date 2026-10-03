@@ -276,7 +276,9 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
     persisted BEFORE delivery → `delivered`/retry. Cycle start recovers stale
     state: `executing` from a dead process goes `execution_unknown` (side
     effects may have started — never rerun, surfaced to the owner);
-    executed-but-undelivered output retries DELIVERY ONLY. Returns
+    executed-but-undelivered output retries DELIVERY ONLY; a terminal result
+    carrying the private fresh-WeChat marker gets one more delivery-only send
+    while remaining acknowledgeable until that send starts. Returns
     [{id, fired, note}] for logging."""
     from assistant.agent.chat.agent import handle_message
     from assistant.platform.delivery import OutboxDB
@@ -308,6 +310,27 @@ def fire_due(settings: Settings, now: datetime | None = None) -> list[dict]:
                 outcomes.extend(_run_one(settings, outbox, routine,
                                          row["occurrence"], token,
                                          handle_message, send_wechat))
+                continue
+            if row["state"] == "wechat_retry_queued":
+                # The terminal row stays owner-visible/acknowledgeable while
+                # queued. Atomically cross the send-start boundary so a
+                # follow-up 清除全部 that wins first fences the resend.
+                if not outbox.routine_weixin_retry_begin(
+                        row["routine_id"], row["occurrence"],
+                        row["claim_token"], row["error"]):
+                    continue
+                status = send_wechat(
+                    settings, f"🔁 [{row['routine_id']}] " + row["output"])
+                if status == "sent":
+                    outbox.routine_weixin_retry_delivered(
+                        row["routine_id"], row["occurrence"],
+                        row["claim_token"])
+                    outcomes.append({"id": row["routine_id"], "fired": True,
+                                     "note": "delivered after fresh WeChat context"})
+                else:
+                    outbox.routine_weixin_retry_failed(
+                        row["routine_id"], row["occurrence"],
+                        row["claim_token"], status)
                 continue
             status = send_wechat(
                 settings, f"🔁 [{row['routine_id']}] "

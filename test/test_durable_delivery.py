@@ -113,6 +113,116 @@ def test_routine_delivery_retry_never_reexecutes(outbox):
     assert outbox.routine_recover() == []
 
 
+def test_weixin_context_failure_rearms_persisted_routine_output_only(outbox):
+    """Fresh owner input queues an exact context-window failure without
+    resetting its retry bound or rerunning the routine task."""
+    occurrence = "2026-08-01 07:30"
+    token = outbox.routine_claim("rt1", occurrence)
+    outbox.routine_transition("rt1", occurrence, token, "executing",
+                              from_states=("claimed",))
+    outbox.routine_transition("rt1", occurrence, token, "executed",
+                              output="persisted result", from_states=("executing",))
+    context_error = ("failed: rc=1 OutboundDeliveryError: sendMessage ret=-2 "
+                     "errmsg=prepare failed (sent 0/1)")
+    for _ in range(3):
+        outbox.routine_delivery_failed("rt1", occurrence, token, context_error)
+    assert outbox.open_failures()[0]["id"].startswith("dfort1@")
+
+    assert outbox.rearm_weixin_context_failures() == 1
+    [row] = outbox.routine_recover()
+    assert row["state"] == "wechat_retry_queued"
+    assert row["output"] == "persisted result"
+    assert row["attempts"] == 3                    # no new blind retry budget
+    assert outbox.open_failures()                  # remains clearable while queued
+    state, error = outbox.conn.execute(
+        "SELECT state, error FROM routine_ledger").fetchone()
+    assert state == "delivery_failed" and error.startswith("wechat_retry_queued: ")
+
+    # A failed event-gated retry returns directly to the terminal surface;
+    # a later owner message may explicitly gate another attempt.
+    assert outbox.routine_weixin_retry_begin(
+        "rt1", occurrence, token, row["error"])
+    assert outbox.routine_weixin_retry_failed(
+        "rt1", occurrence, token, context_error)
+    state, attempts = outbox.conn.execute(
+        "SELECT state, attempts FROM routine_ledger").fetchone()
+    assert (state, attempts) == ("delivery_failed", 4)
+
+
+def test_acknowledging_queued_weixin_retry_fences_send(outbox):
+    occurrence = "2026-08-01 07:30"
+    token = outbox.routine_claim("rt1", occurrence)
+    outbox.routine_transition("rt1", occurrence, token, "executing",
+                              from_states=("claimed",))
+    outbox.routine_transition("rt1", occurrence, token, "executed", output="x",
+                              from_states=("executing",))
+    error = ("failed: rc=1 OutboundDeliveryError: sendMessage ret=-2 "
+             "errmsg=prepare failed (sent 0/1)")
+    for _ in range(3):
+        outbox.routine_delivery_failed("rt1", occurrence, token, error)
+    assert outbox.rearm_weixin_context_failures() == 1
+    [queued] = outbox.routine_recover()              # poll read, then pauses
+    assert outbox.acknowledge("dfort1@2026-08-01T07:30")
+    assert not outbox.routine_weixin_retry_begin(
+        "rt1", occurrence, token, queued["error"])  # ack won the atomic CAS
+    assert outbox.routine_recover() == []
+
+
+def test_weixin_inflight_retry_is_reoffered_after_process_recovery(outbox):
+    occurrence = "2026-08-01 07:30"
+    token = outbox.routine_claim("rt1", occurrence)
+    outbox.routine_transition("rt1", occurrence, token, "executing",
+                              from_states=("claimed",))
+    outbox.routine_transition("rt1", occurrence, token, "executed", output="x",
+                              from_states=("executing",))
+    error = ("failed: rc=1 OutboundDeliveryError: sendMessage ret=-2 "
+             "errmsg=prepare failed (sent 0/1)")
+    for _ in range(3):
+        outbox.routine_delivery_failed("rt1", occurrence, token, error)
+    outbox.rearm_weixin_context_failures()
+    [queued] = outbox.routine_recover()
+    assert outbox.routine_weixin_retry_begin(
+        "rt1", occurrence, token, queued["error"])
+    assert outbox.rearm_weixin_context_failures() == 0  # another inbound cannot steal it
+
+    # A later cycle can only observe this marker after the sending process
+    # died; duplicate-over-loss recovery returns it to the queue.
+    [recovered] = outbox.routine_recover()
+    assert recovered["state"] == "wechat_retry_queued"
+    assert recovered["error"].startswith("wechat_retry_queued: ")
+
+
+def test_weixin_rearm_excludes_partial_other_acked_and_expired_rows(outbox):
+    """The fallback is narrow and does not resurrect historical audit rows."""
+    exact = ("failed: rc=1 OutboundDeliveryError: sendMessage ret=-2 "
+             "errmsg=prepare failed (sent 0/1)")
+    errors = {
+        "rt-partial": exact.replace("sent 0/1", "sent 1/2"),
+        "rt-other": "failed: prepare failed",
+        "rt-acked": exact,
+        "rt-expired": exact,
+    }
+    for rid, error in errors.items():
+        token = outbox.routine_claim(rid, "2026-08-01 08:00")
+        outbox.routine_transition(rid, "2026-08-01 08:00", token, "executing",
+                                  from_states=("claimed",))
+        outbox.routine_transition(rid, "2026-08-01 08:00", token, "executed",
+                                  output=rid, from_states=("executing",))
+        for _ in range(3):
+            outbox.routine_delivery_failed(rid, "2026-08-01 08:00", token, error)
+    assert outbox.acknowledge("dfort-acked@2026-08-01T08:00")
+    old = (datetime.now(timezone.utc) - timedelta(hours=49)).isoformat()
+    outbox.conn.execute(
+        "UPDATE routine_ledger SET surfaced_at=? WHERE routine_id='rt-expired'",
+        (old,))
+    outbox.conn.commit()
+
+    assert outbox.rearm_weixin_context_failures() == 0
+    states = dict(outbox.conn.execute(
+        "SELECT routine_id, state FROM routine_ledger").fetchall())
+    assert set(states.values()) == {"delivery_failed"}
+
+
 def test_routine_stale_executing_becomes_unknown_never_retried(outbox):
     """Any executing row seen by the cycle-start scan is from a dead process
     (the scan and the tasks share one thread) — no timed lease involved."""
@@ -186,6 +296,47 @@ def test_fire_due_end_to_end_with_send_failure_then_retry(settings, monkeypatch)
         db.close()
 
 
+def test_fire_due_sends_queued_weixin_fallback_without_reexecution(
+        settings, monkeypatch):
+    """The integrated owner-event path sends persisted output only."""
+    from datetime import datetime as dt
+
+    from assistant.agent.routines import fire_due
+
+    db = OutboxDB(settings.data_dir)
+    occurrence = "2026-08-01 07:30"
+    token = db.routine_claim("rt1", occurrence)
+    db.routine_transition("rt1", occurrence, token, "executing",
+                          from_states=("claimed",))
+    db.routine_transition("rt1", occurrence, token, "executed",
+                          output="persisted result", from_states=("executing",))
+    error = ("failed: rc=1 OutboundDeliveryError: sendMessage ret=-2 "
+             "errmsg=prepare failed (sent 0/1)")
+    for _ in range(3):
+        db.routine_delivery_failed("rt1", occurrence, token, error)
+    assert db.rearm_weixin_context_failures() == 1
+    db.close()
+
+    sends = []
+    monkeypatch.setattr(
+        "assistant.platform.notify.send_wechat",
+        lambda s, text: sends.append(text) or "sent")
+    monkeypatch.setattr(
+        "assistant.agent.chat.agent.handle_message",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("task reran")))
+    outcomes = fire_due(settings, now=dt(2026, 8, 1, 7, 31))
+
+    assert sends == ["🔁 [rt1] persisted result"]
+    assert outcomes == [{"id": "rt1", "fired": True,
+                         "note": "delivered after fresh WeChat context"}]
+    db = OutboxDB(settings.data_dir)
+    try:
+        assert db.conn.execute(
+            "SELECT state FROM routine_ledger").fetchone()[0] == "delivered"
+    finally:
+        db.close()
+
+
 # ── D3: reminder fencing ─────────────────────────────────────────────
 
 def test_reminder_completion_cas_rejects_displaced_claimant(settings, monkeypatch):
@@ -250,7 +401,7 @@ def test_surface_predicate_receipts_and_expiry(settings, outbox):
 
 
 def test_surface_ack_via_registry_action(settings, outbox):
-    from assistant.agent.actions.registry import run_action
+    from assistant.agent.actions.registry import looks_failed, run_action
 
     outbox.add_system_note("事故")
     out = run_action("acknowledge_failure", {"id": "dfs1"}, settings)
@@ -258,6 +409,44 @@ def test_surface_ack_via_registry_action(settings, outbox):
     assert delivery.open_failures(settings) == []
     out = run_action("acknowledge_failure", {"id": "dfs1"}, settings)
     assert "no open delivery failure" in out
+    assert looks_failed(out)
+
+
+def test_surface_ack_all_clears_snapshot_beyond_action_cap_and_keeps_audit(
+        settings, outbox):
+    from assistant.agent.actions.registry import ACTIONS, run_action
+    from assistant.platform.notify import _MAX_DELIVERY_ATTEMPTS, ReminderStore
+
+    # More than execute_results' five-action cap reproduces the original bulk
+    # clear failure.  Include both producer stores so "all" cannot accidentally
+    # clear only the SQLite-backed rows.
+    for i in range(6):
+        outbox.add_system_note(f"事故 {i}")
+    reminders = ReminderStore(settings.data_dir)
+    reminders.add("提醒", datetime.now() - timedelta(minutes=5))
+    for _ in range(_MAX_DELIVERY_ATTEMPTS):
+        reminders.deliver_due(settings, send=lambda *a: "failed: down")
+    assert len(delivery.open_failures(settings)) == 7
+    assert "'all'" in ACTIONS["acknowledge_failure"].params["id"]["desc"]
+
+    result = run_action("acknowledge_failure", {"id": "all"}, settings)
+    assert result == "cleared 7 delivery failures"
+    assert delivery.open_failures(settings) == []
+
+    system_rows = outbox.conn.execute(
+        "SELECT id, acked_at FROM system_notes ORDER BY id").fetchall()
+    [reminder_row] = reminders.failed()
+    assert len(system_rows) == 6 and all(row[1] for row in system_rows)
+    assert reminder_row.get("acked_at")
+    audit_before = (system_rows, reminder_row["acked_at"])
+
+    # Repeating the same owner request is a successful no-op, and cannot
+    # rewrite audit timestamps or delete producer rows.
+    assert run_action("acknowledge_failure", {"id": "all"}, settings) == \
+        "cleared 0 delivery failures"
+    assert (outbox.conn.execute(
+        "SELECT id, acked_at FROM system_notes ORDER BY id").fetchall(),
+            reminders.failed()[0]["acked_at"]) == audit_before
 
 
 def test_reminder_failures_join_the_surface_with_typed_ids(settings):
@@ -284,6 +473,7 @@ def test_failure_block_prepended_in_code_and_receipted(settings, outbox, monkeyp
 
     turn = handle_turn("在吗", settings, LLM_())
     assert turn.reply.startswith("⚠ 有事项没送达")
+    assert "清除全部" in turn.reply
     assert "dfs1" in turn.reply and len(turn.reply.split("\n\n")[0].encode()) <= 512
     assert turn.surfaced_failure_ids == ["dfs1"]
     # receipts are the SEND SITE's job — handle_turn alone must not start

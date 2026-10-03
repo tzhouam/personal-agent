@@ -221,6 +221,9 @@ class Settings(BaseSettings):
     announce_account: str = ""     # gateway account id (…-im-bot)
     announce_to: str = ""          # owner's WeChat im id
     openclaw_bin: str = "/opt/node24/bin/openclaw"
+    openclaw_home: str = "~/.openclaw"  # gateway state dir. Holds the per-account
+    #                                     Weixin context tokens whose age decides
+    #                                     whether a proactive push can succeed.
 
     # Private website pages (todos/reading/routines) — when set, their content
     # is AES-GCM-encrypted at render time and unlocked in the browser with

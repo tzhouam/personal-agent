@@ -361,6 +361,55 @@ class SessionStore:
         return {"turns": removed_turns, "files": removed_files}
 
 
+def _is_weixin_inbound(body: dict) -> bool:
+    """Whether an authenticated request came from the Weixin bridge.
+
+    New bridge requests carry ``channel=weixin`` explicitly.  The ``oc:``
+    session prefix keeps this compatible with an already-loaded single-user
+    bridge while its plugin process is rolling forward.
+    """
+    channel = str(body.get("channel") or "").strip().casefold()
+    session = str(body.get("session") or "")
+    return channel in {"weixin", "openclaw-weixin"} or session.startswith("oc:")
+
+
+def _rearm_weixin_after_turn(body: dict, settings: Settings) -> None:
+    """Queue context-blocked pushes after the owner reply is accepted.
+
+    This ordering lets an explicit ``清除全部`` action acknowledge first, gives
+    D5 its transport receipt while rows are still terminal, and keeps store
+    locking out of the latency-sensitive response path.  Actual delivery stays
+    in the poll loop; acknowledged rows are never queued.
+    """
+    if not _is_weixin_inbound(body):
+        return
+    try:
+        from assistant.platform.delivery import rearm_weixin_context_failures
+        from assistant.platform.notify import weixin_context_fresh
+
+        # `channel=weixin` is a caller ASSERTION, not proof a context token was
+        # refreshed. Re-arming on the flag alone spends the one-shot retry on a
+        # token Weixin will still reject, and the rejection clears the marker —
+        # so a later genuine inbound finds nothing queued. Gate on the token's
+        # own age instead. The single-user bridge sends no account_id; its
+        # pushes ride settings.announce_account, so that is the account whose
+        # token file decides — without this the gate silently degrades to
+        # flag-only behavior exactly on the single-user deployment.
+        account = str(body.get("account_id")
+                      or settings.announce_account or "")
+        if not weixin_context_fresh(settings, account):
+            return
+        counts = rearm_weixin_context_failures(settings)
+        total = sum(counts.values())
+        if total:
+            log.info("Weixin fallback: queued %d delivery-only retry(s) after "
+                     "fresh owner context (%s)", total, counts)
+    except Exception:
+        # A fallback bookkeeping error must not turn a valid interactive reply
+        # into a 500.  The original dead letters remain owner-visible.
+        log.exception("Weixin fallback: rearm after inbound failed")
+
+
 def make_server(settings_factory=Settings, llm_factory=None, port: int | None = None,
                 services=None):
     """Build (but don't start) the HTTP server. Factories are per-request —
@@ -646,6 +695,7 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                         _delivery.mark_surfaced(   # D5 receipt: the reply
                             settings,              # was transport-accepted
                             getattr(turn, "surfaced_failure_ids", []) or [])
+                        _rearm_weixin_after_turn(body, settings)
                         return
                     except (BrokenPipeError, ConnectionResetError):
                         # The bridge gave up waiting (its timeout) and already
@@ -666,6 +716,13 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                                 if acct and convo else send_wechat(settings, late))
                         log.warning("serve: /chat reply outlived the bridge "
                                     "wait — late delivery: %s", note)
+                        if note == "sent":
+                            from assistant.platform import delivery as _delivery
+
+                            _delivery.mark_surfaced(
+                                settings,
+                                getattr(turn, "surfaced_failure_ids", []) or [])
+                            _rearm_weixin_after_turn(body, settings)
                         return None
 
                 if self.path == "/run":
@@ -682,7 +739,9 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                         return self._send(404, {"error": f"unknown action {name!r}"})
                     except ValueError as exc:
                         return self._send(400, {"error": str(exc)})
-                    return self._send(200, {"result": result})
+                    self._send(200, {"result": result})
+                    _rearm_weixin_after_turn(body, settings)
+                    return
 
                 return self._send(404, {"error": f"no route {self.path}"})
             except Exception as exc:  # any handler bug → JSON 500, not a hang

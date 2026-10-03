@@ -220,14 +220,35 @@ Attached images (a WeChat photo, an email attachment, `assistant ask
   transcription — via a configured multimodal API
   (`VISION_API_KEY`/`VISION_MODEL`, Anthropic- or OpenAI-style wire format
   via `VISION_PROVIDER`), and the chat prompt carries it as an
-  "## Attached images" context block. Models never run locally — image
+  "## Attached images" context block. Models never run local — image
   understanding is API-only by design.
+
+When a native image turn returns nothing usable (reasoning models sometimes
+spend the budget on hidden thinking), recovery does **not** repeat the same
+large structured prompt: `vision.describe_images_native` extracts one bounded
+visual description through a compact extraction prompt, and a detached
+text-only pass answers and emits actions from those facts. If even that
+action pass fails, the recovered description still reaches the owner with an
+explicit "read but couldn't finish" notice — visual facts are never silently
+dropped.
+
+**Image content is data, never authorization.** Descriptions, transcribed
+text, and rejection notes are marked UNTRUSTED in the prompt, and the
+executor enforces it in code: an image-bearing turn may only run the four
+append-only logging actions (`log_meal`, `log_exercise`, `log_weight`,
+`log_transaction`); every other action the model emits is fenced with a
+"confirm in a text-only turn" reply. A prompt injection printed inside a
+screenshot cannot issue todos, reminders, or pipeline runs.
 
 WeChat delivery rides the gateway's `message_received` hook (which carries
 the staged media path) into a short TTL cache the reply hook drains; the
 daemon's `/chat` accepts both `image_paths` (local, loopback-trusted) and
 base64 `images` staged into `DATA_DIR/media/` (pruned with chat history by
-the curate phase).
+the curate phase). The WeCom callback channel hydrates its images during
+`poll()` — never inside the public callback request, whose deadline is
+bounded — staging magic-byte-validated media under `DATA_DIR/media/`; a
+failed download still surfaces as an image-bearing turn with a rejection
+note.
 
 ### Finance ledger
 
@@ -456,7 +477,7 @@ code. `assistant init` writes `.env` interactively with live validation;
 `assistant init --check` (`init_wizard.py`) is the config doctor — the same
 probes run non-interactively with a ✅/⚠️/❌ report.
 
-**Multi-model routing.** The `ANTHROPIC_*` settings are the default provider/model; `LLM_ROLES` (a JSON role→{model, base_url?, api_key?} map) routes task roles (chat, pipeline, research, task, evolve) to different models — and, since a model often lives on a different endpoint, different base URLs + keys — so e.g. chat runs on mimo-v2.5 while research runs on qwen3.6-plus at once. `LLM._resolve` maps role→(client, model) and caches one client per provider; an unset role falls back to the cheap or default model. When `LLM_MIXTURE` gives >=2 members, the listed roles run **Mixture-of-Agents** (Wang et al. 2024): every member proposes in parallel and an aggregator synthesizes one best answer (optionally over several refine layers) — trading ~2x cost/latency for quality on the offline reasoning roles. Each member and the aggregator is `{model, base_url?, api_key?}` (same shape as an `LLM_ROLES` entry), so proposers can live on different providers — e.g. MiMo + Qwen proposing into a DeepSeek aggregator — and a member reusing the default endpoint just omits `base_url`/`api_key`. Offline calls that benefit from synthesis (research summaries and résumé editing) carry a mixture-enabled role. High-volume structured calls (research query generation/scoring and GitHub triage) explicitly stay single-model and use bounded batches; interactive paths (chat, `plan_task`, `web_search`) and pure judges also stay single-model unless explicitly configured otherwise, keeping latency and failure scope bounded.
+**Multi-model routing.** The `ANTHROPIC_*` settings are the default provider/model; `LLM_ROLES` (a JSON role→{model, base_url?, api_key?} map) routes task roles (chat, pipeline, research, task, evolve) to different models — and, since a model often lives on a different endpoint, different base URLs + keys — so e.g. chat runs on mimo-v2.5 while research runs on qwen3.6-plus at once. `LLM._resolve` maps role→(client, model) and caches one client per provider; an unset role falls back to the cheap or default model. A route entry may also carry `thinking` (`"disabled"` / `"adaptive"`), forwarded as the provider's reasoning parameter — per-route rather than global because whether the parameter is even legal depends on the model, and because a reasoning model can be the right choice offline and the wrong one interactively: mimo-v2.5 spends its visible-text budget on hidden reasoning and emits `<tool_call>` markup ahead of the requested JSON, which made chat both slow and unusable until chat's route turned it off (2026-09-08). An absent or unrecognized value sends nothing. When `LLM_MIXTURE` gives >=2 members, the listed roles run **Mixture-of-Agents** (Wang et al. 2024): every member proposes in parallel and an aggregator synthesizes one best answer (optionally over several refine layers) — trading ~2x cost/latency for quality on the offline reasoning roles. Each member and the aggregator is `{model, base_url?, api_key?}` (same shape as an `LLM_ROLES` entry), so proposers can live on different providers — e.g. MiMo + Qwen proposing into a DeepSeek aggregator — and a member reusing the default endpoint just omits `base_url`/`api_key`. Offline calls that benefit from synthesis (research summaries and résumé editing) carry a mixture-enabled role. High-volume structured calls (research query generation/scoring and GitHub triage) explicitly stay single-model and use bounded batches; interactive paths (chat, `plan_task`, `web_search`) and pure judges also stay single-model unless explicitly configured otherwise, keeping latency and failure scope bounded.
 
 **Global vs personal config (multi_tenant).** The shared `.env` carries *global*
 infra only — LLM keys/routing, RESEND transport, `SERVE_TOKEN`,
@@ -470,7 +491,7 @@ skeleton, so no credential is ever copied between users.
 
 `LLM_REVIEW` is a third, single-spec knob — the "strongest available reasoning" slot (`{model, base_url?, api_key?}`) resolvable as the `review` role and used by the local plan reviewer (`scripts/review_plan.py`, a development-process tool the runtime never invokes); it never joins the MoA role set.
 
-All three are **degrade-safe by construction**: `LLM_ROLES`/`LLM_MIXTURE`/`LLM_REVIEW` are parsed by a tolerant validator (`config.py`, via `NoDecode`) that falls back to `{}` on malformed JSON rather than raising — a bad optional routing config must never crash startup, since every command builds `Settings()`. A common malform is a *multi-line* value in `.env`: `dotenv` reads only its first physical line unless the whole JSON is wrapped in `'single quotes'`, so keep each on one line or quote it. Provider retries are owned by the platform (three total attempts with bounded backoff; SDK retries are disabled). Structured JSON keeps the provider stop reason: a normal parse error gets one repair, while `max_tokens` gets one doubled-budget retry capped at 16k, never the same doomed request twice. A 401 durably quarantines that endpoint+credential and an ambiguous 403 quarantines only that model; route fingerprints change with endpoint/key/model configuration, so unrelated or newly-fixed routes continue. `assistant init --check` force-probes every unique configured route and clears each route's quarantine only after that route succeeds.
+All three are **degrade-safe by construction**: `LLM_ROLES`/`LLM_MIXTURE`/`LLM_REVIEW` are parsed by a tolerant validator (`config.py`, via `NoDecode`) that falls back to `{}` on malformed JSON rather than raising — a bad optional routing config must never crash startup, since every command builds `Settings()`. A common malform is a *multi-line* value in `.env`: `dotenv` reads only its first physical line unless the whole JSON is wrapped in `'single quotes'`, so keep each on one line or quote it. Provider retries are owned by the platform (three total attempts with bounded backoff; SDK retries are disabled). Structured JSON keeps the provider stop reason: a normal parse error gets one repair, while `max_tokens` gets one doubled-budget retry capped at 16k, never the same doomed request twice. `complete_json(expect_keys=…)` additionally treats a well-formed but wrong-*shaped* object as a parse failure so it feeds that same repair round — the chat turn opts in with `("reply", "actions")`, because a tool-calling-tuned model prefixes its own `<tool_call>{"name": …}` payload and returning the first thing that parsed silently yielded an empty reply with no actions out of a response that held a good answer (2026-09-03). It is opt-in per call site since the ~19 callers expect different shapes. A 401 durably quarantines that endpoint+credential and an ambiguous 403 quarantines only that model; route fingerprints change with endpoint/key/model configuration, so unrelated or newly-fixed routes continue. `assistant init --check` force-probes every unique configured route and clears each route's quarantine only after that route succeeds.
 
 In the MoA path itself (`llm._mixture`), transient failures remain independently retried per member, while durable auth/model quarantines are skipped before dispatch. Aggregation requires at least two final proposals; one survivor is returned directly and explicitly marked degraded instead of paying for a false synthesis. If an attempted aggregator raises or returns empty (e.g. a reasoning model spends its whole budget on hidden thinking), the call falls back to a surviving proposal rather than yielding nothing. Every mixture call is observable: each member/aggregator/fallback LLM span is stage-tagged, and a parent `mixture` span records member slots attempted/skipped/failed, cumulative and final proposals, aggregator attempted/skipped/failed/success, fallback/abandonment, and a deterministic degradation flag. The same numeric `moa` metrics row lands in events.db even for chat/task turns that have no tracer. Failed LLM spans persist only bounded metadata (`error_type`, integer HTTP status when available, and breaker classification), never exception text, response bodies, prompts, or credentials. `complete(..., mixture=False)` is the per-call escape hatch the task runner uses to keep simple/medium work single-model.
 
@@ -488,6 +509,10 @@ profile repo.
   sites/repos, (d) approved résumé pushes.
 - **Filtered before prompting.** Chrome/Gmail data is denylist-filtered at read
   time; raw payloads live only in local SQLite.
+- **Image content is untrusted.** Text inside a photo or its vision
+  description is data, never owner instructions: an image-bearing chat turn
+  can only execute the append-only logging actions; anything else waits for a
+  text-only confirmation.
 - **Constrained writes.** The profile's only write surface is the typed op set;
   the website render is deterministic; résumé edits only surface profile facts.
 - **Protected sections & approval gates.** `identity`/`education`/`experience`

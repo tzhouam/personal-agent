@@ -1,9 +1,12 @@
 """Vision chain: input validation, backend fallback order, and the plumbing
 that carries image paths from chat entry points into the prompt."""
 
+import pytest
+
 import assistant.platform.vision as vision
 from assistant.agent.chat.agent import handle_message
-from assistant.platform.vision import describe_images, media_type_for, render_image_context
+from assistant.platform.vision import (describe_images, describe_images_native,
+                                       media_type_for, render_image_context)
 
 
 class FakeLLM:
@@ -86,18 +89,21 @@ def test_handle_message_caps_image_count(settings, tmp_path, monkeypatch):
     assert seen["n"] == settings.vision_max_images
 
 
-def test_followup_calls_keep_images_attached(settings, tmp_path, monkeypatch):
+def test_empty_native_turn_describes_then_detaches(settings, tmp_path, monkeypatch):
     """Regression (2026-07-27): with a natively multimodal model the prompt says
     "the owner's images are attached — look at them directly", but the follow-up
     calls passed only that text. A sighted model was asked about images it never
     received and honestly replied that it could not load them. Every call in a
-    turn must carry the attachments the prompt claims are there."""
+    turn must carry attachments whenever its prompt claims they are direct.
+    The recovery pass intentionally detaches only after replacing that claim
+    with a concrete visual description."""
     monkeypatch.setattr(settings, "llm_supports_images", True)
     pic = _png(tmp_path)
 
     class Recorder:
         def __init__(self):
             self.calls = []
+            self.plain_calls = []
 
         def complete_json(self, prompt, system=None, **kw):
             self.calls.append(kw)
@@ -105,11 +111,51 @@ def test_followup_calls_keep_images_attached(settings, tmp_path, monkeypatch):
             return ({"reply": "", "actions": []} if len(self.calls) == 1
                     else {"reply": "看到了，是一张收据。", "actions": []})
 
+        def complete(self, prompt, system=None, **kw):
+            self.plain_calls.append((prompt, system, kw))
+            return "一张收据，总额42元"
+
     llm = Recorder()
     reply = handle_message("", settings, llm, image_paths=[str(pic)])
     assert reply == "看到了，是一张收据。"
-    assert len(llm.calls) == 2, "the empty first reply should trigger one retry"
-    assert all(c.get("images") == [str(pic)] for c in llm.calls)
+    assert len(llm.calls) == 2
+    assert llm.calls[0].get("images") == [str(pic)]
+    assert llm.plain_calls[0][2].get("images") == [str(pic)]
+    assert llm.calls[1].get("images") is None
+
+
+def test_describe_images_native_is_compact_bounded_and_single_route(tmp_path):
+    pics = [str(_png(tmp_path, "a.png")), str(_png(tmp_path, "b.png"))]
+
+    class Native:
+        def __init__(self):
+            self.call = None
+
+        def complete(self, prompt, system=None, **kw):
+            self.call = (prompt, system, kw)
+            return "  visible facts " + "x" * 9000
+
+    llm = Native()
+    out = describe_images_native(llm, pics)
+    prompt, system, kw = llm.call
+    assert out.startswith("visible facts") and len(out) == 8000
+    assert "food" in prompt and "visual extraction component" in system
+    assert kw == {"images": pics, "role": "chat", "mixture": False,
+                  "max_tokens": 2400}
+
+
+def test_describe_images_native_rejects_truncated_result(tmp_path):
+    pic = str(_png(tmp_path))
+
+    class Truncated(str):
+        stop_reason = "max_tokens"
+
+    class Native:
+        def complete(self, *args, **kwargs):
+            return Truncated("partial receipt total: 4")
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        describe_images_native(Native(), [pic])
 
 
 def test_email_channel_extracts_image_attachments(settings):
@@ -243,10 +289,12 @@ def test_native_image_failure_falls_back_to_describe_with_backend(settings, tmp_
     assert reply.startswith("看到了收据")
 
 
-def test_native_image_failure_retries_when_no_vision_backend(settings, tmp_path, monkeypatch):
+def test_native_image_failure_uses_focused_recovery_without_vision_backend(
+        settings, tmp_path, monkeypatch):
     # The common config: main model IS the vision backend, no separate VISION_*.
-    # A transient native failure RETRIES the native call — it must never route to
-    # the nonexistent describe backend and surface "视觉后端不可用".
+    # A failed structured call changes prompt shape through the compact native
+    # extractor, then reasons without reattaching the image. It must never route
+    # to the nonexistent configured-backend path.
     pic = _png(tmp_path)
     settings.llm_supports_images = True
     settings.vision_api_key = ""
@@ -256,22 +304,35 @@ def test_native_image_failure_retries_when_no_vision_backend(settings, tmp_path,
     calls = {"n": 0}
 
     class FlakyLLM(FakeLLM):
+        def __init__(self, result):
+            super().__init__(result)
+            self.plain_calls = []
+
         def complete_json(self, prompt, system=None, images=None, **kw):
             calls["n"] += 1
             self.prompts.append(prompt)
             if calls["n"] == 1:
                 raise RuntimeError("temporary upstream timeout")
-            assert images  # the retry still sends the image to the model
+            assert images is None
             return self.result
+
+        def complete(self, prompt, system=None, images=None, **kw):
+            self.plain_calls.append((prompt, system, images, kw))
+            assert images == [str(pic)]
+            return "会议邀请，周四21点"
 
     llm = FlakyLLM({"reply": "看到了会议邀请，周四21点。", "actions": []})
     reply = handle_message("这是什么", settings, llm, image_paths=[str(pic)])
     assert calls["n"] == 2 and reply.startswith("看到了会议邀请")
+    assert len(llm.plain_calls) == 1
+    assert "会议邀请，周四21点" in llm.prompts[1]
+    assert "look at them directly" not in llm.prompts[1]
 
 
 def test_native_image_failure_exhausted_is_humane(settings, tmp_path):
-    # native fails and the retry fails too (no backend) → a neutral "try again",
-    # never the misleading "不支持图片输入" / "视觉后端不可用".
+    # Structured native call and compact extraction both fail (no separate
+    # backend) → a neutral "try again", never the misleading "不支持图片输入" /
+    # "视觉后端不可用".
     pic = _png(tmp_path)
     settings.llm_supports_images = True
     settings.vision_api_key = ""

@@ -1,0 +1,28 @@
+# systemd USER unit for the OpenClaw gateway on the personal-agent host.
+# Install:  mkdir -p ~/.config/systemd/user
+#           cp deploy/openclaw-gateway.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload && systemctl --user enable --now openclaw-gateway
+# Requires: loginctl enable-linger <user> (boots the user manager without a
+#           login session — already enabled on the production host).
+#
+# The gateway is the single supervised daemon: its bridge plugin's
+# serve-supervisor keeps `assistant serve` alive (adopt-and-watch; see
+# openclaw-plugin/index.js). OOMScoreAdjust makes a future host-wide OOM
+# (2026-10-02: a vLLM watcher ate the box) prefer other victims.
+[Unit]
+Description=OpenClaw gateway (WeChat weixin channel host + serve supervisor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/ubuntu/.openclaw/start-gateway.sh
+Restart=always
+RestartSec=15
+OOMScoreAdjust=-500
+# keep the log path the runbooks and skills already reference
+StandardOutput=append:/home/ubuntu/.openclaw/logs/gateway-nohup.log
+StandardError=append:/home/ubuntu/.openclaw/logs/gateway-nohup.log
+
+[Install]
+WantedBy=default.target

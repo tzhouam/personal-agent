@@ -557,3 +557,78 @@ def test_durable_health_gate_skips_single_answer_synthesis_and_degrades(
     assert metrics[-1]["aggregator_attempted"] == 0
     assert metrics[-1]["aggregator_skipped"] == 1
     assert metrics[-1]["degraded"] == 1
+
+
+# ── structured-shape selection (`expect_keys`) ──────────────────────────────
+#
+# A tool-calling-tuned model answers a structured prompt with its own
+# `<tool_call>{"name": …}` markup ahead of the requested object. Returning the
+# first thing that parses handed the caller that payload — an empty reply with
+# no actions, out of a response that held a good answer (2026-09-03 incident).
+
+_TOOL_CALL_FIRST = (
+    '<tool_call>\n{"name": "log_transaction", "arguments": {"amount": 102}}\n'
+    '</tool_call>\n'
+    '{"reply": "已记录", "actions": [{"type": "log_transaction"}]}')
+
+
+def test_expect_keys_skips_tool_call_markup(monkeypatch, tmp_path):
+    """The correctly shaped object is found past a leading tool-call payload."""
+    llm = LLM(_settings(tmp_path))
+    monkeypatch.setattr(
+        llm, "complete",
+        lambda prompt, **kw: CompletionText(_TOOL_CALL_FIRST, "end_turn"))
+    assert llm.complete_json("chat", expect_keys=("reply", "actions")) == {
+        "reply": "已记录", "actions": [{"type": "log_transaction"}]}
+
+
+def test_without_expect_keys_first_object_still_wins(monkeypatch, tmp_path):
+    """Legacy behaviour is untouched for the callers that don't opt in."""
+    llm = LLM(_settings(tmp_path))
+    monkeypatch.setattr(
+        llm, "complete",
+        lambda prompt, **kw: CompletionText(_TOOL_CALL_FIRST, "end_turn"))
+    assert llm.complete_json("chat") == {
+        "name": "log_transaction", "arguments": {"amount": 102}}
+
+
+def test_wrong_shape_feeds_the_existing_repair_round(monkeypatch, tmp_path):
+    """No match is a parse failure, so the one repair prompt still runs."""
+    llm = LLM(_settings(tmp_path))
+    scripted = [CompletionText('<tool_call>\n{"name": "web_search"}\n</tool_call>',
+                               "end_turn"),
+                CompletionText('{"reply": "fixed", "actions": []}', "end_turn")]
+    calls = []
+
+    def complete(prompt, **kwargs):
+        calls.append(prompt)
+        return scripted.pop(0)
+
+    monkeypatch.setattr(llm, "complete", complete)
+    assert llm.complete_json("chat", expect_keys=("reply", "actions")) == {
+        "reply": "fixed", "actions": []}
+    assert len(calls) == 2
+    # the repair prompt names the missing shape, not just "unparseable"
+    assert "reply/actions" in calls[1]
+
+
+def test_expect_keys_accepts_either_key_and_nested_objects(monkeypatch, tmp_path):
+    """An actions-only correction (the review round) is a valid shape too."""
+    llm = LLM(_settings(tmp_path))
+    monkeypatch.setattr(
+        llm, "complete",
+        lambda prompt, **kw: CompletionText(
+            '{"thought": {"deep": true}}\n{"actions": [{"type": "add_todo"}]}',
+            "end_turn"))
+    assert llm.complete_json("chat", expect_keys=("reply", "actions")) == {
+        "actions": [{"type": "add_todo"}]}
+
+
+def test_expect_keys_raises_when_nothing_matches(monkeypatch, tmp_path):
+    """Two wrong-shaped rounds surface the parse error, never a bad dict."""
+    llm = LLM(_settings(tmp_path))
+    monkeypatch.setattr(
+        llm, "complete",
+        lambda prompt, **kw: CompletionText('{"name": "web_search"}', "end_turn"))
+    with pytest.raises(ValueError, match="reply/actions"):
+        llm.complete_json("chat", expect_keys=("reply", "actions"))

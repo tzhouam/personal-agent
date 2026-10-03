@@ -1230,3 +1230,92 @@ def test_mixture_metrics_record_fallback(monkeypatch):
     assert moa["aggregator_skipped"] == 1 and moa["aggregator_failed"] == 0
     assert moa["aggregator_ok"] == 0 and moa["degraded"] == 1
     llm_mod._reset_breaker()
+
+
+# ── per-route reasoning mode (`thinking`) ───────────────────────────────────
+#
+# mimo-v2.5 spends its whole visible-text budget on hidden reasoning and
+# prefixes `<tool_call>` markup to structured replies, which made interactive
+# chat both slow and unusable (2026-09-08). The mode is per-ROUTE because the
+# provider's acceptance of the param depends on the model.
+
+class _ThinkResp:
+    """Minimal response for calls whose request kwargs are under test."""
+
+    content = [type("B", (), {"type": "text", "text": "ok"})()]
+    stop_reason = "end_turn"
+    usage = None
+
+
+def _capture_default_client(llm):
+    """Record the kwargs of every request on the LLM's default client."""
+    seen = []
+
+    def fake_create(**kw):
+        seen.append(kw)
+        return _ThinkResp()
+
+    llm.client.messages = type("M", (), {"create": staticmethod(fake_create)})()
+    return seen
+
+
+def test_role_thinking_rides_the_request(monkeypatch):
+    _fake_anthropic(monkeypatch)
+    llm = LLM(_settings(llm_roles={
+        "chat": {"model": "mimo-v2.5", "thinking": "disabled"},
+        "task": {"model": "mimo-v2.5"}}))
+    seen = _capture_default_client(llm)
+    llm.complete("hi", role="chat")
+    llm.complete("hi", role="task")       # configured role, no mode
+    llm.complete("hi", role="pipeline")   # unconfigured role
+    assert seen[0]["thinking"] == {"type": "disabled"}
+    # absent — never sent blind, since providers 400 on an unsupported param
+    assert "thinking" not in seen[1] and "thinking" not in seen[2]
+
+
+def test_thinking_ignores_unknown_mode_and_model_override(monkeypatch):
+    _fake_anthropic(monkeypatch)
+    llm = LLM(_settings(llm_roles={
+        "chat": {"model": "mimo-v2.5", "thinking": "disabled"},
+        "evolve": {"model": "mimo-v2.5", "thinking": "sideways"}}))
+    seen = _capture_default_client(llm)
+    llm.complete("hi", role="evolve")            # unrecognized mode → dropped
+    llm.complete("hi", role="chat", model="other-model")  # override ≠ role route
+    assert all("thinking" not in kw for kw in seen)
+
+
+def test_mixture_member_carries_its_own_thinking(monkeypatch):
+    """A mode set on a member/aggregator survives normalization and dispatch."""
+    seen = {}
+
+    def make_client(**_kwargs):
+        class C:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    seen[kw["model"]] = kw.get("thinking")
+                    return _ThinkResp()
+        return C()
+
+    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "p1", "thinking": "disabled"}, {"model": "p2"}],
+        "aggregator": {"model": "agg", "thinking": "adaptive"},
+        "roles": ["pipeline"]}))
+    assert llm.mixture["members"][0]["thinking"] == "disabled"
+    llm.complete("go", role="pipeline")
+    assert seen["p1"] == {"type": "disabled"}
+    assert seen["p2"] is None
+    assert seen["agg"] == {"type": "adaptive"}
+    llm_mod._reset_breaker()
+
+
+def test_malformed_thinking_drops_the_mixture_member(monkeypatch):
+    """Non-string `thinking` is structural corruption, like a bad base_url."""
+    _fake_anthropic(monkeypatch)
+    llm = LLM(_settings(llm_mixture={
+        "members": [{"model": "p1", "thinking": {"type": "disabled"}},
+                    {"model": "p2"}],
+        "roles": ["pipeline"]}))
+    assert [m["model"] for m in llm.mixture["members"]] == ["p2"]
+    assert llm._mixture_roles == set()   # <2 members → MoA stays off

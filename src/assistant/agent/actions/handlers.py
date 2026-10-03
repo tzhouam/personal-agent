@@ -1176,11 +1176,13 @@ def _self_evolve(settings: Settings, p: dict) -> str:
 
 
 def _acknowledge_failure(settings: Settings, p: dict) -> str:
-    """Clear one delivery failure from the D5 surface (知道了) — the row is
-    kept for audit, never deleted."""
+    """Clear one or all delivery failures from D5 without deleting audit rows."""
     from assistant.platform import delivery
 
     fid = str(p.get("id", "")).strip()
+    if fid.casefold() == "all":
+        count = delivery.acknowledge_all(settings)
+        return f"cleared {count} delivery failures"
     if delivery.acknowledge(settings, fid):
         return f"cleared delivery failure {fid}"
     return f"no open delivery failure {fid!r} (already cleared, or wrong id?)"

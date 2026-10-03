@@ -122,4 +122,6 @@ credentials live in `users/<uid>/config.env` and never inherit from the shared `
   a `metrics.EXTRACTORS` entry; research source = a line in `config/sources.yaml`.
 - **Safety invariants that shape code review** — the website render is deterministic (no LLM output
   reaches a public page), résumé pushes are approval-gated, private pages are client-side encrypted,
-  and health data never reaches the website or digest.
+  health data never reaches the website or digest, and an image-bearing chat turn may only execute
+  the append-only logging actions (`_authorize_image_actions` in `chat/agent.py`; anything else
+  waits for a text-only confirmation).

@@ -116,6 +116,57 @@ def test_two_accounts_get_isolated_sessions(mt_server):
     assert alice_store.history("bob123:peer1") == []
 
 
+def test_weixin_fallback_queues_only_the_authenticated_users_row(mt_server):
+    """A forged/cross-account inbound cannot rearm another tenant's outbox."""
+    import time
+
+    from assistant.platform.delivery import OutboxDB
+
+    base, _, _ = mt_server
+    exact = ("failed: rc=1 OutboundDeliveryError: sendMessage ret=-2 "
+             "errmsg=prepare failed (sent 0/1)")
+
+    def seed(settings, rid):
+        db = OutboxDB(settings.data_dir)
+        token = db.routine_claim(rid, "2026-08-30 09:30")
+        db.routine_transition(rid, "2026-08-30 09:30", token, "executing",
+                              from_states=("claimed",))
+        db.routine_transition(rid, "2026-08-30 09:30", token, "executed",
+                              output=rid, from_states=("executing",))
+        for _ in range(3):
+            db.routine_delivery_failed(rid, "2026-08-30 09:30", token, exact)
+        db.close()
+
+    alice = Settings.for_user("alice1")
+    bob = Settings.for_user("bob123")
+    seed(alice, "rt-a")
+    seed(bob, "rt-b")
+    response = httpx.post(
+        f"{base}/chat",
+        json={"account_id": "wx-A", "channel": "weixin",
+              "session": "peer", "text": "hello"},
+        headers=_auth(), timeout=10)
+    assert response.status_code == 200 and "dfort-a@" in response.json()["reply"]
+
+    deadline = time.monotonic() + 3
+    errors = (None, None)
+    while time.monotonic() < deadline:
+        adb, bdb = OutboxDB(alice.data_dir), OutboxDB(bob.data_dir)
+        try:
+            errors = (
+                adb.conn.execute("SELECT error FROM routine_ledger").fetchone()[0],
+                bdb.conn.execute("SELECT error FROM routine_ledger").fetchone()[0],
+            )
+        finally:
+            adb.close()
+            bdb.close()
+        if errors[0].startswith("wechat_retry_queued: "):
+            break
+        time.sleep(0.02)
+    assert errors[0].startswith("wechat_retry_queued: ")
+    assert not errors[1].startswith("wechat_retry_queued: ")
+
+
 def test_actions_scoped_per_user(mt_server):
     base, _, data_dir = mt_server
     httpx.post(f"{base}/actions/add_todo",
