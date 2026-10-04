@@ -126,9 +126,11 @@ def send_to_conversation(settings: Settings, account_id: str, target: str,
     return f"failed: {report['error']}"
 
 
-# Weixin accepts a context-less proactive push only within roughly 24h of the
-# owner's last inbound; past that the gateway rejects it with `ret=-2 prepare
-# failed` (skills/wechat-outbound-context-token). The channel plugin persists a
+# Weixin accepts a context-less proactive push only within a short window of
+# the owner's last inbound (measured 2026-10-04: ≤2 min still accepted, 3 h 15
+# min already rejected — far tighter than the ~24 h seen in 2026-07); past it
+# the gateway rejects with `ret=-2 prepare failed`
+# (skills/wechat-outbound-context-token). The channel plugin persists a
 # token per conversation on EVERY inbound, so that file's mtime is a faithful
 # "last real owner activity" clock — the one signal that distinguishes a token
 # Weixin will still accept from one it won't.
@@ -145,8 +147,11 @@ def weixin_context_fresh(settings: Settings, account_id: str) -> bool:
     health check, a smoke test, or any other local client setting that field
     would otherwise re-arm the retained pushes and burn them against a token
     Weixin still rejects (observed 2026-09-08/09: 5 then 9 retries queued and
-    failed seconds later, with the token untouched since 2026-09-06). Half the
-    ~24h window keeps a genuine inbound comfortably inside it.
+    failed seconds later, with the token untouched since 2026-09-06). The
+    threshold only needs to prove "a genuine inbound just refreshed this" —
+    a real re-arm runs seconds after the inbound, so 12 h is a deliberately
+    loose bound that still catches every flag-only path (untouched files,
+    hours-old mtimes).
 
     Unreadable state degrades to True: that restores the previous
     flag-only behavior rather than silently disabling recovery, and the

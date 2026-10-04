@@ -20,7 +20,14 @@ created_at: 2026-08-03
   the owner's last inbound (session file mtimes). 2026-07-31→08-02: every send
   ≤24h after an inbound succeeded, every send past ~24h failed, and the channel
   "recovered" the moment the owner messaged — that is not an outage, it is the
-  Weixin iLink push window for context-less sends.
+  Weixin iLink push window for context-less sends. **2026-10-04 re-measurement:
+  the window has tightened to hours at most** — sends 2 minutes after the
+  inbound-refreshed token succeeded (the 39-message backlog flush), while a
+  routine send 3 h 15 min after the 2026-09-27 inbound already failed. With a
+  quiet owner, expect routine pushes to dead-letter by design; the durable
+  fallback (bounded attempts → D5 → after-inbound re-arm) is the delivery path
+  that actually reaches the owner, and the digest email is the guaranteed
+  channel.
 - Mechanism (plugin `@tencent-weixin/openclaw-weixin`, dist/src): every inbound
   message yields a per-conversation `context_token`, cached in-process and
   persisted to `~/.openclaw/openclaw-weixin/accounts/<accountId>.context-tokens.json`.
@@ -28,7 +35,8 @@ created_at: 2026-08-03
   The channel declares `outbound.deliveryMode: "direct"`, so `openclaw message
   send` loads the channel in its own fresh process, never runs `startAccount`,
   finds an empty store, and sends without the token — accepted only inside the
-  ~24h window, `prepare failed` outside it.
+  push window (hours at most, see the 2026-10-04 re-measurement above),
+  `prepare failed` outside it.
 - There are two distinct signatures after the restore-on-miss patch lands:
   `contextToken missing` means the short-lived process still did not restore
   disk state; `restoreContextTokens: restored 1` immediately followed by
@@ -67,8 +75,11 @@ created_at: 2026-08-03
 - `openclaw message send --channel weixin --account <acct> --target <peer> -m
   <test>` → structured log shows **no** `contextToken missing` warning and
   `✅ Sent`; the message arrives on the phone.
-- The real proof is a push >24h after the owner's last inbound (next silent
-  day): reminder/routine line logs `delivered`/`sent`, not `prepare failed`.
+- The real proof is a push minutes after the owner's last inbound: the
+  reminder/routine line logs `delivered`/`sent`, not `prepare failed`.  A push
+  hours later failing is EXPECTED post-2026-10 — verify the fallback instead:
+  the row dead-letters onto D5, the owner's next inbound re-arms it, and the
+  next poll delivers it (`delivered after fresh WeChat context` in the log).
 
 ## Anti-patterns
 - Believing the chat agent's own diagnosis ("通道故障，需要管理员重启") — a
@@ -78,7 +89,7 @@ created_at: 2026-08-03
   the `~/.openclaw/npm/projects/…` copy; patch what `openclaw plugins list`
   reports (sync the other copy only as belt-and-braces).
 - Testing right after the owner messaged and declaring it fixed — inside the
-  24h window context-less sends succeed anyway; the log's missing-token
+  window context-less sends succeed anyway; the log's missing-token
   warning, not send success, is what the patch removes.
 - Treating `prepare failed` as an ordinary transient and retrying forever — it
   is deterministic outside the window.  Bounded retries + dead-letter + one
