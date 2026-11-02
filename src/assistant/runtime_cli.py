@@ -8,14 +8,14 @@ import shutil
 import sys
 
 from assistant.platform.config import Settings
-from assistant.platform.runtime.backends import build_backend
 from assistant.platform.runtime.config import load_runtime_config
 from assistant.platform.runtime.contracts import BackendRequest
 from assistant.platform.runtime.inbox import Inbox
+from assistant.platform.runtime.pi import build_pi_backend, install_pi, pi_status
 from assistant.agent.runtime.app import RuntimeApplication
 
 COMMANDS = {"ask", "chat", "task", "serve", "project", "skills", "memory", "backends",
-            "doctor", "approve", "inbox"}
+            "doctor", "approve", "inbox", "pi"}
 
 
 def handles(argv: list[str]) -> bool:
@@ -89,21 +89,27 @@ def _parser() -> argparse.ArgumentParser:
     inbox.add_argument("operation", choices=["list", "retry-delivery"])
     inbox.add_argument("id", nargs="?", default="")
     _common(inbox)
+    pi = sub.add_parser("pi", help="install or inspect the pinned Pi SDK runtime")
+    pi.add_argument("operation", choices=["install", "status"])
+    _common(pi)
     return parser
 
 
-def _routes(config):
+def _routes(config, data_dir: Path):
     """Report availability and capability without outputting credentials."""
     rows = []
     for name, route in config.backends.items():
-        api = route.kind in ("openai", "anthropic")
+        api = route.kind not in {"codex", "claude", "gemini"}
         executable = (route.command or (route.kind,))[0]
+        available = (bool(route.api_key and route.model) if api else
+                     bool(shutil.which(executable)))
         rows.append({"name": name, "kind": route.kind, "model": route.model,
                      "selected": name == config.backend,
-                     "available": bool(route.api_key and route.model) if api else bool(shutil.which(executable)),
+                     "available": available,
                      "credential_configured": bool(route.api_key) if api else None,
                      "allow_unrestricted": route.allow_unrestricted,
-                     "capabilities": sorted(build_backend(route).capabilities)})
+                     "engine": "pi",
+                     "capabilities": sorted(build_pi_backend(route, data_dir).capabilities)})
     return rows
 
 
@@ -116,6 +122,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.config:
         settings = settings.model_copy(update={"runtime_config": args.config.expanduser().resolve()})
     try:
+        if args.command == "pi":
+            result = (install_pi(settings.data_dir) if args.operation == "install"
+                      else pi_status(settings.data_dir))
+            _emit(result)
+            return 0 if result["available"] else 1
         config = load_runtime_config(settings, backend=args.backend)
         if args.command in ("backends", "doctor"):
             if args.command == "doctor":
@@ -127,14 +138,16 @@ def main(argv: list[str] | None = None) -> int:
                         QQConfig(**spec)
                     else:
                         raise ValueError(f"unknown channel type {name!r}")
-            rows = _routes(config)
+            rows = _routes(config, settings.data_dir)
+            pi = pi_status(settings.data_dir)
             result = {"backend": config.backend, "routes": rows,
+                      "engine": "pi", "pi": pi,
                       "channels": sorted(config.channels),
                       "config": str(config.path), "live_probe": "not_requested"}
-            okay = any(r["selected"] and r["available"] for r in rows)
+            okay = pi["available"] and any(r["selected"] and r["available"] for r in rows)
             if args.probe:
                 settings.data_dir.mkdir(parents=True, exist_ok=True)
-                response = build_backend(config.route()).complete(BackendRequest(
+                response = build_pi_backend(config.route(), settings.data_dir).complete(BackendRequest(
                     messages=[{"role": "user", "content":
                                "Do not use tools. Reply with exactly PERSONAL_AGENT_RUNTIME_OK."}],
                     cwd=settings.data_dir, timeout=min(config.timeout, 60)))
@@ -147,14 +160,10 @@ def main(argv: list[str] | None = None) -> int:
             return app.serve()
         kernel = app.kernel(args.owner)
         if args.command in ("ask", "chat"):
-            if args.image:
-                result = app.handle_turn(args.text, kernel.settings, session=args.session,
-                                         image_paths=args.image)
-                print(result.reply)
-                return 0 if result.outcome != "fail" else 1
-            result = kernel.turn(args.text, session=args.session, project=args.project)
+            result = kernel.turn(args.text, session=args.session, project=args.project,
+                                 image_paths=args.image)
             print(result.text)
-            return 0
+            return 0 if result.status in {"done", "awaiting_approval"} else 1
         if args.command == "approve":
             _emit(asdict(kernel.approve(args.id, session=args.session)))
             return 0

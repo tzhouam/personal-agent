@@ -6,7 +6,8 @@ Design: [PI_PLAN.md](PI_PLAN.md).
 
 Direction: actual Pi SDK, preserved personal capabilities, no LangGraph.
 Live checks: direct DeepSeek only, never Codex.
-Branch: `refactor/agent-runtime-v2`; PR #36 is being updated with actual Pi.
+Branch: `refactor/agent-runtime-v2`; [PR #36](https://github.com/tzhouam/personal-agent/pull/36)
+contains actual Pi. Draft, unmerged, undeployed.
 Fork: https://github.com/tzhouam/pi (verified revision `c9f4c7b`).
 
 ## Discovery
@@ -40,7 +41,7 @@ Fork: https://github.com/tzhouam/pi (verified revision `c9f4c7b`).
 - [x] Install wheel and prove operation with no LangGraph installed.
 - [x] Run direct DeepSeek memory/tool and scratch-project checks on Pi.
 - [x] Review source/lock and verify no committed credentials.
-- [ ] Publish updated PR #36 with accurate evidence and limits.
+- [x] Publish updated PR #36 with accurate evidence and limits.
 
 ## Work log
 
@@ -67,3 +68,6 @@ Fork: https://github.com/tzhouam/pi (verified revision `c9f4c7b`).
   bounded project commands by the Pi session deadline, and refused FIFO reads.
 - Added test-only pull-request CI: pinned Node/Python actions, locked SDK install
   with lifecycle scripts disabled, real-SDK local-provider tests and no LangGraph.
+- Implementation and validation published in `f8f448f`, with Pi CLI management
+  included in the following commit. PR title/body now describe the actual engine,
+  source fork, preserved capabilities, completed checks and operational limits.
