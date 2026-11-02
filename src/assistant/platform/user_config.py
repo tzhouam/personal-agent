@@ -7,29 +7,36 @@ place (order + comments preserved), atomic, mode 0600 (it holds credentials).
 """
 
 from pathlib import Path
+import os
+
+from assistant.platform.locks import data_write_lock
 
 
 def update_user_config(udir: Path, updates: dict) -> None:
     """Upsert each `KEY=value` in `<udir>/config.env`, rewriting an existing
     key in place and appending any that are new. Values are written verbatim
     (callers pass already-validated tokens/repo names — no secret ever reaches a
-    log from here). The file is (re)created 0600 via an atomic temp+replace."""
-    cfg = Path(udir) / "config.env"
-    lines = cfg.read_text().splitlines() if cfg.exists() else []
-    remaining = dict(updates)
-    out: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            key = stripped.split("=", 1)[0].strip()
-            if key in remaining:
-                out.append(f"{key}={remaining.pop(key)}")
-                continue
-        out.append(line)
-    for key, val in remaining.items():
-        out.append(f"{key}={val}")
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cfg.with_name(cfg.name + ".tmp")
-    tmp.write_text("\n".join(out) + "\n")
-    tmp.chmod(0o600)
-    tmp.replace(cfg)
+    log from here). The common per-owner lock covers read through replacement,
+    including direct background jobs outside the chat action batch. Set the
+    staging file 0600 before writing credentials, then replace atomically."""
+    with data_write_lock(udir):
+        cfg = Path(udir) / "config.env"
+        lines = cfg.read_text().splitlines() if cfg.exists() else []
+        remaining = dict(updates)
+        out: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in remaining:
+                    out.append(f"{key}={remaining.pop(key)}")
+                    continue
+            out.append(line)
+        for key, val in remaining.items():
+            out.append(f"{key}={val}")
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cfg.with_name(cfg.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write("\n".join(out) + "\n")
+        tmp.replace(cfg)

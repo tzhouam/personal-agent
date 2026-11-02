@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]  # src/assistant/platform/config.py → repo root
@@ -46,6 +46,21 @@ class Settings(BaseSettings):
     )
 
     # LLM — Anthropic SDK, optionally routed to an Anthropic-compatible endpoint
+    # The new runtime selects routes from runtime.toml. These fields also let
+    # preserved workflow implementations use that route instead of assuming an API.
+    runtime_backend: str = ""
+    runtime_config: Path | None = None
+    runtime_allow_unrestricted: bool = False
+    runtime_project_roots: list[Path] = []
+    runtime_project_timeout: float = Field(default=300, ge=1, le=3600)
+    runtime_backend_timeout: float = Field(default=120, ge=1, le=3600)
+    runtime_project_max_steps: int = Field(default=20, ge=1, le=100)
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = ""
+    slack_app_token: str = Field(default="", repr=False)
+    slack_bot_token: str = Field(default="", repr=False)
+    qq_access_token: str = Field(default="", repr=False)
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
@@ -285,7 +300,7 @@ class Settings(BaseSettings):
     self_onboarding: bool = True
 
     @classmethod
-    def for_user(cls, uid: str | None = None) -> "Settings":
+    def for_user(cls, uid: str | None = None, *, base: "Settings | None" = None) -> "Settings":
         """Construct a `Settings` scoped to one user — the isolation seam.
 
         `single_user` (the default deployment): the legacy single data dir; only
@@ -301,7 +316,8 @@ class Settings(BaseSettings):
         its default otherwise. Init kwargs outrank env vars and every env
         file, so neither the shared `.env` nor the process environment can
         leak the owner's identity into another tenant (§4.1)."""
-        base = cls()
+        provided_base = base
+        base = base or cls()
         if base.deployment_mode != "multi_tenant":
             if uid not in (None, DEFAULT_UID):
                 raise ValueError(f"single_user mode: uid {uid!r} not allowed")
@@ -312,6 +328,11 @@ class Settings(BaseSettings):
         udir = user_data_dir(base.data_dir / "users", uid)
         env_files = (_REPO_ROOT / ".env", base.data_dir / "shared" / ".env",
                      udir / "config.env")   # precedence: per-user > shared > repo
+        if provided_base is not None:
+            values = base.model_dump()
+            values.update(data_dir=udir, uid=uid, deployment_mode="multi_tenant",
+                          **cls._personal_overrides(udir))
+            return cls(_env_file=env_files, **values)
         return cls(_env_file=env_files, data_dir=udir, uid=uid,
                    deployment_mode="multi_tenant",
                    **cls._personal_overrides(udir))

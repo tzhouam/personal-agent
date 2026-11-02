@@ -14,12 +14,18 @@ trivial questions, pure lookups, or an explicit "just implement".
 
 ```bash
 pip install -e .                          # editable install; provides the `assistant` CLI
-.venv/bin/python -m pytest -q             # full suite (674 tests, ~75 s)
+.venv/bin/python -m pytest -q             # full Python suite
 .venv/bin/python -m pytest test/test_chat.py -q          # one file
 .venv/bin/python -m pytest test/test_chat.py::test_x -q  # one test
+assistant pi install                     # explicit pinned SDK install (Node >=22.19/npm)
+assistant pi status                      # inspect SDK without calling a model
+# In src/assistant/platform/runtime/pi_host/:
+npm ci --ignore-scripts --no-audit --no-fund
+npm run check
+node --test test/session.test.mjs
 ```
 
-There is no linter/formatter/type-checker configured — pytest is the only gate.
+Python uses pytest; the Pi host also has Node syntax checks and SDK/provider tests.
 
 Runtime CLI (full table in the README): `assistant init [--check]` (setup wizard / config doctor),
 `assistant run [--dry-run|--resume]`, `assistant run-phase <phase>`, `assistant ask "…"`,
@@ -30,6 +36,27 @@ Scripts under `scripts/` and `systemd/` are written for the **deployed** contain
 `/rebase/.venv`), not this checkout — don't "fix" those paths.
 
 ## Architecture
+
+The default `ask`, `chat`, `task`, and `serve` commands use actual Pi SDK 1.4.0
+sessions through `runtime_cli.py`, `platform/runtime/pi.py` and `pi_host/`. Pi owns
+model/tool sequencing, retries, compaction and authoritative JSONL transcripts;
+Python dispatches trusted personal/project tools and enforces approvals. Do not
+add a Python model/tool loop or a non-Pi fallback. The published SDK is pinned;
+development fork: https://github.com/tzhouam/pi, upstream: https://github.com/earendil-works/pi.
+
+Operations and migration details are in `doc/RUNTIME_V2.md`; the current plan and
+checklist are `PI_PLAN.md` and `PI_TODO.md`. `platform/runtime/` owns the Pi bridge,
+model/channel contracts and durable infrastructure. `agent/runtime/` owns personal
+memory, executable skills, policy and registered project jobs. The deterministic
+daily workflow remains a trusted skill; `assistant legacy <command>` explicitly
+selects preserved older chat/task entrypoints.
+
+Optional Codex/Claude/Gemini routes supply single model completions to Pi; they
+must not take over project execution. Pi built-in tools, extensions/MCP, context
+files and skills are disabled unless this host explicitly provides them. Keep
+workspace confinement in Python tools; a process cwd is not a sandbox.
+Only operator-registered verification argv may execute project code on the trusted
+host by default, and receipts must label that isolation boundary honestly.
 
 Full map: `doc/DESIGN.md`. Multi-tenant: `doc/DESIGN_MULTI_USER.md`. Runtime topology: `doc/DESIGN_SERVICE_LAYER.md`.
 
@@ -50,13 +77,13 @@ roots (`cli/`, `init_wizard.py`) sit at the package root and may import both.
 
 ### The daily pipeline
 
-`agent/orchestrator.py` builds a LangGraph `StateGraph(AssistantState)` of nine phases:
+`agent/orchestrator.py` runs a framework-free deterministic workflow of nine phases:
 `collect → profile → resume → digest → todos → research → website → deliver → curate`.
 `AssistantState` (`agent/state.py`) is the shared bag. Discipline: `state.json` holds the phase to
 re-enter (advanced only on success), each phase writes a JSON artifact under `runs/<run_id>/`,
 `--resume` rehydrates and restarts at that phase, one `flock` serializes runs. Phases catch their own
 failures into `state["errors"]` — **degrade, never crash**; the seen-store only advances after the
-email actually sends.
+email actually sends. LangGraph is not a dependency or runtime path.
 
 ### Memory & write safety
 
@@ -80,20 +107,25 @@ tmp+`os.replace` saves. Locks are never held across LLM or network calls.
 
 ### Chat, actions, tasks
 
-`agent/actions/registry.py` holds `ACTIONS` — one table that is the single source of truth for what
-the agent can do, driving the chat prompt, the executor, slash commands, and the HTTP surface. Adding
-a capability = one `Action` entry + handler; nothing else changes. Handlers return a human-readable
-line describing what the code actually did, and replies are built from those, never from LLM claims;
-failed outcomes get up to two LLM repair rounds.
+The default Pi kernel exposes a compact tool catalog and discovers typed personal
+handlers through `agent/runtime/skills.py`. `agent/actions/registry.py` retains
+`ACTIONS` for domain handlers, slash commands and the HTTP surface. Handlers
+report what code actually did; model claims cannot replace those receipts.
 
-`agent/task_runner.py` is a bounded ReAct loop for requests with no built-in pipeline. Depth adapts by
-assessed tier (simple/medium/complex), and outward-effect actions flagged `risky` in the registry pause
-the task as `awaiting_approval` until the owner approves. `execute_task`/`plan_task`/`trigger_run`/
-`approve_task` and the workflow actions are excluded from a task's own action set.
+`agent/runtime/projects.py` invokes one Pi session per durable job with confined
+host tools, then independently runs operator-registered verification commands.
+Chat-driven submissions and outward-effect skills pause for exact scoped approval.
+`agent/task_runner.py` and the old chat repair loop are retained legacy behavior,
+not the default runtime; new skills must not recursively enter them.
 
 ### Config & LLM routing
 
-`platform/config.py` is a Pydantic `Settings` over `.env` (repo root, then CWD). `LLM_ROLES` routes
+`platform/config.py` is a Pydantic `Settings` over `.env` (repo root, then CWD).
+`runtime.toml` names Pi model routes with `kind`, `api`, `provider`, `model`,
+`base_url`, `api_key_env`, `thinking_level` and `context_window`. Secrets stay in
+the environment. Pi's scoped session manifests and JSONL are authoritative model
+context; runtime SQLite is audit/approval/project/delivery state. Legacy `LLM`
+completions also route through Pi. `LLM_ROLES` routes
 roles (chat/pipeline/research/task/evolve) to different models *and endpoints*; `LLM_MIXTURE` runs
 Mixture-of-Agents on the offline reasoning roles; `LLM_REVIEW` is the strongest-reasoning slot used
 only by `scripts/review_plan.py`. All three parse tolerantly (`NoDecode` validator → `{}` on malformed
@@ -118,10 +150,10 @@ credentials live in `users/<uid>/config.env` and never inherit from the shared `
   `skills/<name>/SKILL.md` (Diagnose / Fix / Verification / Anti-patterns). Read the matching one
   before re-deriving a fix; `skills/README.md` indexes them.
 - **Extension points** (all in `agent/`): collector = module in `collectors/` + `@register("name")`;
-  chat action = an `ACTIONS` entry; pipeline phase = node in `orchestrator.py` + `_PHASES` + artifact +
+  chat action = an `ACTIONS` entry; daily phase = handler in `orchestrator.py` + `_PHASES` + artifact +
   a `metrics.EXTRACTORS` entry; research source = a line in `config/sources.yaml`.
 - **Safety invariants that shape code review** — the website render is deterministic (no LLM output
   reaches a public page), résumé pushes are approval-gated, private pages are client-side encrypted,
   health data never reaches the website or digest, and an image-bearing chat turn may only execute
-  the append-only logging actions (`_authorize_image_actions` in `chat/agent.py`; anything else
+  the append-only logging actions (default policy in `agent/runtime/kernel.py`; anything else
   waits for a text-only confirmation).

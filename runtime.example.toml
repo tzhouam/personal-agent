@@ -1,0 +1,96 @@
+# Copy to ~/.personal-agent/runtime.toml, or pass --config /absolute/path/runtime.toml.
+# Engine: actual Pi SDK 1.4.0. Install explicitly with `assistant pi install`.
+# Requires Python 3.11+, Node >=22.19 and npm; no separate Pi CLI is needed.
+# Export custom credential names in the shell/service environment. Standard
+# ANTHROPIC_*/OPENAI_* Settings fields can also come from .env. No inline keys.
+[runtime]
+backend = "deepseek"
+max_steps = 12
+workers = 2
+timeout = 300
+
+[backends.deepseek]
+kind = "openai"
+api = "openai-completions"
+provider = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+model = "deepseek-flash"
+thinking_level = "off"
+context_window = 128000
+# Use the exact model ID exposed by your provider/account.
+
+[backends.anthropic]
+kind = "anthropic"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+model = "claude-sonnet-4-6"
+
+[backends.openai]
+kind = "openai"
+api = "openai-completions"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"
+# Select a model available to your account before choosing this route.
+model = ""
+
+# Compatible endpoints are named routes, for example:
+# [backends.my_endpoint]
+# kind = "api"
+# api = "openai-responses"  # select a Pi-supported API matching the endpoint
+# provider = "my-provider"
+# api_key_env = "MY_ENDPOINT_API_KEY"
+# base_url = "https://your-endpoint.example/v1"
+# model = "your-model"
+# thinking_level = "off"
+# context_window = 128000
+
+# Optional CLI model adapters provide one completion at a time to Pi's loop.
+# They require their own installation/login and never take over project tools.
+[backends.codex]
+kind = "codex"
+command = ["codex"]
+# Retains login; ignores inherited user plugins/MCP and disables native tools.
+# Set an explicit model or non-secret global -c arguments if required.
+# model = "your-model"
+
+[backends.claude]
+kind = "claude"
+command = ["claude"]
+# Native tools and MCP are disabled; Pi dispatches reviewed host tools.
+
+[backends.gemini]
+kind = "gemini"
+command = ["gemini"]
+# Gemini's configured native tools cannot all be disabled reliably. This flag
+# is required even for controller turns; enable only in a trusted isolated setup.
+allow_unrestricted = false
+
+[channels.slack]
+enabled = false
+account_id = "work"
+owner_id = "default"
+app_token_env = "SLACK_APP_TOKEN"
+bot_token_env = "SLACK_BOT_TOKEN"
+team_id = "T_REPLACE_ME"
+allowed_users = ["U_REPLACE_ME"]
+allowed_channels = ["C_REPLACE_ME"]
+
+[channels.qq]
+enabled = false
+account_id = "personal"
+owner_id = "default"
+ws_url = "ws://127.0.0.1:3001"
+access_token_env = "QQ_ACCESS_TOKEN"
+allowed_users = ["REPLACE_WITH_YOUR_QQ_ID"]
+# Empty groups permits the allowed users in any group; set group IDs to restrict.
+allowed_groups = []
+
+# Project registration is an operator action. Never put the assistant's data dir
+# here. Explicit verification commands execute project code on the TRUSTED HOST.
+# [projects.example]
+# path = "/absolute/path/to/project"
+# verification = [["python", "-m", "pytest", "-q"]]

@@ -13,7 +13,6 @@ def _scratch_data_dir(tmp_path, monkeypatch):
     MoA metrics sink writes to events.db, and tests must never touch the live
     ~/.personal-agent (owner rule)."""
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setattr(llm_mod, "_sleep", lambda _seconds: None)
 
 
 def _settings(**kw):
@@ -31,7 +30,7 @@ def _fake_anthropic(monkeypatch):
             self.kwargs = kwargs
             made.append(kwargs)
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(llm_mod, "_PiClient", FakeClient)
     return made
 
 
@@ -117,7 +116,7 @@ def test_mixture_proposes_and_aggregates(monkeypatch):
                     return Resp(f"answer-from-{model}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [{"model": "m1"}, {"model": "m2"}],
         "aggregator": {"model": "aggregator"},
@@ -161,7 +160,7 @@ def test_single_member_config_stays_single_model(monkeypatch):
                     return Resp()
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     settings = _settings(llm_mixture={
         "members": [{"model": "only-member"}], "roles": ["pipeline"]})
     llm = LLM(settings, metrics_sink=lambda *args: metrics.append(args))
@@ -194,7 +193,7 @@ def test_malformed_mixture_runtime_disables_moa(monkeypatch, mixture):
                     return Resp()
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture=mixture))
     assert llm._mixture_roles == set()
     assert llm.complete("x", role="pipeline") == "single"
@@ -224,7 +223,7 @@ def test_malformed_mixture_fields_filter_and_default_safely(monkeypatch):
                     return Resp(f"proposal-{model}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [
             {"model": " m1 "}, {"model": 2},
@@ -257,7 +256,7 @@ def test_canonical_duplicate_mixture_routes_do_not_enable_moa(monkeypatch):
                     return Resp()
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [
             {"model": "same", "base_url": "https://ROUTE.example:443/api/",
@@ -292,7 +291,7 @@ def test_same_mixture_route_with_different_credentials_stays_independent(
                     return Resp("SYNTH" if request["model"] == "agg" else "proposal")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [
             {"model": "same", "base_url": "https://route.example/api",
@@ -308,7 +307,7 @@ def test_same_mixture_route_with_different_credentials_stays_independent(
 
 
 def test_request_timeouts_are_role_bounded(monkeypatch):
-    """Chat uses 45s while offline calls and SDK defaults use 120s."""
+    """Chat uses 45s while offline calls and Pi defaults use 120s."""
     requests = []
     clients = []
 
@@ -328,13 +327,13 @@ def test_request_timeouts_are_role_bounded(monkeypatch):
                     return Resp()
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings())
     assert llm.complete("chat", role="chat", mixture=False) == "ok"
     assert llm.complete("batch", role="pipeline", mixture=False) == "ok"
     assert llm.force_probe("doctor") == "ok"
 
-    assert clients[0]["timeout"] == 120 and clients[0]["max_retries"] == 0
+    assert clients[0]["timeout"] == 120
     assert [request["timeout"] for request in requests] == [45, 120, 45]
 
 
@@ -359,7 +358,7 @@ def test_all_hung_chat_mixture_returns_at_latency_bound(monkeypatch):
                     return Resp()
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     monkeypatch.setattr(llm_mod, "_INTERACTIVE_TIMEOUT_S", 0.05)
     llm = LLM(_settings(
         moa_chat_proposer_timeout_s=10,
@@ -399,7 +398,7 @@ def test_zero_chat_proposer_timeout_preserves_wait_for_all(monkeypatch):
                     return Resp("SYNTH" if model == "agg" else f"proposal-{model}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     # A regression that translated configured 0 into this outer timeout would
     # abandon ``slow`` and skip synthesis. Per-request fakes ignore the value.
     monkeypatch.setattr(llm_mod, "_INTERACTIVE_TIMEOUT_S", 0.01)
@@ -439,7 +438,7 @@ def test_later_chat_layer_timeout_keeps_prior_proposals(monkeypatch):
                     return Resp("SYNTH" if model == "agg" else f"first-{model}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     monkeypatch.setattr(llm_mod, "_INTERACTIVE_TIMEOUT_S", 0.05)
     llm = LLM(_settings(
         moa_chat_proposer_timeout_s=10,
@@ -472,7 +471,7 @@ def test_mixture_survives_one_dead_proposer(monkeypatch):
                     return Resp("live-answer")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [{"model": "dead"}, {"model": "live"}],
         "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
@@ -511,7 +510,7 @@ def test_mixture_layers_refine(monkeypatch):
     # then a single final aggregation. Previously untested.
     make_client, calls = _mixture_client(
         {"m1": "ans-m1", "m2": "ans-m2", "agg": "FINAL"})
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [{"model": "m1"}, {"model": "m2"}],
         "aggregator": {"model": "agg"}, "layers": 3, "roles": ["pipeline"]}))
@@ -533,7 +532,7 @@ def test_mixture_survives_dead_aggregator(monkeypatch):
         raise ValueError("aggregator auth failed")
     make_client, _ = _mixture_client(
         {"m1": "proposal-m1", "m2": "proposal-m2", "agg": boom})
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [{"model": "m1"}, {"model": "m2"}],
         "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
@@ -546,20 +545,12 @@ def test_mixture_empty_aggregator_falls_back(monkeypatch):
     # don't hand back an empty MoA answer when a proposer succeeded.
     make_client, _ = _mixture_client(
         {"m1": "proposal-m1", "m2": "proposal-m2", "agg": "   "})
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [{"model": "m1"}, {"model": "m2"}],
         "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
     out = llm.complete("x", role="pipeline")
     assert out in ("proposal-m1", "proposal-m2")   # not the empty aggregator output
-
-
-def test_retry_policy_lives_on_call_not_complete():
-    # Platform-owned retry stays on each underlying proposer/aggregator call;
-    # there is no SDK/tenacity wrapper that can multiply attempts invisibly.
-    assert llm_mod._RETRY_DELAYS_S == (1, 4)
-    assert not hasattr(LLM._call, "retry")
-    assert not hasattr(LLM.complete, "retry")
 
 
 # ── temporal anchor: appended to the user-content TAIL of every call, never
@@ -633,7 +624,7 @@ def test_anchor_never_mutates_shared_list_content(monkeypatch):
 def test_mixture_calls_each_carry_one_anchor(monkeypatch):
     _freeze_clock(monkeypatch)
     make_client, calls = _mixture_client({"m1": "a1", "m2": "a2", "agg": "FINAL"})
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [{"model": "m1"}, {"model": "m2"}],
         "aggregator": {"model": "agg"}, "roles": ["pipeline"]}))
@@ -682,7 +673,7 @@ def test_mixture_chat_abandons_slow_proposer(monkeypatch):
                     return Resp(f"answer-from-{model}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     settings = _settings(llm_mixture={
         "members": [{"model": "fastie"}, {"model": "slowpoke"}],
         "aggregator": {"model": "aggregator"},
@@ -784,7 +775,7 @@ def test_failed_call_span_has_safe_bounded_metadata(
         tracing._default.reset(token)
 
     spans = [s for s in tracing.load_spans(trace_path) if s["name"] == "llm"]
-    expected_attempts = 3 if llm_mod._is_transient(exc) else 1
+    expected_attempts = 1  # Pi owns its provider retries within this invocation.
     assert len(spans) == expected_attempts
     for span in spans:
         attrs = span["attr"]
@@ -824,7 +815,7 @@ def _scripted(monkeypatch, behavior, calls):
                     return Resp(behavior[kw["model"]](kw))
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
 
 
 def _mix_settings(**kw):
@@ -1050,7 +1041,7 @@ def test_mixture_observability_spans_and_durable_metrics(monkeypatch, tmp_path):
                     return _MoaResp(f"answer-from-{kw['model']}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     settings = _settings(llm_mixture={
         "members": [{"model": "m1"}, {"model": "m2"}],
         "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
@@ -1099,7 +1090,7 @@ def test_mixture_metrics_count_dead_proposer(monkeypatch):
                     return _MoaResp("survivor answer")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     settings = _settings(llm_mixture={
         "members": [{"model": "deadbeat"}, {"model": "ok-model"}],
         "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
@@ -1162,7 +1153,7 @@ def test_mixture_degraded_uses_final_layer_proposal_count(monkeypatch):
                     return _MoaResp(f"proposal-{model}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     settings = _settings(llm_mixture={
         "members": [{"model": "m1"}, {"model": "m2"}],
         "aggregator": {"model": "aggregator"},
@@ -1189,7 +1180,7 @@ def test_mixture_metrics_count_failed_aggregator(monkeypatch):
                     return _MoaResp(f"proposal-{kw['model']}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     settings = _settings(llm_mixture={
         "members": [{"model": "m1"}, {"model": "m2"}],
         "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
@@ -1216,7 +1207,7 @@ def test_mixture_metrics_record_fallback(monkeypatch):
                     raise RuntimeError("all proposers down")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     settings = _settings(llm_mixture={
         "members": [{"model": "p1"}, {"model": "p2"}],
         "aggregator": {"model": "aggregator"}, "roles": ["pipeline"]})
@@ -1297,7 +1288,7 @@ def test_mixture_member_carries_its_own_thinking(monkeypatch):
                     return _ThinkResp()
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     llm = LLM(_settings(llm_mixture={
         "members": [{"model": "p1", "thinking": "disabled"}, {"model": "p2"}],
         "aggregator": {"model": "agg", "thinking": "adaptive"},

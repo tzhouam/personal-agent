@@ -1,0 +1,21 @@
+{
+  "name": "personal-agent-pi-host",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "piSource": {
+    "repository": "https://github.com/tzhouam/pi",
+    "upstream": "https://github.com/earendil-works/pi",
+    "revision": "c9f4c7b9fcd0f3e6b5bbc35c7c9b6cda35580eb8",
+    "version": "1.4.0"
+  },
+  "engines": { "node": ">=22.19.0" },
+  "scripts": {
+    "check": "node --check src/host.mjs && node --check src/session.mjs && node --check src/network.mjs && node --check test/session.test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "undici": "8.10.2"
+  }
+}

@@ -1,12 +1,11 @@
 [project]
 name = "personal-assistant-agent"
 version = "0.1.0"
-description = "Daily self-assistant: profile maintenance, GitHub digest, research digest, resume sync"
+description = "Pi-based personal agent with Slack/QQ, durable memory, skills and project execution"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.40",
     "httpx>=0.27",
-    "langgraph>=1.0",
     "pydantic>=2.7",
     "pydantic-settings>=2.2",
     "PyYAML>=6.0",
@@ -15,6 +14,7 @@ dependencies = [
     # AES-GCM for the website's encrypted private pages + the WeCom callback
     # crypto — undeclared until 2026-07-27, which broke a fresh-venv deploy.
     "cryptography>=42",
+    "websockets>=14,<18",
 ]
 
 [project.scripts]
@@ -27,3 +27,11 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["assistant*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+"assistant.agent.runtime" = ["skill_library/**/*.md"]
+"assistant.platform.runtime" = ["pi_host/package.json", "pi_host/package-lock.json", "pi_host/src/*.mjs"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["**/node_modules/**"]

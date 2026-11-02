@@ -1,25 +1,27 @@
-"""Thin Anthropic client wrapper for the agent.
+"""Pi-backed model interface for retained personal skills.
 
-Exports the ``LLM`` class: traced provider calls with platform-owned bounded
-retry, durable route quarantine, and a JSON-coercing convenience method. Keeps
-every call site provider-agnostic and degrade-friendly.
+Exports ``LLM`` with role routing, domain synthesis, durable route health and
+JSON recovery. Actual provider requests and retries belong to the Pi SDK.
 """
 
+from dataclasses import replace
 import json
 import re
 import threading
 import time as _time
+from types import SimpleNamespace
 
 import anthropic
 
 from assistant.platform.config import Settings
 from assistant.platform.llm_health import RouteHealthStore
 from assistant.platform.llm_health import route_scopes as _durable_route_scopes
+from assistant.platform.runtime.config import load_runtime_config
+from assistant.platform.runtime.contracts import BackendRequest
+from assistant.platform.runtime.pi import build_pi_backend
 
-_RETRY_DELAYS_S = (1, 4)
 _STRUCTURED_TOKEN_CAP = 16_000
 _AUTH_PROVIDER_CODES = frozenset({"authentication_error", "invalid_api_key"})
-_sleep = _time.sleep
 
 
 _CHEAP_ROLES = frozenset({"cheap", "bulk", "research", "score"})
@@ -326,25 +328,6 @@ def _classify_failure(exc) -> str | None:
     return None
 
 
-def _is_transient(exc) -> bool:
-    """Whether the platform may retry this failure within its three attempts."""
-    if _status_code(exc) in (401, 403):
-        return False
-    if isinstance(exc, (anthropic.APIConnectionError,
-                        anthropic.RateLimitError,
-                        anthropic.InternalServerError)):
-        return True
-    status = _status_code(exc)
-    if status == 429 or (isinstance(status, int) and status >= 500):
-        return True
-    try:
-        import httpx
-
-        return isinstance(exc, httpx.TransportError)
-    except Exception:
-        return False
-
-
 def _request_timeout_s(role: str | None) -> int:
     """Bound provider requests: interactive chat 45s, offline work 120s."""
     return _INTERACTIVE_TIMEOUT_S if role == "chat" else _OFFLINE_TIMEOUT_S
@@ -444,11 +427,61 @@ def _breaker_record(scopes: tuple, gens: dict, claimed: frozenset,
                 e["lease_ts"] = 0.0
 
 
-class LLM:
-    """Anthropic chat client with per-role model routing.
+class _PiClient:
+    """Keep the old message-response shape while Pi owns provider execution."""
 
-    The ``ANTHROPIC_*`` settings are the default provider (base URL + key) and
-    model. ``settings.llm_roles`` (the ``LLM_ROLES`` JSON map) can route named
+    def __init__(self, *, route, data_dir, base_url=None, api_key=None,
+                 timeout=_OFFLINE_TIMEOUT_S):
+        """Bind a route without constructing another provider SDK client."""
+        self.route = replace(route, base_url=base_url or route.base_url,
+                             api_key=api_key or route.api_key)
+        self.data_dir, self.timeout = data_dir, timeout
+        self.messages = self
+
+    def create(self, *, model, messages, max_tokens, system="", timeout=None,
+               thinking=None):
+        """Delegate one bounded completion to an actual Pi session."""
+        prompt = messages[-1]["content"]
+        images = []
+        if isinstance(prompt, list):
+            for block in prompt:
+                if block.get("type") == "image":
+                    source = block.get("source", {})
+                    if source.get("type") != "base64":
+                        raise ValueError("workflow images require inline base64 content")
+                    images.append({"type": "image", "data": source["data"],
+                                   "mimeType": source["media_type"]})
+            prompt = "\n".join(block.get("text", "") for block in prompt
+                               if block.get("type") == "text")
+        route = replace(self.route, model=model or self.route.model)
+        backend = build_pi_backend(route, self.data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        request = BackendRequest(messages=[{"role": "user", "content": prompt}],
+                                 system=system or "", cwd=self.data_dir,
+                                 timeout=timeout or self.timeout, max_tokens=max_tokens,
+                                 images=images,
+                                 # Legacy adaptive selects Pi's medium budget;
+                                 # explicit Pi configuration supports its full levels.
+                                 thinking_level=({"disabled": "off", "adaptive": "medium"}
+                                                 .get((thinking or {}).get("type"), "")))
+        result = backend.complete(request)
+        stop_reason = "max_tokens" if result.finish_reason == "length" else "end_turn"
+        values = result.usage or {}
+        usage = SimpleNamespace(
+            input_tokens=values.get("input", values.get("input_tokens", 0)),
+            output_tokens=values.get("output", values.get("output_tokens", 0)),
+            cache_read_input_tokens=values.get("cacheRead", values.get("cache_read_input_tokens", 0)),
+            cache_creation_input_tokens=values.get("cacheWrite", values.get("cache_creation_input_tokens", 0)))
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text=result.text)],
+                               stop_reason=stop_reason, usage=usage)
+
+
+class LLM:
+    """Pi-backed model client with per-role model routing.
+
+    The selected runtime route supplies the default provider and model;
+    ``ANTHROPIC_*`` remains the compatibility configuration for Anthropic.
+    ``settings.llm_roles`` (the ``LLM_ROLES`` JSON map) can route named
     task roles to a different model and — since a different model often lives
     on a different endpoint — a different base URL + key, so e.g. chat runs on
     mimo-v2.5 while research runs on qwen3.6-plus at the same time. A role with
@@ -464,10 +497,18 @@ class LLM:
         module imports no agent code (the events.db sink is agent-owned); when
         omitted it falls back to the registered default (`agent.observability`),
         and if nothing is registered, MoA metrics are silently skipped."""
+        route = load_runtime_config(settings).route()
+        self._runtime_route = route
+        # Preserve the historical role/health interface using the selected
+        # route's actual defaults, including OpenAI-compatible routes.
+        settings = settings.model_copy(update={
+            "anthropic_api_key": route.api_key,
+            "anthropic_base_url": route.base_url,
+            "anthropic_model": route.model})
         self.settings = settings
         self.metrics_sink = metrics_sink
         self.default_model = settings.anthropic_model
-        self.cheap_model = settings.cheap_model
+        self.cheap_model = settings.cheap_model if route.kind == "anthropic" else route.model
         self.roles: dict = dict(settings.llm_roles or {})
         # LLM_REVIEW seeds the "review" role (an explicit LLM_ROLES entry
         # wins): the strongest-reasoning slot for plan/design review — always
@@ -495,19 +536,17 @@ class LLM:
                                    settings.anthropic_api_key)
 
     def _client(self, base_url: str | None, api_key: str | None):
-        """Return an Anthropic client for (base_url, key), building and caching
+        """Return a Pi adapter for (base_url, key), building and caching
         one per distinct provider; blanks fall back to the default provider."""
         base_url = base_url or self.settings.anthropic_base_url
         api_key = api_key or self.settings.anthropic_api_key
         cache_key = (base_url, api_key)
         if cache_key not in self._clients:
-            # The SDK otherwise retries twice internally, multiplying the
-            # platform's explicit three-attempt policy into hidden attempts.
-            kwargs: dict = {"api_key": api_key, "max_retries": 0,
-                            "timeout": _OFFLINE_TIMEOUT_S}
+            kwargs: dict = {"api_key": api_key, "timeout": _OFFLINE_TIMEOUT_S,
+                            "route": self._runtime_route, "data_dir": self.settings.data_dir}
             if base_url:
                 kwargs["base_url"] = base_url
-            self._clients[cache_key] = anthropic.Anthropic(**kwargs)
+            self._clients[cache_key] = _PiClient(**kwargs)
         return self._clients[cache_key]
 
     def _resolve(self, role: str | None, model: str | None):
@@ -614,11 +653,9 @@ class LLM:
         is MoA-configured — the escape hatch for latency/cost-floor calls
         (task-tier classification, simple/medium task turns) that must never
         pay the ~2× MoA overhead. Each underlying API call (``_call``) is
-        traced, retried on transient errors, and retains ``stop_reason`` on its
-        string-compatible result. Retry lives on
-        ``_call`` (not here) so a mixture's proposers and aggregator each get
-        their own retry rather than being dropped on the first blip, and an
-        aggregator retry doesn't re-run every proposer."""
+        traced and retains ``stop_reason`` on its string-compatible result.
+        Pi owns provider retries within each proposer or aggregator session;
+        a provider retry never reruns every proposer."""
         content: str | list = prompt
         if images:
             content = [_image_block(p) for p in images] + [
@@ -709,10 +746,9 @@ class LLM:
         shared core of the single-model and mixture paths. ``span_attrs`` ride
         on the ``llm`` span — the mixture path tags each call with its stage
         (proposer/aggregator/fallback) so MoA overhead is measurable per call.
-        The platform makes at most three transient attempts, with 1s and 4s
-        waits; SDK retries are disabled. 401/403 are never retried and instead
-        enter the durable deployment-wide quarantine. ``allow_quarantined`` is
-        reserved for the explicit operator health probe.
+        Pi owns transient retries. This layer invokes it once, and retains
+        durable auth quarantine when structured provider status is available.
+        ``allow_quarantined`` is reserved for an explicit operator health probe.
 
         Appends the temporal anchor to the TAIL of the user content — the
         model's only reliable clock. Tail placement adds nothing before any
@@ -745,30 +781,18 @@ class LLM:
             kwargs["thinking"] = thinking
         from assistant.platform import tracing
 
-        resp = None
-        for attempt in range(1, len(_RETRY_DELAYS_S) + 2):
-            if scopes is not None and attempt > 1 and not allow_quarantined:
-                quarantined = self._quarantine_scope(scopes)
-                if quarantined:
-                    raise RouteQuarantinedError(quarantined)
-            with tracing.span("llm", model=model_id, max_tokens=max_tokens,
-                              retry_attempt=attempt,
-                              **(span_attrs or {})) as _sp:
-                try:
-                    resp = client.messages.create(**kwargs)
-                except Exception as exc:
-                    _sp.set(**_failure_span_attrs(exc))
-                    auth_scope = _auth_quarantine_scope(exc)
-                    if auth_scope and scopes is not None:
-                        self._quarantine(scopes, auth_scope)
-                    if attempt > len(_RETRY_DELAYS_S) or not _is_transient(exc):
-                        raise
-                else:
-                    tracing.set_usage(
-                        _sp, getattr(resp, "usage", None),
-                        stop_reason=getattr(resp, "stop_reason", "") or "")
-                    break
-            _sleep(_RETRY_DELAYS_S[attempt - 1])
+        with tracing.span("llm", model=model_id, max_tokens=max_tokens,
+                          retry_attempt=1, **(span_attrs or {})) as _sp:
+            try:
+                resp = client.messages.create(**kwargs)
+            except Exception as exc:
+                _sp.set(**_failure_span_attrs(exc))
+                auth_scope = _auth_quarantine_scope(exc)
+                if auth_scope and scopes is not None:
+                    self._quarantine(scopes, auth_scope)
+                raise
+            tracing.set_usage(_sp, getattr(resp, "usage", None),
+                              stop_reason=getattr(resp, "stop_reason", "") or "")
 
         stop_reason = getattr(resp, "stop_reason", "") or ""
         if stop_reason == "max_tokens":

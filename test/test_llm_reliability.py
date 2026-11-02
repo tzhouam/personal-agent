@@ -1,4 +1,4 @@
-"""LLM retry, structured-output recovery, and durable route-health policy."""
+"""Pi delegation, structured-output recovery, and durable route-health policy."""
 
 import sqlite3
 
@@ -36,8 +36,7 @@ class _Err(Exception):
 
 @pytest.fixture(autouse=True)
 def _isolate_policy(monkeypatch):
-    """Keep sleeps instant and process-local breaker state test-independent."""
-    monkeypatch.setattr(llm_mod, "_sleep", lambda _seconds: None)
+    """Keep process-local breaker state test-independent."""
     llm_mod._reset_breaker()
     yield
     llm_mod._reset_breaker()
@@ -72,43 +71,42 @@ def _install_factory(monkeypatch, handler, made=None):
         made.append(client_kwargs)
         return Client(client_kwargs)
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", factory)
+    monkeypatch.setattr(llm_mod, "_PiClient", factory)
     return made
 
 
-def test_sdk_retries_are_disabled_on_every_client(monkeypatch, tmp_path):
-    """SDK defaults cannot multiply the platform's three-attempt ceiling."""
+def test_optional_endpoint_preserves_the_selected_pi_protocol(monkeypatch, tmp_path):
+    """Role endpoints use Pi adapters with the same configured API protocol."""
     made = _install_factory(monkeypatch, lambda _client, _request: _Resp())
     llm = LLM(_settings(tmp_path, llm_roles={
         "research": {"model": "other", "base_url": "https://other.example",
                      "api_key": "other-key"}}))
     llm._resolve("research", None)
     assert len(made) == 2
-    assert all(client["max_retries"] == 0 for client in made)
+    assert all(client["route"].kind == "anthropic" for client in made)
 
 
 @pytest.mark.parametrize("failure", [_Err(429), _Err(503)])
-def test_transient_status_retries_three_total_with_one_four_waits(
+def test_transient_status_delegates_retry_policy_to_pi(
         monkeypatch, tmp_path, failure):
-    """429/5xx get exactly two platform waits and three total attempts."""
+    """A terminal Pi failure never starts another Python retry window."""
     calls = []
     waits = []
 
     def handler(_client, _request):
         calls.append(1)
-        if len(calls) < 3:
-            raise failure
-        return _Resp("recovered")
+        raise failure
 
     _install_factory(monkeypatch, handler)
-    monkeypatch.setattr(llm_mod, "_sleep", waits.append)
-    assert LLM(_settings(tmp_path)).complete("PRIVATE_PROMPT") == "recovered"
-    assert len(calls) == 3
-    assert waits == [1, 4]
+    monkeypatch.setattr(llm_mod._time, "sleep", waits.append)
+    with pytest.raises(_Err):
+        LLM(_settings(tmp_path)).complete("PRIVATE_PROMPT")
+    assert len(calls) == 1
+    assert waits == []
 
 
-def test_transport_retries_at_most_three_total(monkeypatch, tmp_path):
-    """Transport exhaustion is bounded even when every attempt fails."""
+def test_transport_failure_does_not_multiply_pi_retries(monkeypatch, tmp_path):
+    """A failed Pi invocation is propagated after exactly one Python call."""
     import httpx
 
     calls = []
@@ -122,11 +120,11 @@ def test_transport_retries_at_most_three_total(monkeypatch, tmp_path):
         raise error
 
     _install_factory(monkeypatch, handler)
-    monkeypatch.setattr(llm_mod, "_sleep", waits.append)
+    monkeypatch.setattr(llm_mod._time, "sleep", waits.append)
     with pytest.raises(httpx.ConnectError):
         LLM(_settings(tmp_path)).complete("PRIVATE_PROMPT")
-    assert len(calls) == 3
-    assert waits == [1, 4]
+    assert len(calls) == 1
+    assert waits == []
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -140,7 +138,7 @@ def test_auth_and_permission_are_never_retried(monkeypatch, tmp_path, status):
         raise _Err(status)
 
     _install_factory(monkeypatch, handler)
-    monkeypatch.setattr(llm_mod, "_sleep", waits.append)
+    monkeypatch.setattr(llm_mod._time, "sleep", waits.append)
     with pytest.raises(_Err):
         LLM(_settings(tmp_path)).complete("PRIVATE_PROMPT")
     assert len(calls) == 1
@@ -523,7 +521,7 @@ def test_explicit_route_probe_clears_only_that_model_quarantine(
     assert llm._quarantine_scope(sibling) == "model"
     assert calls[-1][0]["base_url"] == base_url
     assert calls[-1][0]["api_key"] == api_key
-    assert calls[-1][0]["max_retries"] == 0
+    assert calls[-1][0]["route"].kind == "anthropic"
     assert calls[-1][1] == "target-model"
 
 

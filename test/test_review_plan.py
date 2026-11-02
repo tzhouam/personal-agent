@@ -56,7 +56,7 @@ def test_llm_review_config_degrades_and_routes(monkeypatch):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(llm_mod, "_PiClient", FakeClient)
     llm = LLM(_settings(anthropic_api_key="k",
                         llm_review={"model": "big-brain",
                                     "base_url": "https://strong.example/anthropic",

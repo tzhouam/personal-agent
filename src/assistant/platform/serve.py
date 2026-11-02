@@ -91,6 +91,12 @@ class ServeServices:
     channel_health: Callable = staticmethod(lambda: {})
     #                            () -> dict  (extra /healthz fields — channel
     #                            liveness the platform can't see itself)
+    handle_runtime_turn: Callable | None = None
+    # (text, settings, *, session, history, image_paths, rejected_images) -> turn
+    runtime_settings_factory: Callable | None = None
+    # () -> fresh root Settings, retaining boot-time runtime configuration
+    resolve_runtime_settings: Callable | None = None
+    # (uid) -> scoped Settings rooted at the configured deployment directory
 
 
 _default_services: "Callable[[], ServeServices] | None" = None
@@ -113,6 +119,27 @@ def _resolve_services(services):
             "serve services not configured — import assistant.agent.app to "
             "register them, or pass services= explicitly")
     return _default_services()
+
+
+def _invoke_turn(services, text, settings, make_llm, *, session,
+                 history=None, image_paths=None, rejected_images=None):
+    """Select a native runtime before constructing an API-specific LLM client."""
+    runtime = getattr(services, "handle_runtime_turn", None)
+    arguments = {"history": history, "image_paths": image_paths,
+                 "rejected_images": rejected_images}
+    if runtime is not None:
+        return runtime(text, settings, session=session, **arguments)
+    return services.handle_turn(text, settings, make_llm(settings), **arguments)
+
+
+def _runtime_user_settings(services, uid: str, base: Settings) -> Settings:
+    """Resolve authenticated users without replacing the boot deployment root."""
+    resolver = getattr(services, "resolve_runtime_settings", None)
+    if resolver is not None:
+        return resolver(uid)
+    if getattr(services, "runtime_settings_factory", None) is not None:
+        return Settings.for_user(uid, base=base)
+    return Settings.for_user(uid)
 
 
 class SessionStore:
@@ -498,7 +525,7 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                     raise Unauthorized("bad or missing bearer token")
                 return DEFAULT_UID, base, sessions, ""
             uid = resolve_uid(self._bearer(), body, base, UserRegistry(base.data_dir))
-            us = Settings.for_user(uid)
+            us = _runtime_user_settings(services, uid, base)
             store = SessionStore(us.data_dir, keep=us.serve_session_turns,
                                  context_hours=us.chat_history_max_age_hours,
                                  retention_days=us.chat_history_retention_days)
@@ -679,10 +706,10 @@ def make_server(settings_factory=Settings, llm_factory=None, port: int | None = 
                     history = store.history(skey)
                     prev_ref = history[-1] if history else None  # the turn the
                     #             model will judge — captured BEFORE the turn
-                    turn = services.handle_turn(text, settings, make_llm(settings),
-                                                history=history,
-                                                image_paths=images or None,
-                                                rejected_images=img_notes or None)
+                    turn = _invoke_turn(services, text, settings, make_llm,
+                                        session=skey, history=history,
+                                        image_paths=images or None,
+                                        rejected_images=img_notes or None)
                     reply = turn.reply
                     noted = text + (f" [{len(images)} image(s) attached]" if images else "")
                     store.append(skey, noted.strip(), reply, outcome=turn.outcome,
@@ -876,9 +903,11 @@ def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
                              prev_verdict=turn.prev_verdict, prev_ref=_p)
 
             try:
+                llm = (None if getattr(services, "handle_runtime_turn", None)
+                       else make_llm(user))
                 settled = _process_email_ledger(email, message, user,
-                                                make_llm(user), services,
-                                                _append)
+                                                llm, services, _append,
+                                                session=skey)
             except Exception:
                 log.exception("email ledger processing failed for %s", user.uid)
                 settled = False
@@ -886,10 +915,10 @@ def _tick_user_email(services, user: Settings, make_llm, polled: set) -> None:
                 break   # head-of-line: retry next cycle
             continue
         try:
-            turn = services.handle_turn(message["text"], user, make_llm(user),
-                                        history=store.history(skey),
-                                        image_paths=message.get("images"),
-                                        rejected_images=message.get("rejected_images"))
+            turn = _invoke_turn(services, message["text"], user, make_llm,
+                                session=skey, history=store.history(skey),
+                                image_paths=message.get("images"),
+                                rejected_images=message.get("rejected_images"))
             reply = turn.reply
             store.append(skey, message["text"], reply, outcome=turn.outcome,
                          repaired=turn.repaired, self_reported=turn.self_reported,
@@ -938,7 +967,7 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
     polled_mailboxes: set = set()
     for uid in UserRegistry(settings.data_dir).active():
         try:
-            user = Settings.for_user(uid)
+            user = _runtime_user_settings(services, uid, settings)
         except Exception:
             log.exception("tick: Settings.for_user(%s) failed", uid)
             continue
@@ -960,7 +989,7 @@ def _tick_tenants(settings: Settings, now: "datetime | None" = None,
 
 
 def _process_email_ledger(channel, message, settings, llm, services,
-                          append_session) -> bool:
+                          append_session, *, session: str | None = None) -> bool:
     """Drive one ledger-tracked email message through its transitions (Track
     D §2). Returns True when the row settled (continue to younger mail) —
     False means it stayed nonterminal (head-of-line: stop this channel's
@@ -980,10 +1009,12 @@ def _process_email_ledger(channel, message, settings, llm, services,
     if token is None:
         return True   # raced/settled elsewhere
     try:
-        turn = services.handle_turn(message["text"], settings, llm,
-                                    history=message.pop("_history", None),
-                                    image_paths=message.get("images"),
-                                    rejected_images=message.get("rejected_images"))
+        turn = _invoke_turn(
+            services, message["text"], settings, lambda _settings: llm,
+            session=session or f"{settings.uid}:email:{message.get('sender', '')}",
+            history=message.pop("_history", None),
+            image_paths=message.get("images"),
+            rejected_images=message.get("rejected_images"))
     except Exception as exc:
         log.exception("email turn failed")
         channel.turn_failed(message, token, str(exc))
@@ -1066,9 +1097,11 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                                             prev_ref=_p)
 
                         try:
+                            llm = (None if getattr(services, "handle_runtime_turn", None)
+                                   else make_llm(settings))
                             settled = _process_email_ledger(
-                                channel, message, settings,
-                                make_llm(settings), services, _append)
+                                channel, message, settings, llm, services, _append,
+                                session=f"{settings.uid}:{session}")
                         except Exception:
                             log.exception("email ledger processing failed")
                             settled = False
@@ -1076,8 +1109,9 @@ def _chat_poll_loop(settings_factory, sessions: SessionStore,
                             break   # head-of-line: retry next cycle
                         continue
                     try:
-                        turn = services.handle_turn(
-                            message["text"], settings, make_llm(settings),
+                        turn = _invoke_turn(
+                            services, message["text"], settings, make_llm,
+                            session=f"{settings.uid}:{session}",
                             history=sessions.history(session),
                             image_paths=message.get("images"),
                             rejected_images=message.get("rejected_images"))
@@ -1169,7 +1203,11 @@ def run_serve(settings: Settings, services=None) -> int:
     if not services.acquire_pid_lock(settings):  # same lock as chat-listen: one inbox reader
         return 1
 
-    server = make_server(services=services)
+    settings_factory = getattr(services, "runtime_settings_factory", None) or Settings
+    if getattr(services, "runtime_settings_factory", None) is not None:
+        server = make_server(settings_factory=settings_factory, services=services)
+    else:
+        server = make_server(services=services)
 
     # Everything after the listener exists runs under one try/finally: a
     # failure while starting the QR refresher, poll thread, or worker pool
@@ -1198,7 +1236,7 @@ def run_serve(settings: Settings, services=None) -> int:
         #                                           + consecutive-failure count
         poller = threading.Thread(
             target=_chat_poll_loop,
-            args=(Settings, server.sessions, stop),
+            args=(settings_factory, server.sessions, stop),
             kwargs={"services": services, "heartbeat": heartbeat},
             name="chat-poll", daemon=True)
         poller.start()
@@ -1212,12 +1250,21 @@ def run_serve(settings: Settings, services=None) -> int:
         # services (agent-owned) so this platform module never imports agent
         # code.
         if settings.deployment_mode == "multi_tenant":
-            from assistant.platform.jobs import JobQueue
+            from assistant.platform.jobs import GLOBAL_UID, JobQueue
             from assistant.platform.worker import WorkerPool
 
+            pool_options = {}
+            if (getattr(services, "runtime_settings_factory", None) is not None
+                    or getattr(services, "resolve_runtime_settings", None) is not None):
+                def _worker_settings(uid):
+                    """Global jobs use the configured root; tenant jobs stay scoped."""
+                    base = settings_factory()
+                    return base if uid == GLOBAL_UID else _runtime_user_settings(services, uid, base)
+
+                pool_options["settings_for"] = _worker_settings
             pool = WorkerPool(JobQueue(settings.shared_dir),
                               dispatch=services.worker_dispatch,
-                              max_workers=settings.job_workers)
+                              max_workers=settings.job_workers, **pool_options)
             pool.start()   # instance retained first: a partial start is still
             #                stoppable by the cleanup path
             log.info("serve: job worker pool started (%d workers)",

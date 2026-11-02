@@ -1,20 +1,17 @@
-"""LangGraph pipeline that runs the daily assistant.
+"""Run the daily personal skill as a deterministic, checkpointed workflow.
 
-Wires the nine phases (collect → profile → resume → digest → todos → research →
-website → deliver → curate) into a `StateGraph`, threading `AssistantState`
-through each node. Exports `Deps` (shared resource bundle), `build_graph`
-(assembles the compiled graph), and `run` (the single-run entry point with the
-resume-checkpoint and single-instance lock logic). Contract: every node
-degrades on failure — it logs, appends to `errors`, and advances rather than
-crashing the run."""
+The nine existing business phases share artifacts and stores; they do not
+control the agent's model loop. Pi can call this workflow as a skill while
+`run` retains its checkpoint, cancellation, and single-instance lock contract.
+Phase errors accumulate, and a failed delivery stays resumable at `deliver`.
+"""
 
 import fcntl
 import json
 import logging
 import time
+from collections.abc import Callable, Iterator, Mapping
 from datetime import date, datetime, timedelta, timezone
-
-from langgraph.graph import END, START, StateGraph
 
 from assistant.agent.collectors import REGISTRY
 from assistant.platform.config import Settings
@@ -104,12 +101,52 @@ class Deps:
         return json.loads(path.read_text()) if path.exists() else None
 
 
-def build_graph(deps: Deps):
-    """Assemble and compile the phase `StateGraph`, closing every node over
-    `deps`. Nodes are wrapped by `_instrumented` for per-phase metrics; the
-    conditional edge from START jumps to the `phase` recorded in state (for
-    `--resume`) or to `collect` for a fresh run, then phases run in the fixed
-    `_PHASES` order to END. Returns the compiled graph ready to `.invoke`."""
+class DailyWorkflow:
+    """Execute ordered business phases without a second agent runtime.
+
+    `stream` yields a full state before work and after every completed phase,
+    preserving cooperative cancellation at the same durable boundaries as
+    `run`. Only `errors` is additive; other outputs replace their prior value.
+    """
+
+    def __init__(self, handlers: Mapping[str, Callable[[AssistantState], dict]]):
+        """Keep the fixed phase order and reject incomplete workflow wiring."""
+        self._handlers = tuple((phase, handlers[phase]) for phase in _PHASES)
+
+    def stream(self, initial: AssistantState, *, stream_mode: str = "values"
+               ) -> Iterator[AssistantState]:
+        """Resume at the recorded phase and yield independent state snapshots.
+
+        Full-value streaming is the workflow's compatibility surface. A failed
+        delivery deliberately leaves `phase=deliver`; its following housekeeping
+        handler observes that checkpoint and skips, preserving retry behavior.
+        """
+        if stream_mode != "values":
+            raise ValueError("daily workflow supports only stream_mode='values'")
+        state: AssistantState = {**initial, "errors": list(initial.get("errors", []))}
+        yield {**state, "errors": list(state["errors"])}
+        start = state.get("phase", "collect")
+        first = _PHASES.index(start) if start in _PHASES else 0
+        for _, handler in self._handlers[first:]:
+            updates = handler(state)
+            errors = [*state["errors"], *(updates.get("errors") or [])]
+            state = {**state, **updates, "errors": errors}
+            yield {**state, "errors": list(errors)}
+
+    def invoke(self, initial: AssistantState) -> AssistantState:
+        """Return the completed state for callers that need no phase streaming."""
+        final = initial
+        for final in self.stream(initial):
+            pass
+        return final
+
+
+def build_graph(deps: Deps) -> DailyWorkflow:
+    """Bind the nine instrumented daily phases to their shared resources.
+
+    The historical function name remains for existing callers; the returned
+    workflow uses no graph framework and performs no agent/model orchestration.
+    """
     settings = deps.settings
 
     def _advance(phase: str) -> None:
@@ -482,18 +519,8 @@ def build_graph(deps: Deps):
     nodes = {"collect": node_collect, "profile": node_profile, "resume": node_resume,
              "digest": node_digest, "todos": node_todos, "research": node_research,
              "website": node_website, "deliver": node_deliver, "curate": node_curate}
-    graph = StateGraph(AssistantState)
-    for phase in _PHASES:
-        graph.add_node(phase, _instrumented(phase, nodes[phase]))
-    graph.add_conditional_edges(
-        START,
-        lambda s: s.get("phase") if s.get("phase") in _PHASES else "collect",
-        {p: p for p in _PHASES},
-    )
-    for a, b in zip(_PHASES, _PHASES[1:]):
-        graph.add_edge(a, b)
-    graph.add_edge(_PHASES[-1], END)
-    return graph.compile()
+    return DailyWorkflow({phase: _instrumented(phase, nodes[phase])
+                          for phase in _PHASES})
 
 
 def run(settings: Settings, dry_run: bool = False, resume: bool = False,
@@ -506,7 +533,7 @@ def run(settings: Settings, dry_run: bool = False, resume: bool = False,
     last unfinished run's `run_id` at its checkpointed phase and rehydrates the
     artifacts each downstream phase needs; otherwise mints a fresh timestamped
     `run_id` starting at `collect`. `dry_run` writes the digest but skips email.
-    Builds the graph and streams it phase by phase, records the run's
+    Streams the deterministic workflow phase by phase, records the run's
     duration/error metrics, and always closes stores and releases the lock.
     Returns 0 when the run reached `done`, else 1 (or 3 for the lock conflict).
 

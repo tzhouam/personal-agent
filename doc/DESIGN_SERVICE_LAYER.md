@@ -3,9 +3,15 @@
 Owner: Taichang Zhou (tzhouam)
 Status: **implemented v1.0 (2026-07-09)** — M1–M4 all landed; see §7 for the
 decisions taken and the one manual cutover step (gateway restart).
+This is a historical service-layer design. The current default uses actual
+Pi SDK 1.4.0 for model/tool execution, native Slack/QQ adapters and durable Pi
+JSONL sessions; see [RUNTIME_V2.md](RUNTIME_V2.md). Python retains the service
+and personal tools. The nine daily phases now use a framework-free deterministic
+workflow; LangGraph is no longer installed.
+
 Supersedes nothing — refines the runtime topology of [DESIGN.md](DESIGN.md) §8 and
-[WECHAT_OPENCLAW.md](WECHAT_OPENCLAW.md); the LangGraph pipeline and all task
-semantics are **unchanged**.
+[WECHAT_OPENCLAW.md](WECHAT_OPENCLAW.md) at the time of the v1 redesign. Later
+Pi/runtime changes supersede the agent topology described below.
 
 > **Scope note (2026-07-16):** this doc describes the **`single_user`**
 > deployment. In `multi_tenant` ([DESIGN_MULTI_USER.md](DESIGN_MULTI_USER.md))
@@ -56,7 +62,7 @@ correct in philosophy but has five concrete frictions:
                │ calls
 ┌──────────────┴─────────────────────────────────────────────┐
 │ L1 · Core (UNCHANGED)                                      │
-│   LangGraph 9-phase StateGraph · ProfileStore · TodoStore  │
+│   Checkpointed nine-phase workflow · ProfileStore         │
 │   EventsStore · research pipeline · resume approval gate   │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -144,8 +150,9 @@ before anything reaches L3 — the token just stops other local processes.
 
 ### 3.5 Channel consolidation (friction 3, later)
 
-- **Slack**: dropped entirely (owner decision, 2026-07-09) — the adapter,
+- **Slack (historical v1 decision)**: dropped (2026-07-09) — the adapter,
   settings, and env vars were removed; no OpenClaw Slack channel either.
+  The current Pi runtime restores Slack through its native Socket Mode adapter.
 - **Email**: stays Python forever (OpenClaw has no IMAP channel); it now lives
   inside the daemon instead of a separate process.
 - **WeCom adapter** (`wecom.py`): keep dormant as the fallback WeChat path;
@@ -153,7 +160,8 @@ before anything reaches L3 — the token just stops other local processes.
 
 ## 4. What explicitly does not change
 
-- The LangGraph 9-phase graph, its resume semantics, run artifacts, flock.
+- The nine daily phases, resume semantics, run artifacts and flock. The current
+  implementation uses a deterministic driver rather than a graph framework.
 - Typed-actions-executed-by-code safety model; outcomes appended from what
   code did, never from LLM claims.
 - Resume approval gate; profile education/experience protection; website
