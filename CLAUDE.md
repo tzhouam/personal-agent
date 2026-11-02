@@ -31,6 +31,20 @@ Scripts under `scripts/` and `systemd/` are written for the **deployed** contain
 
 ## Architecture
 
+The default `ask`, `chat`, `task`, and `serve` commands use the rewritten runtime
+through `runtime_cli.py`. Its design, migration boundaries and operational commands
+are in `doc/RUNTIME_V2.md`; the current work checkpoint is `REWRITE_TODO.md`.
+`platform/runtime/` owns provider/channel contracts and durable infrastructure;
+`agent/runtime/` owns the bounded kernel, personal memory, executable skills and
+registered project execution. Legacy daily workflows remain trusted skill handlers;
+`assistant legacy <command>` explicitly selects the preserved old entrypoint.
+
+Do not treat native CLI tools as host-controlled function tools. Codex routes
+ignore inherited extensions/MCP settings while retaining authentication; other
+native runners require the documented explicit opt-in for unconstrained execution.
+Only operator-registered verification argv may execute project code on the trusted
+host by default, and receipts must label that isolation boundary honestly.
+
 Full map: `doc/DESIGN.md`. Multi-tenant: `doc/DESIGN_MULTI_USER.md`. Runtime topology: `doc/DESIGN_SERVICE_LAYER.md`.
 
 ### The one hard structural rule

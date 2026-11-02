@@ -464,6 +464,14 @@ class LLM:
         module imports no agent code (the events.db sink is agent-owned); when
         omitted it falls back to the registered default (`agent.observability`),
         and if nothing is registered, MoA metrics are silently skipped."""
+        if settings.runtime_backend == "anthropic":
+            from assistant.platform.runtime.config import load_runtime_config
+
+            route = load_runtime_config(settings).route()
+            settings = settings.model_copy(update={
+                "anthropic_api_key": route.api_key,
+                "anthropic_base_url": route.base_url,
+                "anthropic_model": route.model})
         self.settings = settings
         self.metrics_sink = metrics_sink
         self.default_model = settings.anthropic_model
@@ -491,8 +499,17 @@ class LLM:
                 "LLM route health store unavailable; durable quarantine disabled",
                 exc_info=True)
             self._health = None
-        self.client = self._client(settings.anthropic_base_url,
-                                   settings.anthropic_api_key)
+        self._runtime_backend = None
+        if settings.runtime_backend and settings.runtime_backend != "anthropic":
+            from assistant.platform.runtime.backends import build_backend
+            from assistant.platform.runtime.config import load_runtime_config
+
+            config = load_runtime_config(settings)
+            self._runtime_backend = build_backend(config.route())
+            self.client = None
+        else:
+            self.client = self._client(settings.anthropic_base_url,
+                                       settings.anthropic_api_key)
 
     def _client(self, base_url: str | None, api_key: str | None):
         """Return an Anthropic client for (base_url, key), building and caching
@@ -619,6 +636,19 @@ class LLM:
         ``_call`` (not here) so a mixture's proposers and aggregator each get
         their own retry rather than being dropped on the first blip, and an
         aggregator retry doesn't re-run every proposer."""
+        if getattr(self, "_runtime_backend", None) is not None:
+            from assistant.platform.runtime.contracts import BackendRequest
+
+            if images:
+                raise ValueError("this workflow backend does not support image attachments; "
+                                 "configure a vision API or use the legacy multimodal route")
+            self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+            result = self._runtime_backend.complete(BackendRequest(
+                messages=[{"role": "user", "content": prompt}],
+                system=system or "", cwd=self.settings.data_dir,
+                timeout=_request_timeout_s(role), max_tokens=max_tokens))
+            reason = "max_tokens" if result.finish_reason == "length" else result.finish_reason
+            return CompletionText(result.text, reason)
         content: str | list = prompt
         if images:
             content = [_image_block(p) for p in images] + [

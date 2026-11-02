@@ -1,247 +1,223 @@
 # personal-agent
 
-> [!TIP]
-> **Just want to get running?** → **[Interactive quick start ↗](https://tzhouam.github.io/personal-agent/quickstart.html)** — bilingual, narrated, about five minutes.
+A personal agent that chats through **Slack, QQ, WeChat or email**, works on your
+registered projects, and remembers the decisions behind them. Choose an API model
+or an authenticated local Codex, Claude Code, Gemini or Pi CLI. Existing personal
+workflows are discoverable skills rather than the shape of the agent's main loop.
 
-A daily self-assistant that keeps a living picture of *you* and turns your own
-activity into something useful every morning. It reads what you did (GitHub,
-email, browser history), maintains an evidence-backed profile of your skills
-and projects, publishes a personal website and résumé from it, and emails you
-a triaged digest — action-needed notifications, new papers worth reading, and
-industry news. Chat with it over WeChat or email: ask questions, send photos
-and receipts, track your money and health, or hand it multi-step tasks it
-executes on its own and reports back.
+The new default is a small tool-based runtime with durable conversations, project
+jobs, sourced memory and explicit approvals. The original daily assistant remains
+available: profile maintenance, GitHub and research digests, reading and todos,
+finance and health records, website publishing, résumé proposals, reminders,
+routines and reusable workflows.
 
-Everything runs locally and stores your data on your own machine; the only
-things that leave are LLM API calls, the digest email, and the sites/repos you
-explicitly point it at.
+[Runtime guide](doc/RUNTIME_V2.md) · [Configuration example](runtime.example.toml) ·
+[Existing personal-workflow guide](doc/USER_GUIDE.md) ·
+[Implementation plan](REWRITE_PLAN.md) · [Validation record](REWRITE_TODO.md)
 
-## 🎬 90-second introduction
+## Start with a local CLI
 
-https://github.com/user-attachments/assets/6228e3fc-8e1c-4edc-a2d2-68330df2823e
+Requirements: **Python 3.11+** and either a configured API provider or a separately
+installed, authenticated agent CLI. A basic Codex-backed conversation needs no
+GitHub token, email account, or new model API key.
 
-*Embedded player is 720p — [full quality (1080p)](docs/media/intro.mp4).*
+```sh
+python -m venv .venv
+. .venv/bin/activate
+pip install -e .
+mkdir -p ~/.personal-agent
+cp runtime.example.toml ~/.personal-agent/runtime.toml
 
-- **New here?** → [`assistant init`](#quickstart) walks you through setup.
-- **Using it day to day?** → [**User Guide**](doc/USER_GUIDE.md)
-- **Understanding or extending it?** → [**Design & Architecture**](doc/DESIGN.md)
-
----
-
-## What it does
-
-| | |
-|---|---|
-| 🧠 **Living profile** | Builds and maintains `profile.yaml` — skills, projects, interests, every claim backed by a cited observation — from your daily activity. A weekly editorial pass merges fragmented work into résumé-grade contribution highlights. |
-| 📥 **Activity collectors** | Pluggable: GitHub (authored + reviewed PRs/issues, commits, notifications), Chrome history (privacy-tiered), Gmail (headers only). Adding a source is one module. |
-| 📰 **Daily digest email** | GitHub notifications triaged 🔴/🟡/⚪ against your profile, new arXiv papers + industry/中文 news ranked by relevance, your open todos and reading list, and a 7-day health footer. |
-| 🌐 **Personal website** | Renders your profile to a GitHub Pages site (about, experience, projects) plus private, password-encrypted todos / reading / routines pages. Deterministic — no LLM can fabricate a public page. |
-| 📄 **Résumé sync** | Edits your LaTeX résumé from the profile (Overleaf git-bridge or any git remote), gated on a compile and your explicit approval — never auto-pushed. |
-| 💬 **Chat + tasks** | Message it from email or WeChat: ask questions, manage todos/reading, run pipeline phases on demand, set reminders and recurring routines, search the web, or hand it a novel multi-step task — it executes doable ones itself in the background (search → act → adapt → report back), and plans/tracks the ones that need you. |
-| 💰 **Finance ledger** | Tell it what you spent or earned (or send a payment-receipt screenshot) — records land in a git-versioned `finance.yaml` in your profile repo, never leaving the machine. Ask "这个月收支健康吗" and it analyzes real computed totals: savings rate, category breakdown, month-over-month. |
-| 🖼️ **Image understanding** | Send a photo or screenshot (WeChat, email attachment, `assistant ask --image`). With a multimodal main model it sees the image directly; text-only models get a describe-then-reason fallback via a vision model API. |
-| 🩺 **Health tracking** | Tell it what you ate, your workout, or your weight — or send a photo of a meal / nutrition label / body scale — and it maintains a health subprofile (`health.yaml`, local-only): body facts, meals with estimated macros, exercise, and nutrients you want covered. Ask "我最近健康状况怎么样" and it analyzes computed BMI, weight trend, exercise minutes, and calorie/protein averages. |
-| 🧬 **Self-evolving** | Give it durable feedback ("以后记账默认用港币", "别再推荐X类文章") and it stores the rule — git-versioned, retire-able — and follows it from the very next message. A weekly pass also studies its own chat/task history for friction (failed actions, corrections) and distills new behavior rules itself. |
-| 📊 **Self-measuring** | Per-step metrics (success, latency, acceptance rates, triage precision, reading done-rate) in a local SQLite table, surfaced in the digest and used to auto-tune how much it surfaces. |
-
-## How it works, in one breath
-
-One daily run is a 9-phase [LangGraph](https://langchain-ai.github.io/langgraph/)
-pipeline with crash-resume:
-
-```
-collect → profile → resume → digest → todos → research → website → deliver → curate
+# Install/authenticate Codex separately if it is not already available.
+assistant doctor --backend codex
+assistant doctor --backend codex --probe
+assistant ask "Remember that my Orchid project uses SQLite" --session personal
+assistant ask "What database does Orchid use?" --session personal
 ```
 
-Each phase reads and writes a shared state, persists per-run artifacts, and can
-be re-entered if a run crashes. The profile is a two-layer memory: an immutable
-evidence log (`events.db`) beneath a small curated, git-versioned `profile.yaml`
-— the same pattern the 2026 agent-memory literature converged on
-([research notes](doc/RESEARCH_AGENT_MEMORY_2026.md)). Full architecture in the
-[Design doc](doc/DESIGN.md).
+`doctor` checks configuration and executable/credential availability. `--probe`
+makes a real model request. A failed selected route reports a failure; it does not
+silently switch providers. The sample configuration selects Codex and leaves
+Slack and QQ disabled until you configure them.
 
----
+`assistant init` is still the setup wizard for the retained GitHub/email/website
+integrations. It is optional for the basic new runtime.
 
-## Requirements
+## Work on a personal project
 
-- **Python 3.11+**
-- An **Anthropic-compatible LLM API key** (real Anthropic, or any compatible
-  endpoint — set a base URL). **Recommended: Xiaomi MiMo `mimo-v2.5` on the
-  standard (token-plan) subscription** — natively multimodal (image chat works
-  out of the box), fast, and economical for an agent that makes hundreds of
-  calls a day:
+Register a real directory through the operator CLI, then give the agent a goal.
+The model cannot register an arbitrary path from a chat message.
 
-  ```
-  ANTHROPIC_BASE_URL=https://token-plan-cn.xiaomimimo.com/anthropic
-  ANTHROPIC_MODEL=mimo-v2.5
-  ANTHROPIC_DEFAULT_HAIKU_MODEL=mimo-v2.5
-  LLM_SUPPORTS_IMAGES=true
-  ```
-
-  DeepSeek, Alibaba Model Studio (Qwen), and real Anthropic all work the same
-  way; any multimodal model (Claude, Qwen-VL class, MiMo) unlocks image chat
-- *Run different tasks on different models at once* — set `LLM_ROLES` (JSON) to route roles (chat, pipeline, research, task) to different models and endpoints, e.g. `mimo-v2.5` for chat and `qwen3.6-plus` for research simultaneously; or set `LLM_MIXTURE` to run **Mixture-of-Agents** (multiple models propose in parallel, one aggregates) on the reasoning roles — each member and the aggregator is `{model, base_url?, api_key?}`, so proposers can span providers (e.g. MiMo + Qwen → a DeepSeek judge). Unusable auth/model routes are quarantined across restarts. Synthesis runs only with at least two final proposals; with one survivor the agent returns it directly and records a degraded MoA result. Keep each JSON value on one line — or, if you span lines, wrap it in `'single quotes'`; an unquoted multi-line value in `.env` is read as only its first line (the agent still starts, the feature just stays off)
-- *The agent always knows what time it is* — every LLM call carries a
-  `[temporal anchor]` line (system-local date, time, weekday) appended to the
-  prompt **tail**, so "tomorrow"/"现在几点" resolve correctly without touching
-  the cacheable prompt prefix. No timezone knob: schedulers run system-local
-  too, so set the process `TZ` env var on a UTC-pinned host and everything
-  shifts together
-- A **GitHub token** (fine-grained, read-only is enough for the collector)
-- An **email delivery path**: a [Resend](https://resend.com) API key (easiest)
-  or SMTP credentials (a Gmail app password also unlocks the Gmail collector
-  and the email chat channel)
-- *Optional*: a GitHub Pages repo (website), an Overleaf premium account
-  (résumé git bridge), an OpenClaw gateway (WeChat), web-search API keys.
-
-## Quickstart
-
-```bash
-pip install -e .            # from the repo root
-assistant init             # guided setup — see below
-assistant run --dry-run    # full pipeline, digest written to disk, no email
-assistant run              # the real thing: collect → … → email → curate
+```sh
+assistant project register orchid /absolute/path/to/orchid \
+  --verify '["python", "-m", "pytest", "-q"]'
+assistant project run orchid "Implement CSV export and add tests"
+assistant project list
+assistant project status TASK_ID
+assistant project events TASK_ID
 ```
 
-`assistant init` is an interactive wizard that walks every configuration group
-(LLM, GitHub, email, website, résumé, web search), writes your `.env` as you
-go, and **validates each section live** — it pings the LLM, checks the GitHub
-token identity, confirms repo push access, and warns if a token is
-over-scoped. It finishes by seeding your profile from GitHub and printing the
-remaining steps.
+The coding backend runs in the registered workspace. The host then executes your
+configured verification commands independently and records their exit codes,
+output, changed artifacts and hashes. A model saying “tests passed” is not
+verification. A task can finish with `verified: false` when no verification command
+was registered.
 
-Prefer editing by hand? `cp .env.template .env`, fill it in (every knob is
-documented inline), then run **`assistant init --check`** — the no-prompt
-config doctor — to verify. Run `--check` any time something feels off; it
-reports ✅/⚠️/❌ across every integration.
+For work that should continue while you chat:
 
-```
-$ assistant init --check
-personal-agent config check
-──────────────────────────────────────────────
-✅ LLM                  model claude-sonnet-4-6 answers
-✅ GitHub               authenticated as your-username
-✅ Email                Resend configured → you@example.com
-✅ Website              push access ok
-◌  Résumé sync          RESUME_REMOTE_URL unset — disabled
-⚠️  Web search           no search key — falls back to DuckDuckGo Lite
-──────────────────────────────────────────────
-all required config healthy 🎉
+```sh
+assistant serve
+# In another terminal, or through an approved chat project request:
+assistant task "Implement CSV export and add tests" --project orchid --background
+assistant project cancel TASK_ID
 ```
 
-## Scheduling
+`serve` drains queued work and sends project completion back to the originating
+Slack/QQ conversation when there is one. CLI-started tasks remain inspectable in
+the CLI. Interrupted work is marked for inspection after restart rather than
+silently repeated.
 
-The agent is meant to run once a day (e.g. early morning). Point any scheduler
-at `assistant run || assistant run --resume`:
+**Execution boundaries:** Codex uses explicit read-only or workspace-write sandbox
+modes and ignores inherited user plugins/MCP configuration while preserving its
+login. Select custom model/provider routing explicitly in the runtime route.
+Claude and Pi native project writes require `allow_unrestricted = true` and
+external isolation; Gemini requires that opt-in for controller turns too. An
+operator's `--verify` commands execute project code on the **trusted host**,
+separately from any model backend sandbox. See the [backend details](doc/RUNTIME_V2.md#model-backends).
 
-- **cron**: `0 7 * * *  cd /path/to/personal-agent && assistant run || assistant run --resume`
-- **systemd timer**: templates in [`systemd/`](systemd/)
-- **OpenClaw gateway** (required for the WeChat channel — see
-  [doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md))
+## Connect Slack or QQ
 
-See the [User Guide → Scheduling](doc/USER_GUIDE.md#scheduling) for the exact
-setup and the timezone caveat.
+Enable the relevant table in [runtime.example.toml](runtime.example.toml), configure
+its credentials through environment references, and run `assistant serve`.
 
-## Command reference
+| Channel | Connection | Admission and replies |
+| --- | --- | --- |
+| Slack | Socket Mode; app-level and bot tokens | Explicit user allowlist, optional workspace/channel restrictions; direct messages or bot mentions; replies retain the originating thread |
+| QQ | OneBot v11 forward WebSocket to an existing NapCat/LLOneBot-style server | Explicit numeric user allowlist, optional group restrictions; private messages or bot mentions; correlated send receipts |
+| WeChat / WeCom / email | Retained OpenClaw bridge and existing configured listeners | Existing authentication and image handling feed the new runtime through the retained service layer |
 
-| Command | What it does |
-|---|---|
-| `assistant init [--check]` | Guided setup wizard, or config doctor |
-| `assistant run [--dry-run] [--resume]` | Execute a daily run |
-| `assistant run-phase <phase>` | Run one phase standalone (`research`/`website`/`todos`/`resume`/`curate`/`consolidate`) |
-| `assistant bootstrap` | Seed `profile.yaml` from GitHub (first run) |
-| `assistant enrich-profile --since YYYY-MM` | Backfill the profile from GitHub history |
-| `assistant consolidate [--dry-run] [--section …]` | Weekly editorial profile pass |
-| `assistant show-profile` | Print a profile summary |
-| `assistant todo list\|add\|done` · `assistant reading list\|done\|unrelated` | Manage todos / reading list |
-| `assistant ask "…" [--image photo.png]` | Ask the chat agent one question locally (images welcome) |
-| `assistant task "…" [--no-notify]` | Agentically execute a multi-step task now (step trace under `~/.personal-agent/tasks/`) |
-| `assistant serve` | Local HTTP daemon (chat/actions API for the WeChat bridge; in multi-user mode also the per-user job worker pool) |
-| `assistant admin add-user\|remove-user\|list\|bind-channel\|set-bridge-token\|migrate-single-user\|reboot` | Operator tools for the multi-user mode (see below) — not a tenant surface |
-| `assistant admin invite [--ttl-days N]` · `admin invites` | Issue a one-time invite code so a new user self-onboards on first WeChat contact (sets their name, creates their profile + `config.env`) — see [WeChat onboarding](doc/WECHAT_OPENCLAW.md#onboarding-a-new-user-invite-flow) |
-| `assistant send-test-email` | Verify email delivery |
-| `assistant resume-init\|resume-status\|approve-resume` | Résumé sync + approval gate |
+QQ support here means **OneBot v11**, not Tencent's separate official QQ Bot API.
+The assistant does not install or log in to NapCat for you. Native Slack/QQ
+attachments currently provide metadata only; they do not imply image analysis.
+The retained bridge and `assistant ask --image` support the existing image path
+when an appropriate vision configuration is supplied.
 
-## Acknowledgements
+Detailed scopes, event subscriptions, configuration and delivery recovery are in
+[the channel setup guide](doc/RUNTIME_V2.md#channels).
 
-The always-on runtime is built on **[OpenClaw](https://github.com/openclaw/openclaw)**:
-its gateway hosts the WeChat channel (via Tencent's official
-`@tencent-weixin/openclaw-weixin` plugin), schedules the daily run through
-command-cron, and supervises the chat daemon — this repo's
-[`openclaw-plugin/`](openclaw-plugin/) bridge routes every owner message from
-OpenClaw into the agent. The pipeline itself runs on
-[LangGraph](https://langchain-ai.github.io/langgraph/), and several
-architectural ideas (typed hooks, plugin services) were informed by studying
-OpenClaw's source. Thanks to both projects.
+## Memory and skills
 
-## Where your data lives
-
-Everything is under `~/.personal-agent/` (override with `DATA_DIR`):
-
-```
-~/.personal-agent/
-├── profile/          git repo: profile.yaml (source of truth) + PROFILE.md render
-│   ├── aliases.yaml    your initiative groupings (owner-editable)
-│   ├── todos.yaml  reading_list.yaml  finance.yaml  health.yaml
-│   └── …
-├── events.db         SQLite: raw observation log, seen-store, metrics
-├── runs/<run_id>/    per-run artifacts (for --resume and audit)
-├── state.json        phase marker (which phase to re-enter)
-└── sessions/         chat session memory
+```sh
+assistant memory add "Orchid exports UTF-8 CSV" --project orchid --source operator:decision
+assistant memory search "CSV" --project orchid
+assistant skills list
+assistant skills show finance_summary
+assistant skills run list_todos
+assistant skills run add_todo --args '{"title":"Review the Orchid export"}'
 ```
 
-The profile is a git repo, so every daily change is a reviewable, revertible
-commit: `git -C ~/.personal-agent/profile log -p`.
+Memory retains source references and project scope. Existing profile, observation,
+conversation, todo, reading, lesson and saved-workflow records remain readable in
+place. Finance and health stay in their structured stores and are queried through
+their dedicated skills rather than injected as ambient project context.
 
-## Multi-user (experimental, gated)
+Skills expose typed, code-owned handlers and load their `SKILL.md` instructions
+on demand. Existing operational runbooks are bundled too. A Markdown document
+cannot install a handler or grant itself permission to run commands.
 
-By default the agent is **single-user** (`DEPLOYMENT_MODE=single_user`) — one
-data dir, one implicit owner, everything above unchanged. Setting
-`DEPLOYMENT_MODE=multi_tenant` lets one deployment serve several independent
-owners: each user gets their own `DATA_DIR/users/<uid>/` (profile, sessions,
-media, runs), their own WeChat account routed by `accountId`, and their own
-mailbox; background jobs run on a durable per-user queue
-(`DATA_DIR/shared/jobs.db`) instead of detached CLIs, and daily runs fan out
-per active user. Users are managed with the `assistant admin …` operator CLI —
-there are no per-user tokens or tenant-facing admin surfaces.
+After a project has independently verified results, keep the reusable procedure:
 
-Weekly (Sunday 08:00 by default) the deployment **self-evolves in three
-layers**: per-user profile consolidation and personal lessons; cross-user
-**global lessons** distilled from everyone's traces and chats (user-agnostic
-rules, privacy-filtered, reviewable via `assistant admin lessons`); and a
-code-level self-improvement pass that opens a **reviewable PR** (never
-auto-merged). See `doc/DESIGN_MULTI_USER.md` §12b.
+```sh
+assistant skills learn orchid-release --from-task TASK_ID \
+  --instructions-file /absolute/path/to/procedure.md
+assistant skills approve-draft DRAFT_ID
+assistant skills show orchid-release
+```
 
-**Do not enable it in production yet**: enablement is gated on the two-account
-WeChat spike (stable per-account `accountId` on real hardware) plus a
-sender-allowlist check — the full checklist is in
-[doc/WECHAT_OPENCLAW.md](doc/WECHAT_OPENCLAW.md#multi-user-multi_tenant), the
-design in [doc/DESIGN_MULTI_USER.md](doc/DESIGN_MULTI_USER.md), and the spike
-probe in [`openclaw-plugin-spike/`](openclaw-plugin-spike/).
+In chat, the equivalent `skill_draft` tool saves a candidate and `skill_activate`
+requires an owner approval. Draft evidence is checked again before activation.
+Approved procedures supply instructions to the normal tool loop; every action
+still uses the host's existing tools and policy.
 
-## Safety model (the short version)
+## Existing personal work remains available
 
-- **You are never fabricated.** Every profile claim cites an observation; the
-  website render is deterministic (no LLM output reaches a public page); résumé
-  edits only surface facts already in the profile.
-- **Protected sections.** The agent never edits `education`/`experience`/
-  `identity` in your profile — you own those.
-- **Human gates on outward actions.** Résumé pushes need explicit approval;
-  private website pages are client-side encrypted with your password.
-- **Everything reversible.** The profile is git-versioned; nothing is deleted
-  (stale entries go dormant/outdated), and every run is one commit.
+| Work | Skills / retained commands |
+| --- | --- |
+| Daily collection and triaged digest | `daily`, `run_status`; `assistant run [--resume]` |
+| Evidence-backed profile and history | `profile`, `bootstrap_profile`, `enrich_profile`, `consolidate`, `curate`; `bootstrap`, `enrich-profile`, `show-profile` |
+| GitHub, Gmail and browser activity | Existing collectors and privacy filters, used by the daily/profile skills |
+| Papers, news and reading | `research`, `web_search`, `web_research`, reading-list skills; `assistant reading …` |
+| Todos | `add_todo`, `list_todos`, `done_todo`; `assistant todo …` |
+| Finance | Transaction logging, queries, computed summaries, recategorization and voiding |
+| Health | Meal, exercise and weight logging, body facts, nutrient needs, queries and computed summaries |
+| Personal website | `website`, `build_personal_website`; deterministic public render and encrypted private pages |
+| Résumé | `resume`; retained `resume-init`, `resume-status`, `approve-resume` human publishing gate |
+| Reminders and routines | Scheduling/listing/cancellation skills and retained delivery scheduler |
+| Preferences and learning | Preference and evolution skills, versioned personal lessons |
+| Reusable workflows | Saved workflow inspection/editing skills; the new host executes procedures using its normal tools |
+| Metrics and administration | Existing metrics, delivery-failure records and operator-only `assistant admin …` commands |
 
-Full detail in [Design → Safety & privacy](doc/DESIGN.md#safety--privacy).
+The [personal-workflow user guide](doc/USER_GUIDE.md) documents each integration;
+[the original design](doc/DESIGN.md) explains the retained stores and pipeline.
+Commands whose names now select the new runtime can still be invoked explicitly:
 
-## Documentation
+```sh
+assistant legacy ask "Use the previous chat implementation"
+assistant legacy task "Use the previous bounded task runner"
+assistant legacy --help
+```
 
-- [**User Guide**](doc/USER_GUIDE.md) — setup and everyday use, per integration
-- [**Design & Architecture**](doc/DESIGN.md) — how the system is built, extension points
-- [WeChat via OpenClaw](doc/WECHAT_OPENCLAW.md) — the chat gateway, setup & runbook
-- [Pipeline metrics](doc/PIPELINE_METRICS.md) — what's measured, per step
-- [Agent-memory research](doc/RESEARCH_AGENT_MEMORY_2026.md) — the thinking behind the profile design
-- [`skills/`](skills/) — operational runbooks the agent has accumulated for recurring failures
+Host skills that publish or send/schedule outward messages, full daily pipelines,
+and chat-driven project submissions require scoped approval. The gate also covers
+indirect website publication by `research`, `todos` and `consolidate`.
+An approval is single-use and belongs to its original owner/conversation:
 
-## License
+```sh
+assistant approve APPROVAL_ID --session ORIGINAL_SESSION
+# In the originating chat, reply: /approve APPROVAL_ID
+```
 
-[MIT](LICENSE) — use, modify, and distribute freely; no warranty.
+The direct legacy/operator commands retain their existing explicit operator
+semantics. In particular, `assistant run --dry-run` skips digest email but can
+still update the website; use an isolated configuration when testing the pipeline.
+
+## Data and migration
+
+The default data directory remains `~/.personal-agent/`, overridable with `DATA_DIR`
+or the new runtime commands' `--data-dir`. Existing profile Git history, evidence,
+finance/health shards, sessions and task records are retained. Starting the new
+runtime creates separate stores; it does not bulk-convert existing personal data.
+Explicit use of an old-format finance/health skill retains the existing tested
+migration behavior and preserves the original legacy file.
+
+New conversations/project state live in `runtime.sqlite3`, sourced facts in
+`runtime_memory.sqlite`, and native-channel receipts in `runtime_inbox.sqlite3`.
+Project proof and reviewed skill procedures live under `runtime/`. See the
+[full data layout and upgrade notes](doc/RUNTIME_V2.md#data-and-upgrading).
+
+Records stay on your machine, while selected model providers and configured chat,
+email and publishing services receive the data needed for their operations.
+A local CLI can itself call a remote model service.
+
+## Development and verification
+
+```sh
+pip install -e . pytest
+python -m pytest -q
+```
+
+Tests use scratch data and fixture boundaries for model/channel services. Live
+provider checks and deployment status are recorded separately in
+[REWRITE_TODO.md](REWRITE_TODO.md); fixture success does not establish that a real
+Slack/QQ account is connected. No production deployment is implied by this rewrite.
+
+The dependency boundary remains `agent/ → platform/`; composition roots may import
+both. See [CLAUDE.md](CLAUDE.md) for repository conventions and
+[the runtime guide](doc/RUNTIME_V2.md) for the new module map.
+
+The design draws on [bothouse](https://github.com/zuiho-kai/bothouse)'s channel and
+workspace orchestration and [Pi](https://github.com/earendil-works/pi)'s small
+agent-kernel, context and skill concepts. These are reference designs; the runtime
+is implemented here around this project's existing personal stores and workflows.
+
+License: [MIT](LICENSE).

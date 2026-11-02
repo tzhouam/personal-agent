@@ -19,6 +19,8 @@ import re
 # matched — it is indistinguishable from a commit sha and masking those would
 # corrupt legitimate history.
 _TOKEN_RE = re.compile(r"(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{36})")
+_MODEL_CHAT_TOKEN_RE = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{10,})")
 
 
 def _mask_one(match: re.Match) -> str:
@@ -34,7 +36,8 @@ def mask_secrets(text):
     is safe to drop into a serialization path."""
     if not text:
         return text
-    return _TOKEN_RE.sub(_mask_one, str(text))
+    masked = _TOKEN_RE.sub(_mask_one, str(text))
+    return _MODEL_CHAT_TOKEN_RE.sub("[redacted credential]", masked)
 
 
 # Token *finder*. Classic tokens have a FIXED length (gh[pousr]_ + exactly 36

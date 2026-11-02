@@ -15,6 +15,7 @@ dependencies = [
     # AES-GCM for the website's encrypted private pages + the WeCom callback
     # crypto — undeclared until 2026-07-27, which broke a fresh-venv deploy.
     "cryptography>=42",
+    "websockets>=14,<18",
 ]
 
 [project.scripts]
@@ -27,3 +28,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["assistant*"]
+
+[tool.setuptools.package-data]
+"assistant.agent.runtime" = ["skill_library/**/*.md"]

@@ -67,9 +67,28 @@ def main() -> None:
     """Parse argv and dispatch to the matching command handler / subsystem
     entry, exiting with its return code."""
     from assistant.agent import wiring  # noqa: F401 — registers all agent impls of platform contracts
+    legacy = len(sys.argv) > 1 and sys.argv[1] == "legacy"
+    if legacy:
+        sys.argv = [sys.argv[0], *sys.argv[2:]]
+    else:
+        from assistant.runtime_cli import handles, main as runtime_main
+        if handles(sys.argv[1:]):
+            sys.exit(runtime_main(sys.argv[1:]))
 
     parser = argparse.ArgumentParser(prog="assistant", description="Personal self-assistant agent")
     sub = parser.add_subparsers(dest="command", required=True)
+    for name, help_text in {
+        "project": "register, run and inspect personal projects",
+        "skills": "discover, execute and review skills",
+        "memory": "search and record durable memory",
+        "backends": "inspect interchangeable API/CLI routes",
+        "doctor": "check runtime setup and optionally probe a model",
+        "approve": "approve an exact pending runtime action",
+        "inbox": "inspect channel delivery receipts",
+        "chat": "one durable runtime conversation turn",
+        "legacy": "use a preserved legacy command (assistant legacy --help)",
+    }.items():
+        sub.add_parser(name, help=help_text)
 
     run_p = sub.add_parser("run", help="execute a daily run")
     run_p.add_argument("--dry-run", action="store_true", help="write digest to disk, send no email")
