@@ -110,6 +110,8 @@ class QQChannel(QueuedChannel):
         self._ws = None
         self._reader: asyncio.Task | None = None
         self._write_lock = asyncio.Lock()
+        self._admission_lock = asyncio.Lock()
+        self._prelogin: list[dict] = []
         self._pending: dict[str, asyncio.Future] = {}
         self._sequence = itertools.count(1)
         self._self_id = config.self_id
@@ -223,7 +225,7 @@ class QQChannel(QueuedChannel):
             "echo": f"busy-{next(self._sequence)}"})
 
     async def _read(self, socket) -> None:
-        """Route action echoes first; execution callbacks always use a separate queue."""
+        """Resolve API echoes while withholding messages until login is validated."""
         try:
             async for raw in socket:
                 try:
@@ -238,20 +240,33 @@ class QQChannel(QueuedChannel):
                     if future is not None and not future.done():
                         future.set_result(payload)
                     continue
-                event = self.decode_event(payload)
-                if event is None:
+                if payload.get("post_type") != "message":
                     continue
-                durable = await self._accept(event)
-                try:
-                    ready = self._offer(event)
-                except asyncio.QueueFull:
-                    if not durable:
-                        await self._busy(event)
-                    continue
-                if ready is not None:
-                    ready.set()
+                async with self._admission_lock:
+                    if not self.connected:
+                        if len(self._prelogin) < self.config.queue_size:
+                            self._prelogin.append(payload)
+                        else:
+                            log.warning("QQ pre-login buffer is full; ignoring an unvalidated event")
+                        continue
+                    await self._admit(payload)
         finally:
             self._fail_pending()
+
+    async def _admit(self, payload: dict) -> None:
+        """Decode only with authenticated identity, then preserve durable admission."""
+        event = self.decode_event(payload)
+        if event is None:
+            return
+        durable = await self._accept(event)
+        try:
+            ready = self._offer(event)
+        except asyncio.QueueFull:
+            if not durable:
+                await self._busy(event)
+            return
+        if ready is not None:
+            ready.set()
 
     def _fail_pending(self) -> None:
         """An interrupted socket cannot supply receipts for its outstanding actions."""
@@ -268,16 +283,21 @@ class QQChannel(QueuedChannel):
         try:
             while not self._stop.is_set():
                 try:
+                    self._prelogin.clear()
                     headers = ({"Authorization": f"Bearer {self.config.access_token}"}
                                if self.config.access_token else None)
                     self._ws = await self._connect(self.config.ws_url, headers)
                     self._reader = asyncio.create_task(self._read(self._ws))
                     login = await self._call_api("get_login_info", {})
-                    bot = str(login.get("user_id") or "")
+                    bot = _numeric_id(login.get("user_id"), positive=True)
                     if not bot or (self.config.self_id and bot != self.config.self_id):
                         raise ChannelError("OneBot identity does not match configured self_id")
-                    self._self_id = bot
-                    self.connected = True
+                    async with self._admission_lock:
+                        self._self_id = bot
+                        self.connected = True
+                        buffered, self._prelogin = self._prelogin, []
+                        for payload in buffered:
+                            await self._admit(payload)
                     delay = 1.0
                     await self._reader
                 except asyncio.CancelledError:
@@ -297,6 +317,7 @@ class QQChannel(QueuedChannel):
                         except Exception:
                             pass
                         self._reader = None
+                    self._prelogin.clear()
                     if self._ws is not None:
                         await self._ws.close()
                         self._ws = None
@@ -355,5 +376,6 @@ class QQChannel(QueuedChannel):
             except asyncio.CancelledError:
                 pass
             self._reader = None
+        self._prelogin.clear()
         self._fail_pending()
         await self._close_worker()

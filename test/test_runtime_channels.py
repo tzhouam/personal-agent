@@ -419,6 +419,131 @@ def test_qq_reader_resolves_api_during_slow_handler_and_preserves_long_text():
     asyncio.run(scenario())
 
 
+def test_qq_authenticates_before_admitting_prelogin_and_immediate_following_messages():
+    """A login echo and following frame may arrive in one reader scheduling turn."""
+    async def scenario():
+        drained, login_queued, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        accepted, handled = [], []
+
+        class HandshakeSocket(SocketFixture):
+            """Expose the exact point when unauthenticated frames have been read."""
+
+            async def __anext__(self):
+                """Keep queued frames immediate, matching a WebSocket receive buffer."""
+                if self.sent and self.incoming.empty() and not login_queued.is_set():
+                    drained.set()
+                return await super().__anext__()
+
+        async def respond(socket, request):
+            """Send owner messages before login and directly behind its API echo."""
+            assert request["action"] == "get_login_info"
+            await socket.incoming.put(qq_payload(message_id=12))
+            await socket.incoming.put(qq_payload(message_id=90, self_id=100))
+            await asyncio.wait_for(drained.wait(), 1)
+            assert not channel.connected and not channel._self_id
+            assert not accepted and not handled and channel._queue.empty()
+            assert len(channel._prelogin) == 2
+            login_queued.set()
+            await socket.incoming.put({"status": "ok", "retcode": 0,
+                                       "data": {"user_id": 99}, "echo": request["echo"]})
+            await socket.incoming.put(qq_payload(message_id=13))
+
+        socket = HandshakeSocket(respond)
+
+        async def connect(url, headers):
+            """Return a local fixture without opening any network connection."""
+            return socket
+
+        channel = QQChannel(QQConfig(allowed_users=("123",), queue_size=4), socket_factory=connect)
+
+        async def accept(event):
+            """Durable admission must see a validated bot identity and readiness."""
+            assert channel.connected and channel._self_id == event.workspace_id == "99"
+            accepted.append(event.message_id)
+
+        async def handler(event):
+            """Callbacks must preserve FIFO order after authenticated admission."""
+            assert channel.connected and channel._self_id == event.workspace_id == "99"
+            assert event.message_id in accepted
+            handled.append(event.message_id)
+            if len(handled) == 2:
+                finished.set()
+
+        channel.set_acceptor(accept)
+        running = asyncio.create_task(channel.run(handler))
+        try:
+            await asyncio.wait_for(finished.wait(), 2)
+            assert accepted == handled == ["12", "13"]
+            assert not channel._prelogin
+        finally:
+            await channel.close()
+            await asyncio.wait_for(running, 1)
+
+    asyncio.run(scenario())
+
+
+def test_qq_prelogin_buffer_is_bounded_without_durable_admission():
+    """Unknown-identity traffic cannot grow memory or reach the owner inbox."""
+    async def scenario():
+        channel = QQChannel(QQConfig(allowed_users=("123",), queue_size=1))
+        socket = SocketFixture()
+        accepted = []
+
+        async def accept(event):
+            """Record any premature durable acceptance as a test failure."""
+            accepted.append(event)
+
+        channel.set_acceptor(accept)
+        await socket.incoming.put(qq_payload(message_id=12))
+        await socket.incoming.put(qq_payload(message_id=13))
+        await socket.incoming.put(None)
+        await channel._read(socket)
+        assert len(channel._prelogin) == channel.config.queue_size
+        assert channel._prelogin[0]["message_id"] == 12
+        assert not accepted and channel._queue.empty() and not channel._seen
+        await channel.close()
+        assert not channel._prelogin
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("bot", [100, True, "not-a-qq-id"])
+def test_qq_rejected_login_never_admits_buffered_messages(bot):
+    """A wrong or malformed login identity cannot release otherwise valid messages."""
+    async def scenario():
+        accepted, handled = [], []
+
+        async def respond(socket, request):
+            """End after one invalid handshake, avoiding any reconnect timing."""
+            await socket.incoming.put(qq_payload())
+            await socket.incoming.put({"status": "ok", "retcode": 0,
+                                       "data": {"user_id": bot}, "echo": request["echo"]})
+            channel._stop.set()
+
+        socket = SocketFixture(respond)
+
+        async def connect(url, headers):
+            """Use a local in-memory transport for the authentication failure."""
+            return socket
+
+        async def accept(event):
+            """A buffered message must never reach durable acceptance on failure."""
+            accepted.append(event)
+
+        async def handler(event):
+            """An invalid handshake must never cause agent execution."""
+            handled.append(event)
+
+        channel = QQChannel(QQConfig(allowed_users=("123",), self_id="99"), socket_factory=connect)
+        channel.set_acceptor(accept)
+        await asyncio.wait_for(channel.run(handler), 1)
+        assert not accepted and not handled
+        assert not channel.connected and not channel._prelogin
+        assert channel._queue.empty() and not channel._seen
+
+    asyncio.run(scenario())
+
+
 def test_qq_missing_receipt_stays_unknown_and_rejection_stays_failed():
     """Report what the provider acknowledged; never infer success from a socket write."""
     async def scenario():
@@ -447,6 +572,9 @@ def test_qq_durable_inbox_retains_events_beyond_callback_queue_capacity():
     """QQ's volatile callback queue cannot discard already admitted owner work."""
     async def scenario():
         channel = QQChannel(QQConfig(allowed_users=("123",), queue_size=1))
+        # This fixture starts at the authenticated reader boundary; handshake
+        # admission is exercised separately above through channel.run().
+        channel._self_id, channel.connected = "99", True
         socket = SocketFixture()
         channel._ws = socket
         accepted = []

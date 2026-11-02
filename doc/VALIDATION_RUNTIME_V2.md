@@ -22,7 +22,10 @@ upstream and revision metadata. No Pi core changes were required.
 
 ## Automated checks
 
-- Final full Python suite: **1,090 passed in 109.11 seconds**.
+- Python 3.12 full suite: **1,090 passed in 109.11 seconds**, before the final
+  five QQ startup regressions. All 24 final channel tests also passed on Python
+  3.11 and 3.12. [Current full CI checks](https://github.com/tzhouam/personal-agent/pull/36/checks)
+  run the complete suite on the minimum supported Python 3.11.
 - Actual Pi Node suite: **18 passed**. Tests exercise native HTTP/SSE, tool sequencing, session resume,
   approval batch interruption, truncation, step/time limits, vision replay,
   credential redaction, external-receipt deduplication, stdio lifecycle and
@@ -37,6 +40,10 @@ upstream and revision metadata. No Pi core changes were required.
 - `pip check`, Python compilation and whitespace checks passed.
 - Added a test-only pull-request workflow that installs the locked SDK, runs Node
   and Python checks, and asserts LangGraph is absent. It needs no model credentials.
+- CI exposed a Python 3.11 QQ login/message scheduling race. Incoming messages now
+  remain in a bounded FIFO until the bot identity is authenticated; API echoes
+  continue flowing during the handshake. Five regressions cover ordering,
+  pre-login admission, bounded buffering and invalid login identities.
 
 The Python tests use deterministic transports or loopback providers; CLI adapter
 checks use fake executable fixtures. No model CLI ran for verification.

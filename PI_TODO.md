@@ -68,6 +68,12 @@ Fork: https://github.com/tzhouam/pi (verified revision `c9f4c7b`).
   bounded project commands by the Pi session deadline, and refused FIFO reads.
 - Added test-only pull-request CI: pinned Node/Python actions, locked SDK install
   with lifecycle scripts disabled, real-SDK local-provider tests and no LangGraph.
+- First CI run passed Pi checks and LangGraph absence, then exposed a Python 3.11
+  QQ handshake race (1 failed, 1,089 passed). Fixed by bounding and deferring
+  message admission until login identity validation, keeping API echoes flowing.
+  Five new regressions passed on both Python versions (24 channel tests total).
+  [Current full CI checks](https://github.com/tzhouam/personal-agent/pull/36/checks)
+  cover the final commit on minimum supported Python 3.11.
 - Implementation and validation published in `f8f448f`, with Pi CLI management
   included in the following commit. PR title/body now describe the actual engine,
   source fork, preserved capabilities, completed checks and operational limits.
