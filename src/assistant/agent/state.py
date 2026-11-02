@@ -1,6 +1,6 @@
 """Shared pipeline state and its on-disk persistence.
 
-Defines `AssistantState`, the TypedDict threaded through every LangGraph node,
+Defines `AssistantState`, the TypedDict shared by the deterministic daily phases,
 plus `load_state`/`persist_state` for the small `state.json` checkpoint that
 survives across runs so `--resume` knows which phase to re-enter."""
 
@@ -12,9 +12,9 @@ from typing import Annotated, Any, TypedDict
 
 class AssistantState(TypedDict, total=False):
     """Mutable state passed between pipeline phases; every field is optional
-    (`total=False`) since each node contributes only its own outputs. `phase`
-    names the phase to (re)enter; `errors` uses an `operator.add` reducer so
-    each node's errors accumulate across the graph rather than overwrite."""
+    (`total=False`) since each handler contributes only its own outputs. `phase`
+    names the phase to (re)enter. The workflow driver explicitly accumulates
+    `errors`; its additive annotation remains for state-contract compatibility."""
 
     run_id: str
     phase: str  # collect | profile | digest | research | deliver | curate | done — phase to (re)enter
@@ -50,7 +50,7 @@ def load_state(state_file: Path) -> dict[str, Any] | None:
 def persist_state(state_file: Path, **fields: Any) -> None:
     """Merge-preserving write, same discipline as the rebase agent: the
     persisted `phase` names the phase to re-enter and is only advanced by a
-    node on successful completion."""
+    phase handler on successful completion."""
     current = load_state(state_file) or {}
     current.update(fields)
     state_file.parent.mkdir(parents=True, exist_ok=True)

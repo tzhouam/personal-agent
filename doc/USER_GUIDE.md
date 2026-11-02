@@ -1,8 +1,10 @@
 # personal-agent — User Guide
 
-Everything you need to set the agent up and use it day to day. If you just want
-to get running, do the [Install](#1-install) and [Setup wizard](#2-setup) and
-skip ahead — every integration below is optional and can be added later.
+This guide covers retained personal integrations and daily workflows. The default
+agent runs actual Pi SDK 1.4.0. Start with [Install](#1-install), then use the
+[Pi runtime guide](RUNTIME_V2.md) for model routes, Slack/QQ, personal projects,
+memory and skills. The older task/chat details below are labeled where they
+describe explicit `assistant legacy …` behavior.
 
 **Contents**
 1. [Install](#1-install)
@@ -27,17 +29,25 @@ skip ahead — every integration below is optional and can be added later.
 git clone <this-repo> personal-agent && cd personal-agent
 python -m venv .venv && source .venv/bin/activate    # or your preferred env
 pip install -e .
+assistant pi install
+assistant pi status
 assistant --help
 ```
 
-Requires **Python 3.11+**. That's the whole dependency footprint — a handful of
-pure-Python packages (anthropic, httpx, langgraph, pydantic, pyyaml, tenacity).
+Requires **Python 3.11+**, **Node.js 22.19+** and npm. `assistant pi install`
+explicitly installs pinned Pi SDK dependencies with npm lifecycle scripts
+disabled. The daily workflow is deterministic Python; LangGraph is not required.
 
 ---
 
 ## 2. Setup
 
-Run the wizard:
+For basic Pi chat, copy `runtime.example.toml` to
+`~/.personal-agent/runtime.toml`, export its `DEEPSEEK_API_KEY` environment
+reference, and run `assistant doctor --backend deepseek --probe`. The example
+uses `deepseek-flash`; change it to the model ID available to your account.
+
+Run the retained wizard to configure the personal integrations below:
 
 ```bash
 assistant init
@@ -62,8 +72,9 @@ Run `--check` any time — after rotating a key, when a run misbehaves, or just 
 confirm health. ✅ = working, ⚠️ = works but worth improving (e.g. a fallback in
 use, an over-scoped token), ❌ = blocking, ◌ = optional and disabled.
 
-Only three things are truly required: an **LLM key**, a **GitHub token**, and an
-**email delivery path**. Everything else is optional.
+Basic Pi operation needs a configured model route and the installed SDK. GitHub
+and email credentials are needed when using those personal integrations; they
+are optional for chat, local project work and other skills.
 
 ---
 
@@ -71,12 +82,15 @@ Only three things are truly required: an **LLM key**, a **GitHub token**, and an
 
 ### 3.1 LLM
 
-The agent's brain. It uses the Anthropic SDK, so any Anthropic-compatible
-endpoint works.
+Pi is the agent engine. Configure its model route in `runtime.toml`, including
+the API transport, provider, model ID and environment credential reference; see
+[Model backends](RUNTIME_V2.md#model-backends). The following compatibility
+settings still seed the Anthropic route and retained workflow role routing;
+their model calls also run through Pi.
 
 | Setting | Notes |
 |---|---|
-| `ANTHROPIC_API_KEY` | Your key. Required. |
+| `ANTHROPIC_API_KEY` | Credential for the Anthropic-compatible route, when selected. |
 | `ANTHROPIC_BASE_URL` | Leave empty for real Anthropic. For a compatible provider set its base URL — recommended: Xiaomi MiMo standard plan, `https://token-plan-cn.xiaomimimo.com/anthropic` with `ANTHROPIC_MODEL=mimo-v2.5` (natively multimodal, so also set `LLM_SUPPORTS_IMAGES=true`); DeepSeek: `https://api.deepseek.com/anthropic`. |
 | `ANTHROPIC_MODEL` | Main model for reasoning-heavy work (profile, digests, planning). |
 | `LLM_SUPPORTS_IMAGES` | Set `true` when the model is natively multimodal (Claude, `qwen3.6-plus` via DashScope's Anthropic proxy `https://dashscope.aliyuncs.com/apps/anthropic`, …) — chat then attaches photos directly to the model. Text-only models fall back to the `VISION_*` describe chain (see `.env.template`). |
@@ -281,6 +295,8 @@ you can reach it — every channel authenticates the sender.
 
 ### Channels
 
+- **Slack / QQ:** native Socket Mode / OneBot v11 support; see
+  [channel setup](RUNTIME_V2.md#channels).
 - **Email (works out of the box):** mail your digest address from one of your
   own addresses with a subject starting `agent`, e.g.
   *"agent: add a todo to review the API PR, due Friday"*. The reply comes back
@@ -355,6 +371,16 @@ point you to a doctor for anything medical.
 
 ### Executing novel tasks
 
+Default `assistant task` and channel turns use Pi's tool loop. Register a project
+with `assistant project register`, submit goals through `project run` or
+`task --project`, and inspect durable status and independent verification.
+Chat-driven outward actions use `/approve APPROVAL_ID` in their original session.
+See [Personal projects](RUNTIME_V2.md#personal-projects) and
+[skills and approvals](RUNTIME_V2.md#skills-learning-and-approvals).
+
+The remainder of this section describes the retained `assistant legacy task`
+runner and its older task records/approval phrases.
+
 Hand it something with no built-in pipeline — *"查一下明天深圳的天气，会下雨
 就提醒我明早8点带伞"* — and it runs the task itself: a step-by-step loop
 that searches, acts through its own capabilities (reminders, todos, ledgers,
@@ -416,6 +442,9 @@ itself, marked `evolve` so you can tell self-learned rules from your own.
 Owner rules are never auto-evicted; self-learned ones rotate out first.
 
 ### Planning novel tasks
+
+The following describes the retained legacy planning action. Default Pi turns
+can plan and execute through the current skill catalog and project tools.
 
 Hand it something it has no built-in action for — *"find a good Sichuan place
 near the office for 6 on Friday"* — and it produces a concrete plan, splitting
@@ -553,11 +582,12 @@ See [WECHAT_OPENCLAW.md](WECHAT_OPENCLAW.md).
 
 ## 10. Troubleshooting
 
-Run **`assistant init --check`** first — it diagnoses most configuration issues
-directly.
+Run **`assistant doctor`** for Pi/model routes and **`assistant init --check`**
+for retained personal integration settings.
 
 | Symptom | Likely cause / fix |
 |---|---|
+| Pi SDK unavailable | Install Node.js 22.19+/npm, then run `assistant pi install` for the same data root and inspect `assistant pi status`. |
 | No digest email arrived | Check delivery: `assistant send-test-email`. If that works, check the run: `assistant run --dry-run` and read the console. |
 | LLM errors ("authentication", "no JSON found") | Bad/expired key → fix it, then run `assistant init --check`; a successful probe clears that route's durable quarantine immediately. Structured calls automatically distinguish malformed JSON from truncation and retry once with the appropriate repair/budget. |
 | `LLM_ROLES`/`LLM_MIXTURE` seems ignored | Probably malformed JSON — the config deliberately degrades to "feature off" rather than crashing. `assistant init --check` (the **Model routing** line) names the broken variable and its source; the usual cause is a multi-line value not wrapped in 'single quotes'. It also warns when the mixture covers the `chat` role (MoA ~doubles reply latency). |

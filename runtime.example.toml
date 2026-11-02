@@ -1,32 +1,37 @@
 # Copy to ~/.personal-agent/runtime.toml, or pass --config /absolute/path/runtime.toml.
-# Credentials remain in environment variables/.env; do not paste them into this file.
+# Engine: actual Pi SDK 1.4.0. Install explicitly with `assistant pi install`.
+# Requires Python 3.11+, Node >=22.19 and npm; no separate Pi CLI is needed.
+# Export custom credential names in the shell/service environment. Standard
+# ANTHROPIC_*/OPENAI_* Settings fields can also come from .env. No inline keys.
 [runtime]
-backend = "codex"
+backend = "deepseek"
 max_steps = 12
 workers = 2
 timeout = 300
 
-[backends.codex]
-kind = "codex"
-command = ["codex"]
-# Codex keeps its login but ignores inherited plugins/MCP/user settings.
-# Set an explicit model or non-secret global -c arguments in command if required.
-# model = "your-model"
-
 [backends.deepseek]
 kind = "openai"
+api = "openai-completions"
+provider = "deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 model = "deepseek-flash"
+thinking_level = "off"
+context_window = 128000
+# Use the exact model ID exposed by your provider/account.
 
 [backends.anthropic]
 kind = "anthropic"
+api = "anthropic-messages"
+provider = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
 model = "claude-sonnet-4-6"
 
 [backends.openai]
 kind = "openai"
+api = "openai-completions"
+provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com/v1"
 # Select a model available to your account before choosing this route.
@@ -34,25 +39,34 @@ model = ""
 
 # Compatible endpoints are named routes, for example:
 # [backends.my_endpoint]
-# kind = "openai"
+# kind = "api"
+# api = "openai-responses"  # select a Pi-supported API matching the endpoint
+# provider = "my-provider"
 # api_key_env = "MY_ENDPOINT_API_KEY"
 # base_url = "https://your-endpoint.example/v1"
+# model = "your-model"
+# thinking_level = "off"
+# context_window = 128000
+
+# Optional CLI model adapters provide one completion at a time to Pi's loop.
+# They require their own installation/login and never take over project tools.
+[backends.codex]
+kind = "codex"
+command = ["codex"]
+# Retains login; ignores inherited user plugins/MCP and disables native tools.
+# Set an explicit model or non-secret global -c arguments if required.
 # model = "your-model"
 
 [backends.claude]
 kind = "claude"
-# Native project writes need explicit external-isolation/unrestricted opt-in.
-allow_unrestricted = false
+command = ["claude"]
+# Native tools and MCP are disabled; Pi dispatches reviewed host tools.
 
 [backends.gemini]
 kind = "gemini"
+command = ["gemini"]
 # Gemini's configured native tools cannot all be disabled reliably. This flag
 # is required even for controller turns; enable only in a trusted isolated setup.
-allow_unrestricted = false
-
-[backends.pi]
-kind = "pi"
-# Pi has no operating-system sandbox. Native writes need explicit opt-in.
 allow_unrestricted = false
 
 [channels.slack]

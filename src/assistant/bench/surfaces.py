@@ -2,10 +2,10 @@
 
 `role_probe` is the M layer: one prompt against whatever model an LLM_ROLES
 role routes to — no agent code. `chat_turn` is the A layer: a full
-`handle_turn` on the bench profile under the action sandbox (repair rounds
+legacy `handle_turn` on the bench profile under the action sandbox (repair rounds
 and retrieval-compose included by construction). There is deliberately no
-phase surface: LangGraph nodes are nested closures that continue downstream
-into publish/delivery."""
+phase surface: the daily workflow continues downstream into publication and
+delivery. These retained v1 surfaces do not measure the default Pi agent loop."""
 
 from dataclasses import dataclass, field
 

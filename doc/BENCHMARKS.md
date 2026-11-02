@@ -6,8 +6,8 @@ published agent benchmarks (each link checked against its canonical page,
 benchmarks with agent-specific golden suites. Rev 2 incorporates the design
 review: adapted tracks are now labeled **derived** and may never be reported
 under the source benchmark's name; the memory track matches the actual
-session/profile architecture; the phase surface is dropped (LangGraph nodes
-are nested closures that continue downstream — including publish); results
+session/profile architecture; the phase surface is dropped (daily workflows
+continue downstream into publication and delivery); results
 get their own store (never `events.db`); budgets are marked as estimates;
 statistics (holdout, repetitions, paired-delta tests, judge calibration) and
 a mandatory dependency-injected sandbox are specified; and v1 scope is cut to
@@ -17,6 +17,11 @@ isolation, paired-bootstrap alerting over per-item deltas, zero-scored
 timeouts with classified-infra-failure exclusion rules, `official-subset`
 labeling, raw-output privacy/retention, and drops events.db publishing
 entirely.
+
+This document describes the retained v1 benchmark surfaces, including the legacy
+chat handler. Current default agent execution uses actual Pi SDK 1.4.0; see
+[RUNTIME_V2.md](RUNTIME_V2.md). These benchmark designs do not establish Pi,
+live-provider or channel verification results.
 
 ---
 
@@ -219,10 +224,10 @@ deterministically.
   guards (the pytest-style socket blocker) allowing only the LLM endpoints
   (+ the recorded-fixture transport for the web track) — handler fakes and
   blanked credentials alone do not bound every code path.
-- No `phase_run` surface: LangGraph nodes are nested closures that continue
-  through downstream nodes (including website publish and delivery). Pipeline
+- No `phase_run` surface: entering the daily workflow can continue through
+  downstream phases, including website publication and delivery. Pipeline
   behavior is benchmarked only through the pure functions phases call (e.g.
-  `build_digest` with injected deps), never by entering the graph.
+  `build_digest` with injected deps), never by entering the full workflow.
 - Network: only the LLM endpoint(s); the web track substitutes a recorded
   search-fixture transport.
 

@@ -1,13 +1,13 @@
-"""Bounded model adapters and native CLI runners behind one small contract.
+"""Bounded CLI completion transport and retained legacy provider utilities.
 
-API backends return host tool calls. CLI controllers return the same structured
-result using constrained invocation modes; project requests may use native tools.
-Pi, Claude and Gemini require explicit opt-in for native writes because their
-permission flags are not an operating-system sandbox. Gemini also needs this
-opt-in for controller turns because its plan mode cannot reliably disable every
-configured native/MCP tool. Codex ignores inherited user configuration while
-retaining CODEX_HOME authentication; model/provider routing must be explicit in
-BackendConfig.model and command argv (including global ``-c`` overrides).
+The default runtime uses the actual Pi SDK for API requests and its agent loop.
+Pi's CLI provider uses this module for one structured model completion, with
+controller mode explicit even when no host tools are exposed. APIBackend and
+native-runner modes remain compatibility utilities; they are never a missing-Pi
+fallback. Gemini requires explicit external-isolation opt-in because its plan
+mode cannot reliably disable configured native/MCP tools. Codex ignores inherited
+user configuration while retaining authentication; routing is explicit in
+BackendConfig.model and configured argv.
 """
 
 import asyncio
@@ -374,7 +374,7 @@ def _controller_result(text: str, completion: Completion) -> Completion:
 
 
 class CLIBackend:
-    """A native CLI runner with explicit controller and project-execution modes."""
+    """One bounded CLI completion, or an explicitly selected legacy native run."""
 
     def __init__(self, config: BackendConfig):
         """Advertise the actual isolation capability of each native runner."""
@@ -384,7 +384,7 @@ class CLIBackend:
 
     def _args(self, request: BackendRequest) -> list[str]:
         """Use explicit sessions and permission modes, preserving configured auth."""
-        controller = bool(request.tools)
+        controller = request.controller_mode or bool(request.tools)
         if request.session_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", request.session_id):
             raise BackendError("invalid native session identifier")
         native_write = request.allow_write and not controller
@@ -424,9 +424,17 @@ class CLIBackend:
                         raise BackendError(f"Codex command cannot override host safety setting {key}")
                     overrides += ["-c", override]
                 else:
-                    if argument in {"--dangerously-bypass-approvals-and-sandbox", "--approve-for-me",
-                                    "--sandbox", "-s", "--ask-for-approval", "-a"}:
+                    option = argument.partition("=")[0]
+                    if option in {"--dangerously-bypass-approvals-and-sandbox", "--approve-for-me",
+                                  "--sandbox", "-s", "--ask-for-approval", "-a", "--full-auto", "--yolo"} or (
+                            argument.startswith(("-s", "-a")) and not argument.startswith("--")):
                         raise BackendError("Codex command cannot override host sandbox or approvals")
+                    if option == "--enable":
+                        feature = (argument.partition("=")[2] if "=" in argument else
+                                   args[index + 1] if index + 1 < len(args) else "")
+                        protected_features = controller_features if controller else {"apps", "plugins"}
+                        if feature in protected_features:
+                            raise BackendError("Codex command cannot override host safety feature " + feature)
                     prefix.append(argument)
                 index += 1
             args = prefix
@@ -481,7 +489,7 @@ class CLIBackend:
     def _prompt(self, request: BackendRequest) -> str:
         """Keep prompts on stdin, with host tools described only as structured data."""
         prompt = request.system + "\n\nConversation JSON:\n" + json.dumps(request.messages, ensure_ascii=False)
-        if request.tools:
+        if request.controller_mode or request.tools:
             prompt += ("\n\nYou are the host's structured controller. Do not call native CLI tools. "
                        "Return ONLY JSON with this shape: {\"text\":\"reply\",\"tool_calls\":"
                        "[{\"id\":\"unique-id\",\"name\":\"tool name\",\"arguments\":{}}]}. "
@@ -565,7 +573,8 @@ class CLIBackend:
         args = self._args(request)
         code, output, _stderr = _run_process(args, self._prompt(request), request, _timeout(self.config, request))
         completion = self._parse(output, code)
-        return _controller_result(completion.text, completion) if request.tools else completion
+        return (_controller_result(completion.text, completion)
+                if request.controller_mode or request.tools else completion)
 
 
 def build_backend(config: BackendConfig) -> Backend:

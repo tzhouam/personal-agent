@@ -36,6 +36,14 @@ def load_runtime_config(settings: Settings, path: Path | None = None,
     """Read runtime.toml plus existing API settings; do not mutate either file."""
     def env_value(name: str) -> str:
         """Honor exported variables and known Settings fields loaded from .env."""
+        if settings.deployment_mode == "multi_tenant" and settings.uid != "default":
+            from dotenv import dotenv_values
+
+            owner_file = settings.data_dir / "config.env"
+            own = dotenv_values(owner_file) if owner_file.is_file() else {}
+            if name in own:
+                return str(own[name] or "")
+            return str(getattr(settings, name.lower(), ""))
         return os.environ.get(name, str(getattr(settings, name.lower(), "")))
 
     path = path or settings.runtime_config or settings.data_dir / "runtime.toml"
@@ -48,7 +56,7 @@ def load_runtime_config(settings: Settings, path: Path | None = None,
     routes = {
         name: BackendConfig(kind=name, timeout=timeout,
                             allow_unrestricted=settings.runtime_allow_unrestricted)
-        for name in ("codex", "claude", "gemini", "pi")
+        for name in ("codex", "claude", "gemini")
     }
     routes["anthropic"] = BackendConfig(
         kind="anthropic", model=settings.anthropic_model,
@@ -77,11 +85,18 @@ def load_runtime_config(settings: Settings, path: Path | None = None,
         unrestricted = spec.get("allow_unrestricted", base.allow_unrestricted)
         if not isinstance(unrestricted, bool):
             raise ValueError(f"backend {name!r} allow_unrestricted must be a boolean")
+        context_window = spec.get("context_window", base.context_window)
+        if (not isinstance(context_window, int) or isinstance(context_window, bool)
+                or not 1024 <= context_window <= 10_000_000):
+            raise ValueError(f"backend {name!r} context_window must be 1024..10000000")
         routes[name] = replace(
             base, kind=kind, model=str(spec.get("model", base.model)),
             command=tuple(command), base_url=str(spec.get("base_url", base.base_url)),
             api_key=api_key, timeout=route_timeout,
-            allow_unrestricted=unrestricted)
+            allow_unrestricted=unrestricted,
+            api=str(spec.get("api", base.api)), provider=str(spec.get("provider", base.provider)),
+            thinking_level=str(spec.get("thinking_level", base.thinking_level)),
+            context_window=context_window)
     selected = backend or settings.runtime_backend or str(runtime.get("backend", "auto"))
     if selected == "auto":
         # Auto only chooses at startup. A failing selected route is never retried
@@ -91,7 +106,7 @@ def load_runtime_config(settings: Settings, path: Path | None = None,
         elif settings.openai_api_key:
             selected = "openai"
         else:
-            selected = next((name for name in ("codex", "claude", "gemini", "pi")
+            selected = next((name for name in ("codex", "claude", "gemini")
                              if shutil.which(name)), "codex")
     channels = {}
     for name, spec in data.get("channels", {}).items():

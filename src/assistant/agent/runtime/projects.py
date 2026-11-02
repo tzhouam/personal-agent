@@ -1,7 +1,7 @@
-"""Durable personal projects with real coding backends and independent verification.
+"""Durable personal projects using Pi sessions and independent verification.
 
-Only owner-registered directories are executable projects. API models receive
-confined file tools; a host subprocess tool requires explicit unrestricted-mode
+Only owner-registered directories are executable projects. Pi receives confined
+host file tools; a subprocess tool requires explicit unrestricted-mode
 opt-in because a process cwd alone is not an operating-system sandbox.
 """
 
@@ -14,18 +14,24 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import tempfile
 import time
 
 from assistant.platform.config import Settings
-from assistant.platform.runtime.contracts import Backend, BackendRequest
+from assistant.platform.runtime.contracts import BackendRequest
+from assistant.platform.runtime.pi import PiBackend
 from assistant.platform.runtime.store import RuntimeStore, _now
 from assistant.platform.secrets import mask_secrets
 
 
 class ProjectCancelled(RuntimeError):
     """A durable cancellation stopped the backend or verification process."""
+
+
+class ProjectTimeout(RuntimeError):
+    """The Pi session's budget also bounds workspace tool execution."""
 
 
 _TOOLS = [
@@ -60,7 +66,7 @@ def _argv(value) -> list[str]:
 class ProjectManager:
     """Scope project registration, queued work, verification and cancellation to an owner."""
 
-    def __init__(self, settings: Settings, backend: Backend, store: RuntimeStore | None = None):
+    def __init__(self, settings: Settings, backend: PiBackend, store: RuntimeStore | None = None):
         """Reuse the kernel store while keeping model calls outside database transactions."""
         self.settings, self.backend = settings, backend
         self.store = store or RuntimeStore(settings.data_dir)
@@ -163,18 +169,7 @@ class ProjectManager:
                 raise ValueError("registered workspace moved or became a symlink; register it again")
             self._check(task_id, cancel)
             before = self._snapshot(workspace)
-            if "native_agent" in self.backend.capabilities:
-                completion = self.backend.complete(BackendRequest(
-                    messages=[{"role": "user", "content": task["goal"]}], system=_SYSTEM,
-                    cwd=workspace, allow_write=True, cancel=cancel,
-                    timeout=float(getattr(self.settings, "runtime_project_timeout", 300))))
-                if completion.finish_reason not in {"stop", "end_turn", "completed", "success"}:
-                    raise RuntimeError(f"backend did not complete: {completion.finish_reason}")
-                if not completion.text.strip():
-                    raise RuntimeError("backend completed without a project report")
-                report, session_id = completion.text, completion.session_id
-            else:
-                report, session_id = self._run_model(task, workspace, cancel)
+            report, session_id = self._run_session(task, workspace, cancel)
             self._check(task_id, cancel)
             for command in task["verification"]:
                 self._check(task_id, cancel)
@@ -220,41 +215,48 @@ class ProjectManager:
             with self._active_lock:
                 self._active.pop(task_id, None)
 
-    def _run_model(self, task: dict, workspace: Path, cancel: Event) -> tuple[str, str | None]:
-        """Run API providers with confined file tools and explicit subprocess opt-in."""
-        history = [{"role": "user", "content": task["goal"]}]
-        session_id = None
+    def _run_session(self, task: dict, workspace: Path, cancel: Event) -> tuple[str, str]:
+        """Let Pi own model turns while Python authorizes each workspace tool RPC."""
         steps = min(max(int(getattr(self.settings, "runtime_project_max_steps", 20)), 1), 100)
-        for _ in range(steps):
+        backend = self.backend
+        project_timeout = float(getattr(self.settings, "runtime_project_timeout", 300))
+        timeout = min(project_timeout, float(getattr(getattr(backend, "config", None),
+                                                     "timeout", project_timeout)))
+        deadline = time.monotonic() + timeout
+
+        def check_session():
+            """Refuse effects and successful completion after the session budget expires."""
             self._check(task["id"], cancel)
-            reply = self.backend.complete(BackendRequest(
-                messages=history, system=_SYSTEM, tools=_TOOLS, cwd=workspace,
-                cancel=cancel, timeout=float(getattr(self.settings, "runtime_backend_timeout", 120))))
-            session_id = reply.session_id or session_id
-            if not reply.tool_calls:
-                if reply.finish_reason not in {"stop", "end_turn", "completed", "success"}:
-                    raise RuntimeError(f"backend did not complete: {reply.finish_reason}")
-                if not reply.text.strip():
-                    raise RuntimeError("backend completed without a project report")
-                return reply.text, session_id
-            history.append({"role": "assistant", "content": reply.text,
-                            "tool_calls": [{"id": call.id, "type": "function", "function": {
-                                "name": call.name, "arguments": json.dumps(call.arguments)}}
-                                           for call in reply.tool_calls]})
-            for call in reply.tool_calls:
-                self._check(task["id"], cancel)
-                try:
-                    result = self._tool(workspace, call.name, call.arguments, cancel)
-                    self.store.record_event(task["id"], "tool", {"name": call.name, "ok": True})
-                except (ValueError, OSError, RuntimeError) as exc:
-                    if isinstance(exc, ProjectCancelled):
-                        raise
-                    result = {"ok": False, "error": str(exc)[:1000]}
-                    self.store.record_event(task["id"], "tool", {"name": call.name, "ok": False,
-                                                                            "error": result["error"]})
-                history.append({"role": "tool", "tool_call_id": call.id,
-                                "content": json.dumps(result, ensure_ascii=False)})
-        raise RuntimeError("project reached its tool-step limit without completion")
+            if time.monotonic() >= deadline:
+                raise ProjectTimeout("Pi project session timed out")
+
+        def dispatch(name: str, arguments: dict):
+            """Keep workspace confinement, cancellation and receipts at the host boundary."""
+            check_session()
+            try:
+                result = self._tool(workspace, name, arguments, cancel, deadline=deadline)
+                check_session()
+                self.store.record_event(task["id"], "tool", {"name": name, "ok": True})
+            except (ValueError, OSError, RuntimeError) as exc:
+                if isinstance(exc, (ProjectCancelled, ProjectTimeout)):
+                    raise
+                result = {"ok": False, "error": mask_secrets(str(exc))[:1000]}
+                self.store.record_event(task["id"], "tool", {
+                    "name": name, "ok": False, "error": result["error"]})
+            check_session()
+            return result
+
+        result = backend.run_session(BackendRequest(
+            messages=[{"role": "user", "content": task["goal"]}],
+            system=_SYSTEM, tools=_TOOLS, cwd=workspace, cancel=cancel,
+            timeout=timeout),
+            dispatch, session="project:" + task["id"], max_steps=steps)
+        check_session()
+        if result.status != "done":
+            raise RuntimeError(result.error or f"Pi session did not complete: {result.status}")
+        if not result.text.strip():
+            raise RuntimeError("Pi completed without a project report")
+        return result.text, result.session_id
 
     def _path(self, workspace: Path, value: str) -> Path:
         """Reject traversal, absolute names and links escaping the workspace."""
@@ -270,13 +272,17 @@ class ProjectManager:
             raise ValueError("git metadata is not an editable project artifact")
         return resolved
 
-    def _tool(self, workspace: Path, name: str, args: dict, cancel: Event):
+    def _tool(self, workspace: Path, name: str, args: dict, cancel: Event,
+              *, deadline: float | None = None):
         """Dispatch only fixed host tools; Markdown and model names never import code."""
         if not isinstance(args, dict):
             raise ValueError("tool arguments must be an object")
         if name == "read_file":
             path = self._path(workspace, args.get("path", ""))
-            if path.stat().st_size > 256_000:
+            metadata = path.stat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("read_file requires a regular file")
+            if metadata.st_size > 256_000:
                 raise ValueError("file exceeds the 256KB read limit")
             return {"ok": True, "path": str(path.relative_to(workspace)), "content": path.read_text()}
         if name == "write_file":
@@ -305,8 +311,13 @@ class ProjectManager:
             return {"ok": True, "files": entries}
         if name == "run_command":
             if not getattr(self.settings, "runtime_allow_unrestricted", False):
-                raise ValueError("API project commands require explicit RUNTIME_ALLOW_UNRESTRICTED=true; cwd alone is not a sandbox")
+                raise ValueError("project commands require explicit RUNTIME_ALLOW_UNRESTRICTED=true; cwd alone is not a sandbox")
             timeout = min(max(float(args.get("timeout", 60)), 1), 120)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProjectTimeout("Pi project session timed out")
+                timeout = min(timeout, remaining)
             return self._command(workspace, _argv(args.get("argv")), cancel, timeout)
         raise ValueError(f"unknown project tool: {name}")
 

@@ -1,8 +1,10 @@
 # personal-agent — Design & Architecture
 
-This document is the map for anyone who wants to understand, operate, or extend
-the system. For *using* it, see the [User Guide](USER_GUIDE.md); for setup, see
-the [README](../README.md).
+This document describes the personal stores, domain workflows and preserved
+legacy behavior. The default agent now runs actual Pi SDK 1.4.0; see the
+[runtime guide](RUNTIME_V2.md) for its model/tool loop, JSONL sessions, Slack/QQ,
+project jobs and approvals. Python hosts trusted tools and the deterministic
+daily workflow. For setup, see the [README](../README.md).
 
 Deep-dives on specific subsystems live in their own docs and are linked inline:
 [service layer](DESIGN_SERVICE_LAYER.md), [pipeline metrics](PIPELINE_METRICS.md),
@@ -36,8 +38,10 @@ Three ideas shape every decision in the codebase:
 
 ## 2. The pipeline
 
-One daily run is a [LangGraph](https://langchain-ai.github.io/langgraph/)
-`StateGraph(AssistantState)` invocation — nine phases, each a node:
+One daily run is a deterministic `DailyWorkflow` invocation in
+`agent/orchestrator.py`: nine ordered phase handlers sharing `AssistantState`,
+artifacts and resume checkpoints. It uses no LangGraph dependency. Pi can invoke
+the workflow as a trusted personal skill.
 
 ```
                 observations[]              profile
@@ -69,7 +73,7 @@ All under `agent/` (paths below are relative to `src/assistant/agent/`):
 ### State & resume
 
 `AssistantState` (a `TypedDict`, `agent/state.py`) is the shared bag threaded
-through the graph. Resilience follows one discipline, borrowed from the parent
+through the workflow. Resilience follows one discipline, borrowed from the parent
 rebase-agent project:
 
 - A `state.json` on disk holds the **phase to re-enter**, advanced only when a
@@ -83,7 +87,7 @@ rebase-agent project:
 ### Error handling
 
 Phases 3–9 each wrap their body in try/except and accumulate failures into
-`state["errors"]` (a reducer-merged list). A failure degrades the output — a
+`state["errors"]` (a list explicitly accumulated by the workflow driver). A failure degrades the output — a
 broken collector means fewer observations, a failed research phase means no
 papers — but never blocks the run. The seen-store is only updated *after* the
 email actually sends, so a delivery failure doesn't silently swallow items.
@@ -187,7 +191,11 @@ class Observation(TypedDict):
 
 ## 5. Service layer & chat
 
-The chat surface is a **typed action registry** (`actions.py`) — one table that
+Default chat reaches Pi through `agent/runtime/kernel.py`; the host exposes
+typed skills and enforces approvals. The action/repair architecture below
+describes retained handlers and the explicit `assistant legacy ask` path.
+
+The legacy chat surface is a **typed action registry** (`actions.py`) — one table that
 is the single source of truth for what the agent can *do*. It drives three
 consumers: the chat LLM's prompt (which actions it may emit), the executor, and
 the CLI/HTTP entry points. Handlers may return a structured `ActionResult`
@@ -209,8 +217,11 @@ profile/needs/summary), and status/profile queries.
 
 ### Images
 
-Attached images (a WeChat photo, an email attachment, `assistant ask
---image`) reach the agent one of two ways:
+Default image turns, including `assistant ask --image`, go through Pi with an
+image-capable model and host-enforced append-only logging restrictions. The
+following describe-chain options remain references for legacy image handlers.
+
+Legacy attached images reach the agent one of two ways:
 
 - **Natively multimodal main LLM** (`LLM_SUPPORTS_IMAGES=true`, e.g.
   qwen3.6-plus or Claude): chat attaches the image blocks directly to the
@@ -301,7 +312,11 @@ profile, routines, finance, health) into any single-domain analysis.
 
 ### Agentic task execution
 
-`task_runner.py` handles requests with no built-in pipeline (the copilot
+Default tasks use Pi sessions. Registered project jobs use confined host tools
+and independently configured verification; see [Personal projects](RUNTIME_V2.md#personal-projects).
+The following describes `assistant legacy task` and retained task records.
+
+`task_runner.py` handles legacy requests with no built-in pipeline (the copilot
 pattern): a bounded plan-and-execute loop — one registry action per controller
 turn, structured outcomes and source ids fed back, adapt on failure, finish
 with an evidence-backed report. Validated first read-only plan steps execute
@@ -471,6 +486,12 @@ and the research behind each metric:
 
 ## 9. Configuration
 
+Current model execution uses Pi. `runtime.toml` selects named routes with the
+Pi `api`, provider, model, thinking level and context size; see
+[Model backends](RUNTIME_V2.md#model-backends). The role/mixture settings below
+remain the compatibility interface for retained personal workflow calls, with
+each underlying completion executed by Pi.
+
 `config.py` is a Pydantic `Settings` reading `.env` (repo root, then CWD).
 `config/sources.yaml` holds the research follow-list. Secrets never live in
 code. `assistant init` writes `.env` interactively with live validation;
@@ -491,7 +512,7 @@ skeleton, so no credential is ever copied between users.
 
 `LLM_REVIEW` is a third, single-spec knob — the "strongest available reasoning" slot (`{model, base_url?, api_key?}`) resolvable as the `review` role and used by the local plan reviewer (`scripts/review_plan.py`, a development-process tool the runtime never invokes); it never joins the MoA role set.
 
-All three are **degrade-safe by construction**: `LLM_ROLES`/`LLM_MIXTURE`/`LLM_REVIEW` are parsed by a tolerant validator (`config.py`, via `NoDecode`) that falls back to `{}` on malformed JSON rather than raising — a bad optional routing config must never crash startup, since every command builds `Settings()`. A common malform is a *multi-line* value in `.env`: `dotenv` reads only its first physical line unless the whole JSON is wrapped in `'single quotes'`, so keep each on one line or quote it. Provider retries are owned by the platform (three total attempts with bounded backoff; SDK retries are disabled). Structured JSON keeps the provider stop reason: a normal parse error gets one repair, while `max_tokens` gets one doubled-budget retry capped at 16k, never the same doomed request twice. `complete_json(expect_keys=…)` additionally treats a well-formed but wrong-*shaped* object as a parse failure so it feeds that same repair round — the chat turn opts in with `("reply", "actions")`, because a tool-calling-tuned model prefixes its own `<tool_call>{"name": …}` payload and returning the first thing that parsed silently yielded an empty reply with no actions out of a response that held a good answer (2026-09-03). It is opt-in per call site since the ~19 callers expect different shapes. A 401 durably quarantines that endpoint+credential and an ambiguous 403 quarantines only that model; route fingerprints change with endpoint/key/model configuration, so unrelated or newly-fixed routes continue. `assistant init --check` force-probes every unique configured route and clears each route's quarantine only after that route succeeds.
+All three are **degrade-safe by construction**: `LLM_ROLES`/`LLM_MIXTURE`/`LLM_REVIEW` are parsed by a tolerant validator (`config.py`, via `NoDecode`) that falls back to `{}` on malformed JSON rather than raising — a bad optional routing config must never crash startup, since every command builds `Settings()`. A common malform is a *multi-line* value in `.env`: `dotenv` reads only its first physical line unless the whole JSON is wrapped in `'single quotes'`, so keep each on one line or quote it. Pi owns transient provider retries; the Python compatibility layer retains structured-output repair and durable route health. Structured JSON keeps the provider stop reason: a normal parse error gets one repair, while `max_tokens` gets one doubled-budget retry capped at 16k, never the same doomed request twice. `complete_json(expect_keys=…)` additionally treats a well-formed but wrong-*shaped* object as a parse failure so it feeds that same repair round — the chat turn opts in with `("reply", "actions")`, because a tool-calling-tuned model prefixes its own `<tool_call>{"name": …}` payload and returning the first thing that parsed silently yielded an empty reply with no actions out of a response that held a good answer (2026-09-03). It is opt-in per call site since the ~19 callers expect different shapes. A 401 durably quarantines that endpoint+credential and an ambiguous 403 quarantines only that model; route fingerprints change with endpoint/key/model configuration, so unrelated or newly-fixed routes continue. `assistant init --check` force-probes every unique configured route and clears each route's quarantine only after that route succeeds.
 
 In the MoA path itself (`llm._mixture`), transient failures remain independently retried per member, while durable auth/model quarantines are skipped before dispatch. Aggregation requires at least two final proposals; one survivor is returned directly and explicitly marked degraded instead of paying for a false synthesis. If an attempted aggregator raises or returns empty (e.g. a reasoning model spends its whole budget on hidden thinking), the call falls back to a surviving proposal rather than yielding nothing. Every mixture call is observable: each member/aggregator/fallback LLM span is stage-tagged, and a parent `mixture` span records member slots attempted/skipped/failed, cumulative and final proposals, aggregator attempted/skipped/failed/success, fallback/abandonment, and a deterministic degradation flag. The same numeric `moa` metrics row lands in events.db even for chat/task turns that have no tracer. Failed LLM spans persist only bounded metadata (`error_type`, integer HTTP status when available, and breaker classification), never exception text, response bodies, prompts, or credentials. `complete(..., mixture=False)` is the per-call escape hatch the task runner uses to keep simple/medium work single-model.
 
@@ -537,7 +558,7 @@ import `platform/`; `platform/` must never import `agent/`** — enforced by
 - **A new chat action** — add an `Action` to the registry in
   `agent/actions/registry.py` (name, params, handler, LLM-exposed?, slash
   alias). It becomes available over chat, slash commands, and HTTP automatically.
-- **A new pipeline phase** — add a node in `agent/orchestrator.py`, insert it
+- **A new daily phase** — add a handler in `agent/orchestrator.py`, insert it
   into the `_PHASES` list, give it an artifact and a `metrics.EXTRACTORS` entry.
 - **A new research source** — add it to `config/sources.yaml` (RSS/Atom URL,
   language). Per-source health tracking and the score floor handle the rest.
@@ -575,7 +596,7 @@ src/assistant/
 ├── platform/           SYSTEM — runtime, hosting, tenancy (never imports agent/)
 │   ├── config.py           Pydantic Settings (all .env knobs)
 │   ├── user_config.py      per-user config.env read/write (multi_tenant)
-│   ├── llm.py              Anthropic client (retry, JSON, roles, MoA; injected metrics sink)
+│   ├── llm.py              Pi-backed compatibility client (JSON, roles, MoA; injected metrics sink)
 │   ├── serve.py            loopback HTTP daemon (injected ServeServices) + SessionStore
 │   ├── jobs.py scheduler.py worker.py   durable job queue + in-process pool
 │   ├── dispatch.py         the job-kind contract (agent supplies handlers)

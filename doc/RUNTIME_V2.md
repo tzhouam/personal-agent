@@ -1,113 +1,155 @@
-# Runtime v2: channels, personal projects, memory and skills
+# Pi runtime: channels, personal projects, memory and skills
 
-The default `assistant ask`, `assistant task` and `assistant serve` commands use
-one bounded personal-agent kernel. Models and chat platforms are adapters; the
-kernel owns trusted tools, sourced context, approvals and durable results.
-Existing domain implementations remain the handlers behind personal skills.
+The default `assistant ask`, `chat`, `task` and `serve` commands run the actual
+**Pi SDK 1.4.0**. `createAgentSession`, `ModelRuntime` and `SessionManager` own
+model calls, tool sequencing, retries, compaction and persisted JSONL context.
+Python supplies typed personal tools, approvals, memory, delivery and project
+verification through a bounded stdio bridge.
 
-This guide covers the new runtime. The [existing user guide](USER_GUIDE.md) and
-[original design](DESIGN.md) remain references for the daily pipeline, personal
-records, website, résumé and deployed WeChat/email integrations. Where an older
-example uses `ask`, `task` or `serve`, use `assistant legacy …` to select that
-previous implementation explicitly.
+The engine uses the published `@earendil-works/pi-coding-agent` and `pi-ai`
+packages, including Pi's agent core. Development follows the
+[tzhouam/pi fork](https://github.com/tzhouam/pi) of canonical upstream
+[earendil-works/pi](https://github.com/earendil-works/pi). The pinned packages
+currently come from upstream npm releases. The host has no Python model/tool
+loop fallback and loads only the tools and resources explicitly supplied by this
+application.
 
-## Configuration and commands
+The nine-phase daily workflow remains a deterministic Python skill with its
+checkpoint, artifacts and existing stores. LangGraph is no longer a dependency.
+The [personal-workflow guide](USER_GUIDE.md) and [domain design](DESIGN.md)
+document those integrations. `assistant legacy …` explicitly selects preserved
+older chat/task entrypoints; these are not the default Pi runtime.
 
-Copy [runtime.example.toml](../runtime.example.toml) to
-`~/.personal-agent/runtime.toml`, or pass `--config /absolute/path/runtime.toml`.
-Configuration does not install a CLI, authenticate an account, start a OneBot
-server or join a Slack workspace.
+## Installation, configuration and commands
+
+Install Python 3.11+, Node.js 22.19+ and npm. Then install the Python package and
+explicitly install the pinned Pi host dependencies:
 
 ```sh
-assistant doctor --config /absolute/path/runtime.toml
-assistant backends --config /absolute/path/runtime.toml
-assistant doctor --config /absolute/path/runtime.toml --probe
+pip install -e .
+assistant pi install
+assistant pi status
+mkdir -p ~/.personal-agent
+cp runtime.example.toml ~/.personal-agent/runtime.toml
+# Export DEEPSEEK_API_KEY securely in your shell or service environment.
+assistant doctor --backend deepseek
+assistant doctor --backend deepseek --probe
 assistant ask "List my skills" --session personal
 assistant chat "Continue the same conversation" --session personal
 assistant serve
 ```
 
-`doctor` and `backends` report routes without exposing credential values.
-Availability means a CLI executable was found, or an API route has a configured
-key and model. It is not an account/model-access check until `--probe` makes a
-real request. Probe errors remain errors; an unavailable route is not replaced
-with a different account or model.
+`pi install` runs `npm ci --ignore-scripts --no-audit --no-fund` in the private
+`DATA_DIR/pi/host/` directory. Installation is an explicit operator command;
+ordinary turns do not fetch packages. `pi status` inspects the installed SDK
+without making a model request. Use `--data-dir PATH` consistently when operating
+an isolated root. Installing Pi does not authenticate a model account, start a
+OneBot server or join a Slack workspace.
+
+`doctor` reports both Pi availability and route configuration without exposing
+credential values. A configured API key/model or installed CLI executable does
+not prove account access. `doctor --probe` makes a real request through Pi to the
+selected route. Provider failures remain failures; the runtime does not silently
+select a different route.
 
 Runtime commands accept:
 
 | Option | Meaning |
 | --- | --- |
-| `--data-dir PATH` | Pin this command's personal-data root; otherwise use `DATA_DIR` or `~/.personal-agent` |
-| `--config PATH` | Read this runtime TOML file |
-| `--backend NAME` | Select an exact named route |
-| `--owner UID` | Resolve an active roster owner in multi-tenant mode; single-owner default is `default` |
-| `--session NAME` | Select a durable conversation and its approval scope; CLI default is `cli` |
+| `--data-dir PATH` | Personal-data root; otherwise `DATA_DIR` or `~/.personal-agent` |
+| `--config PATH` | Runtime TOML file |
+| `--backend NAME` | Exact named model route; the engine remains Pi |
+| `--owner UID` | Active roster owner in multi-tenant mode; default `default` |
+| `--session NAME` | Durable conversation and approval scope; CLI default `cli` |
 
 Keep these options consistent across `skills run`, `approve`, project and memory
-commands that should share state. The flags belong to the runtime command, for
-example `assistant skills list --data-dir /tmp/my-agent`.
+commands that should share state. Options follow the command, for example
+`assistant skills list --data-dir /tmp/my-agent`.
 
-Backend selection is `--backend`, then `RUNTIME_BACKEND`, then
-`[runtime].backend`. An `auto` selection chooses a configured Anthropic API, then
-OpenAI API, then an installed Codex/Claude/Gemini/Pi executable at startup. There
-is no request-time fallback after that selection. For reproducible behavior, name
-the route explicitly.
+Route selection is `--backend`, then `RUNTIME_BACKEND`, then `[runtime].backend`.
+`auto` chooses a configured Anthropic API, then OpenAI API, then an installed
+Codex/Claude/Gemini model adapter at startup. It does not change the engine or
+create request-time failover. Name the route explicitly for reproducibility.
 
-`[runtime]` controls `max_steps` (1–64), `workers` (1–16), and per-request `timeout`
-(1–3600 seconds). Project limits also accept `RUNTIME_PROJECT_TIMEOUT`,
-`RUNTIME_BACKEND_TIMEOUT` and `RUNTIME_PROJECT_MAX_STEPS` settings. Personal
-integration settings continue to use the existing `.env` configuration. Store
-secrets outside Git; runtime TOML rejects inline backend `api_key` values.
+`[runtime]` controls `max_steps` (1–64), `workers` (1–16), and session `timeout`
+(1–3600 seconds). Project sessions also use `RUNTIME_PROJECT_TIMEOUT` and
+`RUNTIME_PROJECT_MAX_STEPS`; route timeouts bound their duration too. Existing
+personal integration settings remain in `.env`. TOML rejects inline backend
+`api_key` values: use `api_key_env` instead. Export custom environment names in
+the service environment; supported Settings fields can also come from `.env`.
 
 ## Model backends
 
-| Kind | Protocol | Execution boundary |
-| --- | --- | --- |
-| `anthropic` | Anthropic-compatible Messages API | Typed host tools; provider/model/base URL are configurable |
-| `openai` | OpenAI-compatible Chat Completions API | Typed host tools; also supports compatible third-party endpoints |
-| `codex` | Authenticated `codex exec` JSON events | Controller tools are disabled natively; project execution uses an explicit workspace-write sandbox |
-| `claude` | Claude Code print/stream-JSON mode | Controller native tools and MCP are disabled; native project writes require explicit unrestricted opt-in |
-| `gemini` | Gemini CLI stream-JSON mode | Every call requires unrestricted/external-isolation opt-in because configured native tools cannot all be reliably disabled |
-| `pi` | Pi JSON event mode | Controller tools, MCP, extensions, context files and skills are disabled; native project writes require explicit unrestricted opt-in |
+Every route supplies a model to Pi. API routes use Pi's native provider transport;
+optional CLI adapters return individual completions to Pi, which continues to own
+the model/tool loop, conversation and tool policy.
 
-API routes need an actual supported model and credential. CLI routes use their
-own existing authentication; installing this Python project does not install or
-log in to those CLIs. The runtime parses authoritative terminal events and exit
-status, applies deadlines, and propagates cancellation. Partial output or a
-provider error is not reported as completed work.
+| Route kind | Model transport | Tool execution |
+| --- | --- | --- |
+| `openai` | Pi OpenAI-compatible Chat Completions | Typed Python host tools |
+| `anthropic` | Pi Anthropic Messages | Typed Python host tools |
+| `api` | Explicit Pi `api` transport and `provider` identifier | Typed Python host tools |
+| `codex` | Optional authenticated `codex exec` completion adapter | Pi dispatches host tools; native tools disabled |
+| `claude` | Optional Claude Code completion adapter | Pi dispatches host tools; native tools/MCP disabled |
+| `gemini` | Optional Gemini CLI completion adapter | Requires explicit external-isolation opt-in |
+
+A separately installed Pi CLI is not required. `--backend` chooses a model route,
+not an alternative agent engine. Inherited Pi skills, agent files, extensions,
+MCP servers and built-in filesystem/shell tools are not discovered automatically.
+The application provides its reviewed skill catalog and confined project tools.
 
 ### API route examples
 
+The sample selects DeepSeek's compatible API:
+
 ```toml
 [runtime]
-backend = "my_api"
+backend = "deepseek"
 
-[backends.my_api]
-kind = "openai"
-base_url = "https://your-provider.example/v1"
-model = "your-model-id"
-api_key_env = "MY_API_KEY"
-```
-
-Export `MY_API_KEY` in the service's environment. Standard credential names can
-also be supplied through the project's supported `.env` settings; arbitrary
-custom `*_env` names must be exported unless explicitly supported by the loader.
-The configuration example contains the standard Anthropic and OpenAI routes.
-
-For a compatible DeepSeek route:
-
-```toml
 [backends.deepseek]
 kind = "openai"
+api = "openai-completions"
+provider = "deepseek"
 base_url = "https://api.deepseek.com"
 model = "deepseek-flash"
 api_key_env = "DEEPSEEK_API_KEY"
+thinking_level = "off"
+context_window = 128000
 ```
 
-Select it with `--backend deepseek`. Provider model availability and account
-access are checked by a real `doctor --probe`, not inferred from this example.
+Use the provider's actual model ID, rather than assuming a marketing name is an
+API identifier. Model access and endpoint compatibility require a real probe;
+this example is not a verification result.
 
-### CLI route examples and permissions
+For other Pi-supported transports, configure an explicit API route:
+
+```toml
+[backends.my_api]
+kind = "api"
+api = "openai-completions"
+provider = "my-provider"
+base_url = "https://your-provider.example/v1"
+model = "your-model-id"
+api_key_env = "MY_API_KEY"
+thinking_level = "off"
+context_window = 128000
+```
+
+| Field | Purpose |
+| --- | --- |
+| `kind` | `openai`, `anthropic`, explicit `api`, or an optional CLI adapter |
+| `api` | Pi wire API, such as `openai-completions`, `openai-responses` or `anthropic-messages`; must match the endpoint |
+| `provider` | Explicit Pi provider identifier for the configured model |
+| `model`, `base_url` | Exact model ID and provider endpoint |
+| `api_key_env` | Environment variable holding the credential |
+| `thinking_level` | Pi reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; model support varies |
+| `context_window` | Advertised model context size in tokens, validated from 1024 to 10000000 |
+
+Existing `ANTHROPIC_*` and `OPENAI_*` settings still seed their named routes.
+Personal workflow `LLM` calls, including role routing and mixture proposals, use
+Pi underneath while retaining their existing text/structured-output interface.
+
+### Optional CLI model adapters
 
 ```toml
 [backends.codex]
@@ -115,29 +157,27 @@ kind = "codex"
 command = ["codex"]
 # model = "a-model-available-to-your-account"
 
-[backends.pi]
-kind = "pi"
-command = ["pi"]
+[backends.claude]
+kind = "claude"
+command = ["claude"]
+
+[backends.gemini]
+kind = "gemini"
+command = ["gemini"]
 allow_unrestricted = false
 ```
 
-A `command` is an argv array, never a shell string. Codex is launched with
-`--ignore-user-config`; its existing login is retained, while inherited apps,
-plugins, MCP configuration and model/provider settings are not loaded. If your
-Codex account depends on custom routing, specify that routing explicitly through
-the route's `model` and non-secret global `-c` arguments in `command`, or select a
-direct API route. Controller turns cannot use Codex's native shell, browser or
-other native execution tools to evade the host's approvals.
+These optional adapters use their own existing login. A `command` is an argv
+array, never a shell string. Codex ignores inherited user apps/plugins/MCP
+configuration and runs with native execution disabled. Specify custom routing
+explicitly through `model` or non-secret command arguments. Claude's native tools
+and MCP are also disabled. Gemini requires `allow_unrestricted = true` and an
+externally isolated environment because its configured native tools cannot all
+be reliably disabled. No adapter takes over the project's coding loop.
 
-For Claude and Pi, `allow_unrestricted = true` is required before native project
-writes. Gemini requires it for controller turns as well. These CLIs do not
-provide this runtime with the same enforceable filesystem sandbox as Codex;
-operate them within an externally isolated environment appropriate for the work.
-Setting a process's working directory alone does not constrain filesystem or
-network access. The runtime never silently opts into unrestricted mode.
-
-There is one selected route per runtime application. Named routes make switching
-explicit; they do not imply a concurrently running team of different CLI agents.
+There is one selected route per runtime application. Named routes do not create
+a parallel team of different CLI agents. Development verification can use fake
+Pi providers or a separately configured API route; a CLI adapter is not required.
 
 ## Channels
 
@@ -223,9 +263,9 @@ image analysis merely because the platform supports image attachments.
 
 The existing authenticated loopback bridge, WeChat/WeCom and email integrations
 remain connected through the new runtime callback. Image-bearing turns through
-those retained paths, or `assistant ask "…" --image /path/photo.png`, use the
-existing image arbiter and require an explicit compatible vision configuration.
-Their append-only image-action restrictions remain in force. See
+those paths, or `assistant ask "…" --image /path/photo.png`, run through Pi with
+an image-capable configured model. The host retains append-only image logging
+and requires text-only confirmation for other mutations. See
 [the WeChat setup guide](WECHAT_OPENCLAW.md) and
 [existing image design](DESIGN.md#images).
 
@@ -282,10 +322,10 @@ In chat, `project_submit` first creates a scoped approval; approval queues it fo
 the worker. Register directories through the CLI, not through model-generated
 paths. For one owner, tasks sharing a workspace are serialized.
 
-API backends receive confined read/list/write tools. An arbitrary host subprocess
-requested by an API model requires the operator's explicit unrestricted-mode
-opt-in. Native backends use their own project execution path and the permissions
-described above. Every run records its frozen workspace, full goal, state,
+Every project uses one Pi session with confined read/list/write host tools.
+An arbitrary model-requested host subprocess requires the operator's explicit
+`RUNTIME_ALLOW_UNRESTRICTED=true` opt-in. Optional CLI model adapters use this
+same project path. Every run records its frozen workspace, full goal, state,
 attempts, model session, report, verification results, changed artifacts and
 content hashes.
 
@@ -354,6 +394,10 @@ For a Slack/QQ request, reply `/approve APPROVAL_ID` in that original conversati
 Use the original data/config/owner options for CLI approval. Reusing a grant,
 changing its arguments or using it from another session is refused.
 
+An approval pause aborts the active Pi run before another tool executes. The
+approved action executes once at the host boundary, and its outcome enters the
+scoped Pi transcript as context for a subsequent turn.
+
 Full daily aliases and standalone research/todos/consolidate require approval
 because they can publish the website or send email. Even `daily` with
 `dry_run: true` remains gated: the retained pipeline's dry-run only skips digest
@@ -390,9 +434,12 @@ under `DATA_DIR/users/<uid>/`.
 ```text
 ~/.personal-agent/
 ├── runtime.toml                   # optional new route/channel configuration
-├── runtime.sqlite3                # conversations, approvals, projects and run events
+├── runtime.sqlite3                # conversation audit, approvals, projects and run events
 ├── runtime_memory.sqlite          # append-only sourced facts
 ├── runtime_inbox.sqlite3          # native-channel input/reply/delivery receipts
+├── pi/
+│   ├── host/                     # explicitly installed SDK 1.4.0 host/dependencies
+│   └── sessions/<scope-hash>/     # authoritative Pi JSONL, manifest and session lock
 ├── runtime/
 │   ├── project-evidence/          # independently verified run proof
 │   ├── skill-drafts/              # reviewable proposed procedures
@@ -413,8 +460,12 @@ Starting the runtime creates only its new stores; it does not bulk-migrate old
 records, flatten them into a Wiki, or discard the old Git repositories. Explicit
 use of legacy finance/health handlers retains their tested migration behavior:
 old single-file records become readable through daily shards while the original
-legacy file remains intact. New runtime conversations stay in the new store;
-older conversations remain available through compatibility recall.
+legacy file remains intact. Pi's scoped JSONL files hold authoritative model
+context; SQLite keeps audit and delivery state. Exact session manifests prevent
+cross-room or cross-owner resumption, with a process lock around each transcript.
+History from a retained bridge is imported once into a fresh Pi session; older
+records also remain available through compatibility recall. Session directories
+are private, and prompt/tool credentials are redacted before persistence.
 
 Back up the data root before switching an existing deployment, stop its old
 process, and use one daemon for that root. Keep the previous code revision and
@@ -434,28 +485,35 @@ when upgrading; source changes are not evidence of production deployment.
 | Module | Responsibility |
 | --- | --- |
 | `platform/runtime/contracts.py` | Provider and trusted channel envelopes |
-| `platform/runtime/backends.py` | Bounded API and authenticated native-CLI adapters |
+| `platform/runtime/pi.py` | Scoped Pi process/session bridge, installation and host tool RPC |
+| `platform/runtime/pi_host/` | Actual Pi SDK sessions, native provider transports and JSONL context |
+| `platform/runtime/backends.py` | Optional CLI completion adapters and retained compatibility utilities |
 | `platform/runtime/channels/` | Slack/QQ admission, protocol ACK, reconnects and replies |
 | `platform/runtime/store.py`, `inbox.py` | Durable state, atomic claims, approvals and delivery receipts |
-| `agent/runtime/kernel.py` | Bounded personal tool loop and exact-action policy |
-| `agent/runtime/projects.py` | Workspace execution, cancellation, verification and evidence |
+| `agent/runtime/kernel.py` | Personal tools, sourced context and exact-action policy supplied to Pi |
+| `agent/runtime/projects.py` | One Pi session per job, confined host tools, cancellation and independent evidence |
+| `agent/orchestrator.py` | Framework-free deterministic daily workflow and resume checkpoint |
 | `agent/runtime/memory.py`, `skills.py` | Sourced context, preservation wrappers and reviewed procedures |
 | `agent/runtime/app.py`, `runtime_cli.py` | Process/CLI composition and compatibility with retained services |
 
 Dependency direction remains `agent/ → platform/`. Model and transport adapters
-cannot import the personal agent layer. The design references
-[bothouse](https://github.com/zuiho-kai/bothouse) for channel/workspace orchestration
-and [Pi](https://github.com/earendil-works/pi) for a small extensible kernel and
-progressive context/skills.
+cannot import the personal agent layer. The application builds directly on
+[Pi](https://github.com/earendil-works/pi), with development fork
+[tzhouam/pi](https://github.com/tzhouam/pi). [bothouse](https://github.com/zuiho-kai/bothouse)
+informs channel/workspace orchestration.
 
 ```sh
 pip install -e . pytest
 python -m pytest -q
+cd src/assistant/platform/runtime/pi_host
+npm ci --ignore-scripts --no-audit --no-fund
+npm run check
+node --test test/session.test.mjs
 ```
 
-Automated suites use real scratch stores/files and fixture model/transport edges,
+Automated suites use scratch stores/files and fixture model/transport edges,
 including application/CLI journeys, approvals, restart recovery, tenant isolation,
 channel deduplication and verification commands. The exact results and separately
-attempted live-provider checks are recorded in [REWRITE_TODO.md](../REWRITE_TODO.md).
+attempted live-provider checks are recorded in [PI_TODO.md](../PI_TODO.md).
 A passing fixture suite is not a real Slack/QQ account verification, a production
 migration or a deployment. No live channel connection is enabled by default.

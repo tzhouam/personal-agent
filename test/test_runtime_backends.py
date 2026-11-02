@@ -1,4 +1,4 @@
-"""Provider contracts use fake transports/processes; live checks are explicit CLI work."""
+"""Compatibility transports use local fakes; no model CLI or paid API is run."""
 
 import asyncio
 import json
@@ -165,6 +165,47 @@ def test_cli_structured_controller_normalizes_tools(tmp_path, kind):
     assert "bypassPermissions" not in args
 
 
+@pytest.mark.parametrize("kind", ["codex", "claude", "gemini", "pi"])
+def test_pi_cli_completion_without_host_tools_stays_in_controller_mode(tmp_path, kind):
+    """An empty tool schema still disables native execution and decodes model JSON."""
+    payload = json.dumps({"text": "A plain model answer", "tool_calls": []})
+    backend = build_backend(fake_cli(tmp_path, kind, protocol(kind, payload)))
+    marker = tmp_path / "must-not-exist"
+    request = BackendRequest(messages=[{"role": "user", "content": f"literal $(touch {marker})"}],
+                             tools=[], cwd=tmp_path, controller_mode=True,
+                             session_id="pi-owned-session", allow_write=True)
+    result = backend.complete(request)
+    assert result.text == "A plain model answer" and result.tool_calls == []
+    assert not marker.exists()
+    prompt = (tmp_path / "prompt.txt").read_text()
+    assert "Return ONLY JSON" in prompt and prompt.endswith("[]")
+    args = json.loads((tmp_path / "argv.json").read_text())
+    assert "pi-owned-session" not in args and not any("touch" in arg for arg in args)
+    if kind == "codex":
+        disabled = {args[index + 1] for index, arg in enumerate(args) if arg == "--disable"}
+        assert disabled >= {"shell_tool", "unified_exec", "multi_agent", "apps", "plugins",
+                            "code_mode_host", "browser_use", "computer_use", "image_generation"}
+        assert "--ephemeral" in args and args[args.index("--sandbox") + 1] == "read-only"
+    elif kind == "claude":
+        assert args[args.index("--tools") + 1] == ""
+        assert "--strict-mcp-config" in args
+        assert args[args.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+        assert "bypassPermissions" not in args
+    elif kind == "gemini":
+        assert args[args.index("--approval-mode") + 1] == "plan"
+    else:
+        assert set(args) >= {"--no-session", "--no-tools", "--no-mcp", "--no-extensions",
+                            "--no-context-files", "--no-skills"}
+
+
+@pytest.mark.parametrize("kind", ["codex", "claude", "gemini", "pi"])
+def test_empty_schema_controller_rejects_unstructured_native_answer(tmp_path, kind):
+    """A native success claim cannot bypass the structured completion contract."""
+    backend = build_backend(fake_cli(tmp_path, kind, protocol(kind, "I executed your task")))
+    with pytest.raises(BackendError, match="structured JSON"):
+        backend.complete(BackendRequest(messages=[], tools=[], cwd=tmp_path, controller_mode=True))
+
+
 def test_codex_resume_uses_explicit_thread_and_supported_flags(tmp_path):
     """Resume has no --sandbox/--cd flags and must not select another thread."""
     backend = build_backend(fake_cli(tmp_path, "codex", protocol("codex", "done")))
@@ -217,6 +258,22 @@ def test_codex_custom_command_cannot_replace_host_safety_policy(tmp_path, overri
     config = replace(base, command=base.command + ('-c', override))
     with pytest.raises(BackendError, match='host safety'):
         build_backend(config).complete(BackendRequest(messages=[], tools=TOOLS, cwd=tmp_path))
+
+
+@pytest.mark.parametrize("override", [
+    ("--sandbox=danger-full-access",), ("--ask-for-approval=never",),
+    ("-sdanger-full-access",), ("-aon-request",), ("--full-auto",), ("--yolo",),
+    ("--enable", "shell_tool"), ("--enable=plugins",),
+    ("-c", "features.unified_exec=true"),
+])
+def test_empty_schema_controller_rejects_custom_permission_override(tmp_path, monkeypatch, override):
+    """Configured argv cannot enable native tools during a Pi model completion."""
+    invoked = []
+    monkeypatch.setattr(backends, "_run_process", lambda *args: invoked.append(args))
+    backend = build_backend(BackendConfig(kind="codex", command=("unavailable-wrapper", *override)))
+    with pytest.raises(BackendError, match="host sandbox|host safety"):
+        backend.complete(BackendRequest(messages=[], tools=[], cwd=tmp_path, controller_mode=True))
+    assert invoked == []
 
 
 def test_gemini_controller_requires_explicit_unrestricted_opt_in(tmp_path):

@@ -8,11 +8,11 @@ import threading
 
 from assistant.platform.config import DEFAULT_UID, Settings
 from assistant.platform.registry import UserRegistry
-from assistant.platform.runtime.backends import build_backend
 from assistant.platform.runtime.channels import QQChannel, QQConfig, SlackChannel, SlackConfig
 from assistant.platform.runtime.config import RuntimeConfig, load_runtime_config
 from assistant.platform.runtime.contracts import ChannelEvent
 from assistant.platform.runtime.inbox import Inbox
+from assistant.platform.runtime.pi import build_pi_backend
 from assistant.agent.runtime.kernel import Kernel
 
 log = logging.getLogger("assistant.runtime")
@@ -79,9 +79,12 @@ class RuntimeApplication:
         """Cache runtime state per owner, never a shared personal-memory context."""
         scoped = scoped or self.scoped_settings(owner)
         with self._kernel_lock:
+            route = (load_runtime_config(scoped, path=self.config.path,
+                                         backend=self.config.backend).route()
+                     if self.config.path is not None else self.config.route())
+            backend = build_pi_backend(route, scoped.data_dir)
             if owner not in self._kernels:
                 settings = scoped
-                backend = build_backend(self.config.route())
                 kernel = Kernel(settings, backend, max_steps=self.config.max_steps,
                                 timeout=self.config.timeout)
                 self._kernels[owner] = kernel
@@ -95,24 +98,23 @@ class RuntimeApplication:
                 kernel.memory.settings = scoped
                 kernel.skills.settings = scoped
                 kernel.projects.settings = scoped
+                kernel.backend = backend
+                kernel.projects.backend = backend
             return self._kernels[owner]
 
     def handle_turn(self, text, settings, *, session, history=None,
                     image_paths=None, rejected_images=None):
         """Adapt the new kernel to existing HTTP/email delivery and image gates."""
-        from assistant.agent.chat.agent import TurnResult, handle_turn
-        if image_paths or rejected_images:
-            # Retain the established image arbiter and append-only action policy.
-            # Unsupported configured vision routes fail explicitly, never ignore images.
-            from assistant.platform.llm import LLM
-            return handle_turn(text, settings, LLM(settings), history=history,
-                               image_paths=image_paths, rejected_images=rejected_images)
+        from assistant.agent.chat.agent import TurnResult
         kernel = self.kernel(settings.uid, scoped=settings)
         key = "bridge:" + session
         if history:
             kernel.seed_history(key, history)
-        result = kernel.turn(text, session=key, cancel=self.stop)
-        return TurnResult(result.text, "success" if result.status == "done" else "neutral")
+        result = kernel.turn(text, session=key, cancel=self.stop,
+                             image_paths=image_paths, rejected_images=rejected_images)
+        outcome = ("success" if result.status == "done" else
+                   "neutral" if result.status == "awaiting_approval" else "fail")
+        return TurnResult(result.text, outcome)
 
     async def ingest(self, event: ChannelEvent) -> None:
         """Persist a trusted envelope promptly; no provider call blocks ingestion."""
@@ -173,7 +175,8 @@ class RuntimeApplication:
             worked = False
             for kernel in list(self._kernels.values()):
                 try:
-                    self.scoped_settings(kernel.settings.uid)
+                    scoped = self.scoped_settings(kernel.settings.uid)
+                    kernel = self.kernel(kernel.settings.uid, scoped=scoped)
                 except ValueError:
                     continue
                 pending = kernel.projects.next_queued()
@@ -184,7 +187,8 @@ class RuntimeApplication:
                     # A complete report remains queryable after restart and is added
                     # to the originating conversation without inventing a delivery.
                     kernel.store.add_message(result["session"], "assistant",
-                        f"Project task {result['id']}: {result['status']}\n{result['report']}")
+                        f"Project task {result['id']}: {result['status']}\n{result['report']}",
+                        origin="external_result")
                 self.publish_completions(kernel)
             if not worked:
                 await asyncio.sleep(0.3)

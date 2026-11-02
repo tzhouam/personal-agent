@@ -1,5 +1,8 @@
 # Rewrite checklist and handoff
 
+Current work is tracked in [PI_TODO.md](PI_TODO.md). The checklist below is the
+historical custom-runtime delivery, superseded by actual Pi adoption.
+
 Source of design decisions: [REWRITE_PLAN.md](REWRITE_PLAN.md).
 
 ## Current checkpoint

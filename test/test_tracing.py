@@ -130,7 +130,7 @@ def test_moa_proposers_stay_traced(monkeypatch, tmp_path):
                     return Resp("AGG" if m == "agg" else f"p-{m}")
         return C()
 
-    monkeypatch.setattr(llm_mod.anthropic, "Anthropic", make_client)
+    monkeypatch.setattr(llm_mod, "_PiClient", make_client)
     path = tmp_path / "trace.jsonl"
     tr.init("run-moa", path)
     s = Settings(_env_file=None, anthropic_api_key="k", anthropic_model="d",

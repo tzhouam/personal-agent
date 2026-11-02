@@ -1,25 +1,27 @@
 # personal-agent
 
 A personal agent that chats through **Slack, QQ, WeChat or email**, works on your
-registered projects, and remembers the decisions behind them. Choose an API model
-or an authenticated local Codex, Claude Code, Gemini or Pi CLI. Existing personal
-workflows are discoverable skills rather than the shape of the agent's main loop.
+registered projects, and remembers the decisions behind them. Its agent engine is
+the actual **Pi SDK 1.4.0**: `@earendil-works/pi-coding-agent`, `pi-agent-core` and
+`pi-ai`. Choose an API model or an optional authenticated CLI model adapter.
+Existing personal workflows are discoverable skills.
 
-The new default is a small tool-based runtime with durable conversations, project
-jobs, sourced memory and explicit approvals. The original daily assistant remains
-available: profile maintenance, GitHub and research digests, reading and todos,
+Pi owns the model/tool loop and durable JSONL conversations. Python supplies
+trusted personal tools, project jobs, sourced memory and explicit approvals. The
+nine-phase daily workflow runs deterministically without LangGraph. Personal work
+remains available: profile maintenance, GitHub and research digests, reading and todos,
 finance and health records, website publishing, résumé proposals, reminders,
 routines and reusable workflows.
 
 [Runtime guide](doc/RUNTIME_V2.md) · [Configuration example](runtime.example.toml) ·
 [Existing personal-workflow guide](doc/USER_GUIDE.md) ·
-[Implementation plan](REWRITE_PLAN.md) · [Validation record](REWRITE_TODO.md)
+[Pi adoption plan](PI_PLAN.md) · [Current checklist](PI_TODO.md)
 
-## Start with a local CLI
+## Install and choose a model
 
-Requirements: **Python 3.11+** and either a configured API provider or a separately
-installed, authenticated agent CLI. A basic Codex-backed conversation needs no
-GitHub token, email account, or new model API key.
+Requirements: **Python 3.11+**, **Node.js 22.19+**, npm and a configured model route.
+The example selects DeepSeek's `deepseek-flash` API model; use the model ID your
+provider exposes. GitHub, email and chat-platform accounts are optional.
 
 ```sh
 python -m venv .venv
@@ -27,18 +29,20 @@ python -m venv .venv
 pip install -e .
 mkdir -p ~/.personal-agent
 cp runtime.example.toml ~/.personal-agent/runtime.toml
-
-# Install/authenticate Codex separately if it is not already available.
-assistant doctor --backend codex
-assistant doctor --backend codex --probe
+assistant pi install
+assistant pi status
+# Export DEEPSEEK_API_KEY securely in this shell or your service environment.
+assistant doctor --backend deepseek
+assistant doctor --backend deepseek --probe
 assistant ask "Remember that my Orchid project uses SQLite" --session personal
 assistant ask "What database does Orchid use?" --session personal
 ```
 
-`doctor` checks configuration and executable/credential availability. `--probe`
-makes a real model request. A failed selected route reports a failure; it does not
-silently switch providers. The sample configuration selects Codex and leaves
-Slack and QQ disabled until you configure them.
+`assistant pi install` explicitly installs the pinned SDK dependencies using
+`npm ci --ignore-scripts` under the data root. Ordinary chat never installs
+packages. `doctor` checks Pi and model configuration; `--probe` makes a real model
+request through Pi. A failed selected route reports a failure. Slack and QQ stay
+disabled in the sample until configured.
 
 `assistant init` is still the setup wizard for the retained GitHub/email/website
 integrations. It is optional for the basic new runtime.
@@ -57,7 +61,7 @@ assistant project status TASK_ID
 assistant project events TASK_ID
 ```
 
-The coding backend runs in the registered workspace. The host then executes your
+Pi runs with confined host tools for the registered workspace. The host then executes your
 configured verification commands independently and records their exit codes,
 output, changed artifacts and hashes. A model saying “tests passed” is not
 verification. A task can finish with `verified: false` when no verification command
@@ -77,13 +81,12 @@ Slack/QQ conversation when there is one. CLI-started tasks remain inspectable in
 the CLI. Interrupted work is marked for inspection after restart rather than
 silently repeated.
 
-**Execution boundaries:** Codex uses explicit read-only or workspace-write sandbox
-modes and ignores inherited user plugins/MCP configuration while preserving its
-login. Select custom model/provider routing explicitly in the runtime route.
-Claude and Pi native project writes require `allow_unrestricted = true` and
-external isolation; Gemini requires that opt-in for controller turns too. An
-operator's `--verify` commands execute project code on the **trusted host**,
-separately from any model backend sandbox. See the [backend details](doc/RUNTIME_V2.md#model-backends).
+**Execution boundaries:** every project uses Pi's model/tool loop and the same
+path-checked host file tools. Model-requested host commands require explicit
+`RUNTIME_ALLOW_UNRESTRICTED=true`; a working directory is not an OS sandbox.
+Your registered `--verify` commands execute project code on the **trusted host**.
+Optional Codex/Claude/Gemini adapters supply individual model completions to Pi;
+they do not take over project execution. See the [backend details](doc/RUNTIME_V2.md#model-backends).
 
 ## Connect Slack or QQ
 
@@ -99,8 +102,8 @@ its credentials through environment references, and run `assistant serve`.
 QQ support here means **OneBot v11**, not Tencent's separate official QQ Bot API.
 The assistant does not install or log in to NapCat for you. Native Slack/QQ
 attachments currently provide metadata only; they do not imply image analysis.
-The retained bridge and `assistant ask --image` support the existing image path
-when an appropriate vision configuration is supplied.
+The retained bridge and `assistant ask --image` pass image turns through Pi with
+the existing append-only logging policy; configure an image-capable model.
 
 Detailed scopes, event subscriptions, configuration and delivery recovery are in
 [the channel setup guide](doc/RUNTIME_V2.md#channels).
@@ -190,8 +193,9 @@ runtime creates separate stores; it does not bulk-convert existing personal data
 Explicit use of an old-format finance/health skill retains the existing tested
 migration behavior and preserves the original legacy file.
 
-New conversations/project state live in `runtime.sqlite3`, sourced facts in
-`runtime_memory.sqlite`, and native-channel receipts in `runtime_inbox.sqlite3`.
+Pi conversation transcripts and exact-session manifests live under `pi/sessions/`.
+`runtime.sqlite3` keeps conversation audit, approvals and project state; sourced
+facts live in `runtime_memory.sqlite`, and channel receipts in `runtime_inbox.sqlite3`.
 Project proof and reviewed skill procedures live under `runtime/`. See the
 [full data layout and upgrade notes](doc/RUNTIME_V2.md#data-and-upgrading).
 
@@ -204,20 +208,25 @@ A local CLI can itself call a remote model service.
 ```sh
 pip install -e . pytest
 python -m pytest -q
+cd src/assistant/platform/runtime/pi_host
+npm ci --ignore-scripts --no-audit --no-fund
+npm run check
+node --test test/session.test.mjs
 ```
 
 Tests use scratch data and fixture boundaries for model/channel services. Live
 provider checks and deployment status are recorded separately in
-[REWRITE_TODO.md](REWRITE_TODO.md); fixture success does not establish that a real
+[PI_TODO.md](PI_TODO.md); fixture success does not establish that a real
 Slack/QQ account is connected. No production deployment is implied by this rewrite.
 
 The dependency boundary remains `agent/ → platform/`; composition roots may import
 both. See [CLAUDE.md](CLAUDE.md) for repository conventions and
 [the runtime guide](doc/RUNTIME_V2.md) for the new module map.
 
-The design draws on [bothouse](https://github.com/zuiho-kai/bothouse)'s channel and
-workspace orchestration and [Pi](https://github.com/earendil-works/pi)'s small
-agent-kernel, context and skill concepts. These are reference designs; the runtime
-is implemented here around this project's existing personal stores and workflows.
+The runtime builds directly on [Pi](https://github.com/earendil-works/pi); its
+development fork is [tzhouam/pi](https://github.com/tzhouam/pi). The pinned SDK
+currently comes from the published upstream packages. [bothouse](https://github.com/zuiho-kai/bothouse)
+informs the channel and workspace design. Personal stores and workflow handlers
+remain maintained in this repository.
 
 License: [MIT](LICENSE).

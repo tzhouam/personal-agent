@@ -19,7 +19,7 @@ class ToolCall:
 
 @dataclass
 class BackendRequest:
-    """One completion or native-agent run, scoped to an explicit workspace."""
+    """A Pi session or single model completion, scoped to an explicit workspace."""
 
     messages: list[dict]
     system: str = ""
@@ -30,6 +30,9 @@ class BackendRequest:
     cancel: Event | None = None
     allow_write: bool = False
     max_tokens: int = 4096
+    images: list[str | dict] = field(default_factory=list)
+    thinking_level: str = ""
+    controller_mode: bool = False
 
 
 @dataclass
@@ -54,10 +57,14 @@ class BackendConfig:
     api_key: str = field(default="", repr=False)
     timeout: float = 120
     allow_unrestricted: bool = False
+    api: str = ""
+    provider: str = ""
+    thinking_level: str = ""
+    context_window: int = 128000
 
 
 class Backend(Protocol):
-    """API models expose host tools; CLI agents advertise native execution."""
+    """Single-completion transport retained for adapters and injected test seams."""
 
     kind: str
     capabilities: frozenset[str]

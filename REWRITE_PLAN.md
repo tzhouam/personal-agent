@@ -1,5 +1,9 @@
 # Personal agent rewrite
 
+The current architecture is specified in [PI_PLAN.md](PI_PLAN.md), following the
+user's instruction to develop on actual Pi. The plan below records the earlier
+custom-runtime proposal and is retained as implementation history.
+
 ## Goal and current state
 
 Replace the pipeline-first assistant with a small, extensible personal-agent runtime:
