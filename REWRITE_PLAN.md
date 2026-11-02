@@ -102,8 +102,11 @@ require separate credentials and explicit authorization to communicate.
 - Updated user direction: use direct DeepSeek V4.1 Flash API for verification;
   do not use Codex for verification. Direct API tests are authoritative.
 - User: maintain a local plan and checklist throughout the work.
-- Confirm proposed delivery shape: new default runtime, preserved existing stores
+- Confirmed delivery shape: new default runtime, preserved existing stores
   and legacy workflows as skills, Slack Socket Mode + QQ OneBot first.
+- Delivery: [draft PR #36](https://github.com/tzhouam/personal-agent/pull/36),
+  implementation commit `003a8f9`. Repository write access was restored after the
+  user installed the connector on their personal account. No merge or deployment.
 - Repo requires shared design understanding before a nontrivial rewrite. Its
   referenced grilling skill is absent; follow the stated one-question-at-a-time
   review rule directly rather than inventing a missing skill.

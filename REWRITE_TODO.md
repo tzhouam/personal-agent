@@ -6,9 +6,9 @@ Source of design decisions: [REWRITE_PLAN.md](REWRITE_PLAN.md).
 
 Branch: `refactor/agent-runtime-v2`; base: `73ecfd1`.
 Status: implementation, full regression, clean installation and direct API
-verification complete. Delivery is a local commit and portable patch/bundle.
-GitHub publishing is blocked by repository write access (integration and Git push
-both returned 403). Live verification used DeepSeek only, per the user's direction.
+verification complete. Published for review in [draft PR #36](https://github.com/tzhouam/personal-agent/pull/36).
+Repository access is restored. The PR is not merged or deployed. Live verification
+used DeepSeek only, per the user's final direction.
 
 ## Discovery and decisions
 
@@ -49,10 +49,13 @@ both returned 403). Live verification used DeepSeek only, per the user's directi
 - [x] Check clean installation, CLI help/doctor and final diff.
 - [x] Record material limitations and live integrations not verified.
 - [x] Commit completed implementation and prepare reviewable local delivery.
-- [ ] Publish GitHub draft PR once repository write access is granted.
+- [x] Publish GitHub draft PR once repository write access is granted: [#36](https://github.com/tzhouam/personal-agent/pull/36).
 
 ## Work log
 
+- Delivery complete: the user installed the connector on the personal account;
+  Git push succeeded and draft PR #36 was created. Implementation commit is
+  `003a8f9`; this checklist update records the restored access and PR link.
 - Discovery: existing skills are runbook Markdown, not an executable framework.
 - Risk inventory: research/todos/consolidate CLI phases can publish the website;
   approval policy must cover indirect effects, not only the website phase name.
